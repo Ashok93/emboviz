@@ -317,16 +317,18 @@ class Gr00tAdapter(VLAModel):
                 vec = proprio_vec
             else:
                 # GR00T declared a state key whose name we can't classify.
-                # Warn so users know it's filled with zeros rather than
-                # discovering it silently in a diagnostic report.
-                _warnings.warn(
-                    f"GR00T state key '{sk}' is not recognised "
-                    "(no 'gripper'/'eef'/'pose'/'joint' substring); filling "
-                    f"with zeros of shape ({expected_dim},). Override via a "
-                    "custom adapter subclass if your embodiment needs it.",
-                    stacklevel=2,
+                # Refuse to silently zero-fill — that produces meaningless
+                # diagnostic numbers. Require an explicit user-side mapping.
+                raise ValueError(
+                    f"GR00T embodiment '{self._embodiment_name}' declares "
+                    f"state key '{sk}' (expected dim {expected_dim}) that "
+                    "we cannot route from Scene automatically (key name "
+                    "does not contain 'gripper'/'eef'/'pose'/'joint'). "
+                    "Subclass Gr00tAdapter and override _build_observation "
+                    "to fill this key with the right Scene field — we will "
+                    "NOT silently zero-fill (that produces meaningless "
+                    "diagnostic outputs)."
                 )
-                vec = np.zeros(expected_dim, dtype=np.float32)
             if vec.size != expected_dim:
                 raise ValueError(
                     f"GR00T state key '{sk}' expects dim {expected_dim} "

@@ -136,12 +136,19 @@ def _droid_observation_builder(scene: Scene) -> dict:
 
 
 def _libero_observation_builder(scene: Scene) -> dict:
-    """openpi LIBERO observation format — 2 cameras + state(8)."""
+    """openpi LIBERO observation format — 2 cameras (HWC uint8) + state(8).
+
+    Per openpi.policies.libero_policy.make_libero_example, LiberoInputs
+    expects ``observation/image`` and ``observation/wrist_image`` as HWC
+    ``(H, W, 3)`` uint8 arrays — NOT CHW. Feeding CHW silently produces
+    garbage outputs (openpi's image pipeline reinterprets the bytes
+    without erroring) and the model falls back to near-mean predictions.
+    """
     return {
         "observation/image":
-            _to_chw_uint8(_require_image(scene, "primary")),
+            np.asarray(_require_image(scene, "primary"), dtype=np.uint8),
         "observation/wrist_image":
-            _to_chw_uint8(_require_image(scene, "wrist", "wrist_left")),
+            np.asarray(_require_image(scene, "wrist", "wrist_left"), dtype=np.uint8),
         "observation/state":
             _require_state_exact(scene, 8, "libero"),
         "prompt": _require_instruction(scene, "libero"),
