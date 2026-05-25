@@ -1,0 +1,48 @@
+[project]
+name = "policylens"
+version = "0.0.1"
+description = "PolicyLens — interpretability/debugging tool for robot policies. MVP: attribute Diffusion Policy actions on LeRobot PushT."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    # Core ML
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "numpy>=1.26,<2.0",
+    # LeRobot — provides pretrained Diffusion Policy + pusht dataset
+    "lerobot>=0.3.0",
+    # Attribution
+    "captum>=0.7.0",
+    # Visualization
+    "matplotlib>=3.8",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4.9",
+    "Pillow>=10.0",
+    # Utilities
+    "tqdm>=4.66",
+    "huggingface_hub>=0.24",
+    "scikit-learn>=1.3", # linear probes (trainer.py)
+    # Stage B (OpenVLA-7B + faithfulness)
+    "transformers>=4.40,<4.50",
+    "accelerate>=0.30",
+    "scipy>=1.11",
+    "timm>=0.9.10,<1.0", # OpenVLA's modeling code hard-checks this range
+    "tokenizers>=0.19",
+    "sentencepiece>=0.2",
+]
+
+[project.scripts]
+policylens-run = "policylens.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["policylens"]
+
+# Make uv pick the right torch wheel automatically.
+# - Linux + CUDA (Vast.ai): falls back to PyPI default, which is CUDA-enabled.
+# - macOS: PyPI default is CPU/MPS.
+# If a specific CUDA version is needed on Vast.ai, set TORCH_INDEX in setup_vastai.sh.
