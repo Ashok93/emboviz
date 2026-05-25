@@ -161,34 +161,131 @@ class Gr00tAdapter(VLAModel):
         # will fail their capability check anyway).
         return []
 
+    def _state_key_dim(self, state_key: str) -> int:
+        """Inferred dim for a GR00T state key.
+
+        GR00T's normalization metadata stores per-key min/max — that's the
+        truth. We walk into the policy's processor to read it; if anything
+        in that path isn't present we fall back to name-based heuristics
+        (9d → 9, joint → 7, gripper → 1).
+        """
+        try:
+            proc = self.policy.processor
+            sap = proc.state_action_processor
+            embodiments = getattr(sap, "state_norm", None)
+            if embodiments:
+                params = (
+                    embodiments.get(self._embodiment_name.lower())
+                    or next(iter(embodiments.values()))
+                )
+                if params and state_key in params:
+                    p = params[state_key]
+                    mn = getattr(p, "min", None)
+                    if mn is not None and hasattr(mn, "__len__"):
+                        return int(len(mn))
+        except Exception:
+            pass
+        k = state_key.lower()
+        if "9d" in k:
+            return 9
+        if "gripper" in k:
+            return 1
+        return 7
+
     # ----- helpers -------------------------------------------------------
 
     def _build_observation(self, scene: Scene) -> dict:
-        """Convert our typed Scene into GR00T's nested observation dict."""
-        # Video: each declared GR00T video key gets a (B=1, T=1, H, W, 3) uint8 tensor.
+        """Convert our typed Scene into GR00T's nested observation dict.
+
+        GR00T's video modality expects shape (B, T, H, W, 3) where T is the
+        embodiment-specific temporal horizon (often 2 = current + previous
+        frame). When we only have one Scene we repeat it along the time
+        axis — this means "no motion" but is a valid input shape.
+        """
+        # Read the per-modality temporal horizon (T) from the modality config.
+        video_cfg = self._modality_configs["video"]
+        video_horizon = len(video_cfg.delta_indices)
+
         video: dict[str, np.ndarray] = {}
+
+        def _to_horizon(arr_3d: np.ndarray) -> np.ndarray:
+            """(H, W, 3) → (1, T, H, W, 3)."""
+            stacked = np.stack([arr_3d] * video_horizon, axis=0)
+            return stacked[np.newaxis, ...]
+
+        # Fill EXPLICITLY mapped cameras first.
+        mapped_arrays: dict[str, np.ndarray] = {}
         for cam_name, gr00t_key in self._camera_mapping.items():
             rgb = scene.observations.images.get(cam_name)
             if rgb is None:
                 continue
             arr = np.asarray(rgb.data, dtype=np.uint8)
             if arr.ndim == 3:
-                arr = arr[np.newaxis, np.newaxis, :, :, :]   # (1, 1, H, W, 3)
-            video[gr00t_key] = arr
+                video[gr00t_key] = _to_horizon(arr)
+                mapped_arrays[gr00t_key] = arr
+
+        # GR00T policies validate that EVERY declared video key is present.
+        # For any unmapped video key (e.g. a wrist cam the user doesn't have),
+        # we fall back to a mapped camera's image so the model has SOMETHING
+        # rather than crashing. Real teams should provide their full multi-cam
+        # mapping; the wizard generates one based on robot profile.
+        fallback = next(iter(mapped_arrays.values()), None)
+        if fallback is not None:
+            for vk in self._video_keys:
+                if vk not in video:
+                    video[vk] = _to_horizon(fallback)
+
+        # State: same temporal-horizon treatment as video.
+        state_cfg = self._modality_configs.get("state")
+        state_horizon = len(state_cfg.delta_indices) if state_cfg else 1
 
         # State: distribute scene.observations.state.values across declared state_keys.
         # GR00T expects per-key sub-vectors; for v1 we put the full state under
         # the first declared state key (teams with multi-segment state should
         # provide a custom mapping in their own adapter subclass).
+        # GR00T validates every declared state key is present. We map our
+        # Scene's typed fields (state, gripper) onto common GR00T key names
+        # and fall back to zeros for keys we can't infer.
         state: dict[str, np.ndarray] = {}
         proprio = scene.observations.state
-        if proprio is not None and self._state_keys:
-            vals = proprio.values.astype(np.float32)
-            if vals.ndim == 1:
-                vals = vals[np.newaxis, np.newaxis, :]       # (1, 1, D)
-            state[self._state_keys[0]] = vals
+        gripper = scene.observations.gripper
+        proprio_vec = (
+            proprio.values.astype(np.float32) if proprio is not None
+            else np.zeros(7, dtype=np.float32)
+        )
+        gripper_vec = np.array(
+            [gripper.value if gripper is not None else 0.0], dtype=np.float32,
+        )
 
-        # Language: GR00T expects (B=1, 1) list-of-lists of strings.
-        language = {"task": [[scene.instruction or ""]]}
+        def _to_state_horizon(vec: np.ndarray) -> np.ndarray:
+            stacked = np.stack([vec] * state_horizon, axis=0)
+            return stacked[np.newaxis, ...]
+
+        for sk in self._state_keys:
+            sk_lower = sk.lower()
+            expected_dim = self._state_key_dim(sk)
+            if "gripper" in sk_lower:
+                vec = gripper_vec
+            elif "eef" in sk_lower or "pose" in sk_lower or "joint" in sk_lower:
+                vec = proprio_vec
+            else:
+                vec = np.zeros(expected_dim, dtype=np.float32)
+            # Truncate / zero-pad to the dim this key expects.
+            if vec.size < expected_dim:
+                vec = np.pad(vec, (0, expected_dim - vec.size))
+            else:
+                vec = vec[:expected_dim]
+            state[sk] = _to_state_horizon(vec)
+
+        # Language: GR00T's language modality declares its own keys (e.g.
+        # 'annotation.language.language_instruction'). Populate them all
+        # with the instruction string.
+        language: dict = {}
+        lang_cfg = self._modality_configs.get("language")
+        if lang_cfg is not None:
+            for lk in lang_cfg.modality_keys:
+                language[lk] = [[scene.instruction or ""]]
+        # Always include a 'task' alias too, for embodiments that expect it.
+        language.setdefault("task", [[scene.instruction or ""]])
 
         return {"video": video, "state": state, "language": language}
