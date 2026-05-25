@@ -71,11 +71,16 @@ class BBoxDetector:
 
 
 class GroundingDINOSAMDetector:
-    """Zero-shot target detection from the instruction.
+    """Zero-shot target detection.
 
     Pipeline:
-      1. Parse the manipulated noun out of the instruction (via the same
-         taxonomy NounSwapPerturber uses).
+      1. Pick the noun to detect:
+         • If ``target_text`` is set → use it directly (user override).
+           Example: ``GroundingDINOSAMDetector(target_text="pipe")``.
+         • Else → parse the noun out of ``scene.instruction`` via the
+           built-in taxonomy (utensil > food > toy > cloth > tool >
+           container). Returns ``None`` if the instruction has no
+           recognised noun — better than guessing.
       2. Run GroundingDINO with that noun as the text prompt → bbox(es).
       3. (Optional) Refine the top bbox with SAM → segmentation mask.
       4. Return TargetDetection or None (low confidence / no detection).
@@ -93,7 +98,15 @@ class GroundingDINOSAMDetector:
         min_confidence: float = 0.25,
         device: str = "cuda",
         use_sam: bool = True,
+        target_text: Optional[str] = None,
     ):
+        """Args:
+            target_text: when set, GroundingDINO is always queried with this
+                exact phrase regardless of the scene's instruction. Use for
+                custom domains where the target object isn't in the default
+                noun taxonomy (e.g. ``"pipe"``, ``"shipping label"``,
+                ``"recycling can"``).
+        """
         self.gd_repo = gd_repo
         self.sam_repo = sam_repo
         self.box_threshold = box_threshold
@@ -101,6 +114,7 @@ class GroundingDINOSAMDetector:
         self.min_confidence = min_confidence
         self.device = device
         self.use_sam = use_sam
+        self.target_text = target_text
         self._gd = None  # (processor, model)
         self._sam = None
 
@@ -162,17 +176,21 @@ class GroundingDINOSAMDetector:
         Multi-camera diagnostics that need per-camera detection should
         construct a probe scene whose primary alias points at the camera
         they want to inspect (see MemorizationDiagnostic for the pattern).
-        Returns None if the instruction has no recognised target noun or
-        if detection confidence is below ``min_confidence`` — never
-        fabricates a result.
+        Returns None if neither ``target_text`` was set nor a noun could
+        be parsed from the instruction, or if detection confidence is
+        below ``min_confidence`` — never fabricates a result.
         """
         import torch
 
-        if scene.instruction is None or not scene.instruction.strip():
-            return None  # No instruction → no target noun → honest skip
-        noun = self._pick_noun(scene.instruction)
-        if noun is None:
-            return None  # No recognizable target noun — skip honestly
+        # 1. Explicit override always wins.
+        if self.target_text is not None:
+            noun = self.target_text.strip()
+        else:
+            if scene.instruction is None or not scene.instruction.strip():
+                return None
+            noun = self._pick_noun(scene.instruction)
+            if noun is None:
+                return None  # No recognizable target noun — skip honestly
 
         self._ensure_loaded()
         proc, model = self._gd
