@@ -41,7 +41,10 @@ LIBERO_PROFILE = RobotProfile(
         units="unit",
         range=(0.0, 1.0),
     ),
-    action=ActionSpec(dim=7),
+    action=ActionSpec(
+        dim=7,
+        dim_names=["dx", "dy", "dz", "drx", "dry", "drz", "gripper"],
+    ),
 )
 
 

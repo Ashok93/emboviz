@@ -213,21 +213,81 @@ def run_story(args) -> None:
     print(f"      target-mask frames: {len(target_mask_per_frame)}", flush=True)
 
     # --- 6. expert delta + Rerun export + failure moments ----------------
-    print(f"[6/7] per-frame expert delta + Rerun export...", flush=True)
+    # We report L2 expert delta AND per-dim absolute delta (with dim names
+    # from the robot profile when available). This is the single most
+    # important signal for spotting action-space convention mismatches —
+    # if dim "gripper" has Δ=2.0 while every other dim has Δ=0.05, you're
+    # comparing models that use different sign/range conventions for the
+    # gripper. The L2 alone would just look like "model is bad."
+    print(f"[6/7] per-frame expert delta (L2 + per-dim) + Rerun export...", flush=True)
     expert_delta_per_frame: list[float] = []
+    expert_delta_per_frame_per_dim: list[list[float]] = []
+    profile = trajectory.frames[0].profile
+    dim_names: list[str] = (
+        list(profile.action.dim_names)
+        if profile is not None and profile.action is not None
+           and profile.action.dim_names is not None
+        else []
+    )
+    pred_means = None
+    expert_means = None
+    n_compared_dims = 0
     for scene in trajectory.frames:
         pred = model.predict(scene).action
         expert = scene.metadata.get("expert_action")
         if expert is None:
             expert_delta_per_frame.append(float("nan"))
+            expert_delta_per_frame_per_dim.append([])
             continue
         expert_arr = np.asarray(expert, dtype=np.float32)
         n = min(len(pred), len(expert_arr))
-        expert_delta_per_frame.append(float(np.linalg.norm(pred[:n] - expert_arr[:n])))
+        n_compared_dims = n
+        per_dim = (pred[:n] - expert_arr[:n]).tolist()
+        expert_delta_per_frame_per_dim.append(per_dim)
+        expert_delta_per_frame.append(float(np.linalg.norm(per_dim)))
+        pred_means = (pred[:n].astype(np.float64)
+                      if pred_means is None
+                      else pred_means + pred[:n].astype(np.float64))
+        expert_means = (expert_arr[:n].astype(np.float64)
+                        if expert_means is None
+                        else expert_means + expert_arr[:n].astype(np.float64))
     valid = [d for d in expert_delta_per_frame if not (d != d)]
     mean_delta = float(np.mean(valid)) if valid else float("nan")
-    print(f"      expert Δ per-frame: {[f'{d:.3f}' for d in expert_delta_per_frame]}", flush=True)
-    print(f"      mean expert Δ: {mean_delta:.3f}", flush=True)
+
+    # Per-dim mean absolute Δ across frames. If a single dim dominates the
+    # L2 sum, that dim is the convention-mismatch suspect.
+    per_dim_mean_abs: list[float] = []
+    per_dim_max_abs: list[float] = []
+    if expert_delta_per_frame_per_dim and n_compared_dims > 0:
+        arr = np.array(
+            [d for d in expert_delta_per_frame_per_dim if d],
+            dtype=np.float32,
+        )
+        per_dim_mean_abs = np.abs(arr).mean(axis=0).tolist()
+        per_dim_max_abs  = np.abs(arr).max(axis=0).tolist()
+
+    dim_label = (
+        dim_names[:n_compared_dims]
+        if dim_names and len(dim_names) >= n_compared_dims
+        else [f"d{i}" for i in range(n_compared_dims)]
+    )
+    print(f"      expert Δ L2 per-frame: {[f'{d:.3f}' for d in expert_delta_per_frame]}", flush=True)
+    print(f"      mean L2: {mean_delta:.3f}", flush=True)
+    if per_dim_mean_abs:
+        print(f"      per-dim mean |Δ|:", flush=True)
+        for nm, m, mx in zip(dim_label, per_dim_mean_abs, per_dim_max_abs):
+            print(f"        {nm:>10s} : mean={m:.3f}  max={mx:.3f}", flush=True)
+        # Detect convention-mismatch suspects: dims whose mean|Δ| is
+        # >= 3× the median across dims.
+        med = float(np.median(per_dim_mean_abs))
+        suspects = [
+            (nm, m) for nm, m in zip(dim_label, per_dim_mean_abs)
+            if med > 1e-6 and m >= 3 * med
+        ]
+        if suspects:
+            print(f"      ⚠️ convention-mismatch suspects (dim |Δ| >= 3× median):", flush=True)
+            for nm, m in suspects:
+                print(f"        {nm} mean|Δ|={m:.3f} vs median={med:.3f}", flush=True)
 
     moments = find_failure_moments(
         per_axis,
@@ -258,6 +318,10 @@ def run_story(args) -> None:
         "frame_indices":     list(trajectory.frame_indices),
         "instruction":       trajectory.frames[0].instruction,
         "calibration":       calibration.to_summary(),
+        "action_dim_names":  dim_label,
+        "expert_delta_per_dim_mean_abs": per_dim_mean_abs,
+        "expert_delta_per_dim_max_abs":  per_dim_max_abs,
+        "expert_delta_per_frame_per_dim": expert_delta_per_frame_per_dim,
         "per_axis":          {axis: tr.to_summary() for axis, tr in per_axis.items()},
         "attention_drift": (
             {

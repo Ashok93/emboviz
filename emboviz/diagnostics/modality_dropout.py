@@ -167,15 +167,29 @@ class ModalityDropoutDiagnostic(Diagnostic):
             )
 
         # Per-modality severity verdict.
+        # SNR-aware per-modality verdict:
+        #   below_noise → "unknown" (effect indistinguishable from model noise)
+        #   below noise_floor_score → "ignored" (significant but tiny response — memorization-like)
+        #   below grounded_threshold → "partial"
+        #   above grounded_threshold → "used"
+        # We use the RAW per-modality delta (not the normalized score) to
+        # decide below_noise so the SNR comparison is honest.
         per_modality_severity: dict[str, str] = {}
+        unknown: list[str] = []
         ignored: list[str] = []
         partial: list[str] = []
         used: list[str] = []
-        for modality, d in per_modality.items():
-            if d < self.noise_floor:
+        noise_raw = self.calibration.noise_floor if self.calibration else 0.0
+        for modality in per_modality:
+            score_norm = per_modality[modality]
+            raw_d = per_modality_raw.get(modality, score_norm)
+            if self.calibration is not None and raw_d < noise_raw:
+                per_modality_severity[modality] = "unknown"
+                unknown.append(modality)
+            elif score_norm < self.noise_floor:
                 per_modality_severity[modality] = "ignored"
                 ignored.append(modality)
-            elif d < self.grounded_threshold:
+            elif score_norm < self.grounded_threshold:
                 per_modality_severity[modality] = "partial"
                 partial.append(modality)
             else:
@@ -183,36 +197,48 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 used.append(modality)
 
         # Scalar score = number of declared-but-ignored modalities (0 = healthy).
+        # "unknown" modalities are NOT counted as ignored — we don't know.
         scalar = float(len(ignored))
 
         if ignored:
             sev = Severity.CRITICAL
             verdict = (
-                f"Declared-but-ignored modalities: {', '.join(ignored)}. "
-                f"Dropping these inputs barely moves the action "
-                f"(< noise floor {self.noise_floor})."
+                f"Declared-but-ignored modalities (above noise floor, but "
+                f"normalized response < {self.noise_floor}): {', '.join(ignored)}."
             )
-            if partial:
-                verdict += f" Partial use of: {', '.join(partial)}."
-            if used:
-                verdict += f" Genuinely used: {', '.join(used)}."
         elif partial:
             sev = Severity.MODERATE
             verdict = (
-                f"All declared modalities respond above noise floor, but "
-                f"{', '.join(partial)} only weakly (< grounded threshold "
-                f"{self.grounded_threshold}). Genuinely used: {', '.join(used)}."
+                f"All testable modalities respond above noise floor; "
+                f"{', '.join(partial)} only weakly (normalized < grounded "
+                f"threshold {self.grounded_threshold})."
             )
-        else:
+        elif used:
             sev = Severity.PASS
             verdict = (
-                f"All declared modalities are genuinely used (Δaction > "
-                f"{self.grounded_threshold} when each is dropped)."
+                f"All testable declared modalities are genuinely used "
+                f"(normalized Δaction > {self.grounded_threshold} when each is dropped)."
             )
+        else:
+            # Everything came back unknown — can't say anything about usage.
+            sev = Severity.UNKNOWN
+            verdict = (
+                f"No modality produced a Δaction above the model's noise "
+                f"floor ({noise_raw:.4f}). Cannot distinguish 'ignored' from "
+                f"'masked by decoding stochasticity'. To get a usable signal "
+                f"either (a) use a less-stochastic model, (b) use stronger "
+                f"perturbations, or (c) average many seeds."
+            )
+        if unknown:
+            verdict += (
+                f" Below-noise-floor (UNKNOWN — cannot judge): {', '.join(unknown)}."
+            )
+        if used:
+            verdict += f" Genuinely used: {', '.join(used)}."
         if skipped_cams:
             verdict += (
-                f" Skipped {skipped_cams} (not present in scene; "
-                "the dataset adapter did not load them — investigate)."
+                f" Skipped {skipped_cams} (not present in scene; the "
+                "dataset adapter did not load them — investigate)."
             )
 
         return DiagnosticResult(
@@ -234,7 +260,8 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 "grounded_threshold":    self.grounded_threshold,
                 "ignored":               ignored,
                 "partial":               partial,
-                "used": used,
+                "unknown_below_noise":   unknown,
+                "used":                  used,
                 "tested_cameras": droppable_cams,
                 "skipped_cameras_absent_from_scene": skipped_cams,
                 "baseline_action": baseline.action.tolist(),
