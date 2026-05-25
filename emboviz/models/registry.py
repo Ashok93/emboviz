@@ -44,8 +44,10 @@ def _try_lazy_register(name: str) -> None:
         "openvla-7b": "emboviz.models.openvla",
         "openvla": "emboviz.models.openvla",
         "mock": "emboviz.models.mock",
+        "lerobot": "emboviz.models.lerobot_policy",
         # "pi0": "emboviz.models.pi0",      # future
         # "gr00t": "emboviz.models.gr00t",  # future
+        # "openvla-oft": "emboviz.models.openvla_oft",  # future
     }
     module = builtin.get(name)
     if module:
