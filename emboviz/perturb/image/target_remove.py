@@ -30,7 +30,7 @@ class TargetRemovalPerturber(Perturber):
 
     name = "target_remove"
     axis = "vision.memorization"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class TargetRemovalPerturber(Perturber):
         self.fill = fill
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        arr = to_array(scene.image).copy()
+        arr = to_array(scene.primary_image_data).copy()
         H, W = arr.shape[:2]
         if self.fill == "channel_mean":
             fill = arr.reshape(-1, 3).mean(axis=0)

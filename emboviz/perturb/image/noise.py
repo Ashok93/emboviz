@@ -19,13 +19,13 @@ from emboviz.perturb.image._image_utils import (
 class GaussianNoisePerturber(Perturber):
     name = "gaussian_noise"
     axis = "vision.sensor_noise"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(self, stddevs: list[float] | None = None):
         self.stddevs = stddevs or [5.0, 15.0, 30.0]   # in pixel-value units (0-255)
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        arr = to_array(scene.image).astype(np.float32)
+        arr = to_array(scene.primary_image_data).astype(np.float32)
         seed = deterministic_seed(scene.scene_id, self.name)
         rng = np.random.default_rng(seed)
         for s in self.stddevs:

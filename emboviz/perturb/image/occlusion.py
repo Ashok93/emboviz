@@ -32,7 +32,7 @@ class OcclusionPerturber(Perturber):
 
     name = "occlusion"
     axis = "vision.occlusion"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class OcclusionPerturber(Perturber):
         self.bbox = bbox
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        arr = to_array(scene.image)
+        arr = to_array(scene.primary_image_data)
         H, W = arr.shape[:2]
         mean = arr.reshape(-1, 3).mean(axis=0)
         for cov in self.coverages:

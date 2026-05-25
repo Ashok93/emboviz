@@ -31,7 +31,7 @@ class PrepositionSwapPerturber(Perturber):
 
     name = "preposition_swap"
     axis = "language.preposition_swap"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
         found = _find_preposition(scene.instruction)

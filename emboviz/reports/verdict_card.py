@@ -33,7 +33,7 @@ def render_verdict_card(
 def _render_header(suite_result: SuiteResult, scene: Scene, out: Path) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.5),
                              gridspec_kw={"width_ratios": [1, 1.3]})
-    axes[0].imshow(np.array(scene.image))
+    axes[0].imshow(np.array(scene.primary_image_data))
     axes[0].set_xticks([]); axes[0].set_yticks([])
     axes[0].set_title("SCENE", fontsize=10, loc="left", color="#666")
 
@@ -44,7 +44,7 @@ def _render_header(suite_result: SuiteResult, scene: Scene, out: Path) -> Path:
             verticalalignment="top")
     ax.text(0.0, 0.85, f"Model: {suite_result.model_id}", fontsize=11,
             transform=ax.transAxes, color="#444")
-    ax.text(0.0, 0.78, f'Instruction: "{scene.instruction}"', fontsize=11,
+    ax.text(0.0, 0.78, f'Instruction: "{scene.instruction or ""}"', fontsize=11,
             transform=ax.transAxes, color="#444")
 
     # Quick aggregate severity summary

@@ -58,7 +58,7 @@ class FailurePredictionDiagnostic(Diagnostic):
             )
         try:
             hs = model.extract_hidden_states(
-                scene.image, scene.instruction,
+                scene,
                 self.probe.spec.layer_indices,
                 TokenSelector(relative="before_action"),
             )

@@ -41,17 +41,18 @@ class MemorizationDiagnostic(Diagnostic):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         # Baseline with full scene
-        baseline = model.predict(scene.image, scene.instruction)
+        baseline = model.predict(scene)
 
-        # Target removed
+        # Target removed (perturber produces a new Scene with the target masked)
         target_remover = TargetRemovalPerturber(bbox=self.bbox)
         masked_scene = next(iter(target_remover.variants(scene))).scene
-        action_no_target = model.predict(masked_scene.image, masked_scene.instruction)
+        action_no_target = model.predict(masked_scene)
 
-        # Reference: fully blanked image
-        arr = to_array(scene.image)
+        # Reference: fully blanked image — preserve all non-image observations
+        arr = to_array(scene.primary_image_data)
         blank = np.full_like(arr, fill_value=int(arr.mean()))
-        action_blank = model.predict(to_pil(blank), scene.instruction)
+        blank_scene = scene.with_image(to_pil(blank))
+        action_blank = model.predict(blank_scene)
 
         # How vigorous is the action when the target is masked vs blanked?
         diff_vs_blank = float(np.linalg.norm(action_no_target.action - action_blank.action))

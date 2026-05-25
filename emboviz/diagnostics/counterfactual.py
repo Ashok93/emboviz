@@ -5,6 +5,11 @@ prediction → measure divergence → aggregate into one DiagnosticResult.
 
 Used by every counterfactual perturber (noun_swap, color_swap, occlusion,
 viewpoint, distractor, lighting, ...). Same code, different perturber.
+
+Input-side gating: if the perturber mutates an input modality the model
+doesn't consume (e.g., gripper_flip against a model that doesn't read
+gripper), the diagnostic returns Severity.UNKNOWN with a clear reason
+instead of running a meaningless test.
 """
 
 from __future__ import annotations
@@ -59,22 +64,39 @@ class CounterfactualDiagnostic(Diagnostic):
         self.axis = perturber.axis
 
     def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+        # Capability check
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
+        # Input-side gating: skip cleanly if the model doesn't consume what
+        # this perturber mutates.
+        if self.perturber.affects and not any(
+            model.required_inputs.consumes(a) for a in self.perturber.affects
+        ):
+            affects_list = ", ".join(sorted(self.perturber.affects))
+            return self._not_applicable(
+                model, scene,
+                f"model {model.model_id} does not consume input modalities "
+                f"affected by {self.perturber.name} (perturber affects: {affects_list})",
+            )
+
+        # Scene-side validation: does the scene actually have what the model needs?
+        reason = model.required_inputs.validate(scene)
+        if reason:
+            return self._not_applicable(
+                model, scene,
+                f"scene does not satisfy model.required_inputs: {reason}",
+            )
+
         metric = self._metric_override or ActionDivergenceMetric(model=model)
-        baseline = model.predict(scene.image, scene.instruction)
+        baseline = model.predict(scene)
 
         per_variant: dict[str, float] = {}
         variant_records: list[dict] = []
 
         for variant in self.perturber.variants(scene):
             v_scene = variant.scene
-            perturbed = (
-                model.predict_with_image(v_scene.image, v_scene.instruction)
-                if self.perturber.domain == "image"
-                else model.predict(v_scene.image, v_scene.instruction)
-            )
+            perturbed = model.predict(v_scene)
             d = metric.compute(baseline, perturbed)
             per_variant[variant.variant_id] = d
             variant_records.append({
@@ -89,8 +111,10 @@ class CounterfactualDiagnostic(Diagnostic):
             })
 
         if not per_variant:
-            return self._not_applicable(model, scene,
-                f"{self.perturber.name} produced no variants for this scene")
+            return self._not_applicable(
+                model, scene,
+                f"{self.perturber.name} produced no variants for this scene",
+            )
 
         scores = np.array(list(per_variant.values()))
         mean = float(scores.mean())
@@ -132,6 +156,6 @@ class CounterfactualDiagnostic(Diagnostic):
                 "noise_floor": self.noise_floor,
                 "grounded_threshold": self.grounded_threshold,
                 "perturber_axis": self.perturber.axis,
-                "perturber_domain": self.perturber.domain,
+                "perturber_affects": sorted(self.perturber.affects),
             },
         )

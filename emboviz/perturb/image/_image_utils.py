@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from dataclasses import replace
+from typing import Optional
 
 import numpy as np
 from PIL import Image
 
-from emboviz.core.types import PerturbedScene, Scene
+from emboviz.core.observations import RGBImage
+from emboviz.core.types import Observations, PerturbedScene, Scene
 
 
 def to_array(image) -> np.ndarray:
@@ -30,13 +32,17 @@ def make_perturbed_image_scene(
     new_image,
     description: str = "",
     parameters: Optional[dict] = None,
+    camera: str = "primary",
 ) -> PerturbedScene:
-    new_scene = Scene(
-        image=new_image,
-        instruction=scene.instruction,
-        metadata=scene.metadata,
-        scene_id=scene.scene_id,
-    )
+    """Build a PerturbedScene with one camera's image replaced.
+
+    Multi-cam aware: only the named `camera` is replaced; other cameras
+    in observations.images are preserved. Default is "primary".
+    """
+    new_images = dict(scene.observations.images)
+    new_images[camera] = RGBImage(data=new_image, camera_id=camera)
+    new_obs = replace(scene.observations, images=new_images)
+    new_scene = replace(scene, observations=new_obs)
     return PerturbedScene(
         scene=new_scene,
         perturber_name=perturber_name,

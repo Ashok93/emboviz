@@ -81,7 +81,7 @@ class ConceptDecompositionDiagnostic(Diagnostic):
 
         try:
             ffn = model.extract_ffn_activations(
-                scene.image, scene.instruction, layer_indices,
+                scene, layer_indices,
                 TokenSelector(relative="before_action"),
             )
             norms = model.get_ffn_value_vector_norms(layer_indices)

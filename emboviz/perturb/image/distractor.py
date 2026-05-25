@@ -39,7 +39,7 @@ class DistractorInjectionPerturber(Perturber):
 
     name = "distractor_inject"
     axis = "vision.distractor"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class DistractorInjectionPerturber(Perturber):
         self.rect_size_frac = rect_size_frac
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        base = to_array(scene.image)
+        base = to_array(scene.primary_image_data)
         H, W = base.shape[:2]
         rect_side = max(8, int(self.rect_size_frac * min(H, W)))
         seed = deterministic_seed(scene.scene_id, self.name)

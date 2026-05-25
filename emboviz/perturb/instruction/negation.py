@@ -16,7 +16,7 @@ class NegationPerturber(Perturber):
 
     name = "negation"
     axis = "language.negation"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
         if not scene.instruction.strip():

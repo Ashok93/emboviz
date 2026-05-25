@@ -4,17 +4,27 @@ A Perturber is a stateless object with a `variants(scene)` method that
 yields one or more PerturbedScenes. The Diagnostic layer composes
 Perturbers with Metrics + Runners — Perturbers themselves know nothing
 about VLAs, metrics, or scoring.
+
+Every Perturber declares `affects`: a frozenset of strings naming the
+Scene input modalities it mutates. The vocabulary mirrors
+`RequiredInputs.consumes()`:
+
+  - "instruction"
+  - "images.<camera_id>"   (e.g. "images.primary", "images.wrist_left")
+  - "state", "gripper", "action_history", "depth", "force_torque", "tactile"
+  - "extras.<key>"
+
+Diagnostics cross-check `affects` against the model's
+`required_inputs` to auto-skip perturbations that mutate inputs the
+model doesn't consume (Severity.UNKNOWN with a clear reason).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable, Literal
+from typing import Iterable
 
 from emboviz.core.types import PerturbedScene, Scene
-
-
-PerturbationDomain = Literal["instruction", "image", "joint"]
 
 
 class Perturber(ABC):
@@ -22,7 +32,7 @@ class Perturber(ABC):
 
     name: str
     axis: str
-    domain: PerturbationDomain
+    affects: frozenset[str]
 
     @abstractmethod
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
@@ -39,7 +49,7 @@ class NullPerturber(Perturber):
 
     name = "null"
     axis = "baseline"
-    domain: PerturbationDomain = "joint"
+    affects = frozenset()
 
     def variants(self, scene: Scene):
         yield PerturbedScene(

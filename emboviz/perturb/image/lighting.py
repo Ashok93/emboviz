@@ -15,7 +15,7 @@ from emboviz.perturb.image._image_utils import make_perturbed_image_scene
 class LightingShiftPerturber(Perturber):
     name = "lighting_shift"
     axis = "vision.lighting"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -28,8 +28,8 @@ class LightingShiftPerturber(Perturber):
         self.saturation_factors = saturation_factors or [0.4, 1.6]
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        pil = scene.image if isinstance(scene.image, Image.Image) else Image.fromarray(
-            np.asarray(scene.image)
+        pil = scene.primary_image_data if isinstance(scene.primary_image_data, Image.Image) else Image.fromarray(
+            np.asarray(scene.primary_image_data)
         )
         pil = pil.convert("RGB")
 

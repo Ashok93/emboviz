@@ -46,8 +46,26 @@ class SweepDiagnostic(Diagnostic):
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
+        # Input-side gating
+        if self.perturber.affects and not any(
+            model.required_inputs.consumes(a) for a in self.perturber.affects
+        ):
+            affects_list = ", ".join(sorted(self.perturber.affects))
+            return self._not_applicable(
+                model, scene,
+                f"model {model.model_id} does not consume input modalities "
+                f"affected by {self.perturber.name} (perturber affects: {affects_list})",
+            )
+
+        reason = model.required_inputs.validate(scene)
+        if reason:
+            return self._not_applicable(
+                model, scene,
+                f"scene does not satisfy model.required_inputs: {reason}",
+            )
+
         metric = self._metric_override or ActionDivergenceMetric(model=model)
-        baseline = model.predict(scene.image, scene.instruction)
+        baseline = model.predict(scene)
 
         levels: list[float] = []
         divergences: list[float] = []
@@ -55,9 +73,7 @@ class SweepDiagnostic(Diagnostic):
 
         for variant in self.perturber.variants(scene):
             level = float(variant.parameters.get(self.level_param_key, 0.0))
-            perturbed = model.predict_with_image(
-                variant.scene.image, variant.scene.instruction,
-            )
+            perturbed = model.predict(variant.scene)
             d = metric.compute(baseline, perturbed)
             levels.append(level)
             divergences.append(d)
@@ -69,8 +85,10 @@ class SweepDiagnostic(Diagnostic):
             })
 
         if not levels:
-            return self._not_applicable(model, scene,
-                f"{self.perturber.name} produced no variants")
+            return self._not_applicable(
+                model, scene,
+                f"{self.perturber.name} produced no variants",
+            )
 
         order = np.argsort(levels)
         lvl = np.array(levels)[order]

@@ -237,7 +237,7 @@ class ObjectRecolorPerturber(Perturber):
 
     name = "object_recolor"
     axis = "vision.color_binding"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -319,6 +319,6 @@ class ObjectRecolorPerturber(Perturber):
 
     @staticmethod
     def _scene_pil(scene: Scene) -> Image.Image:
-        if isinstance(scene.image, Image.Image):
-            return scene.image.convert("RGB")
-        return Image.fromarray(to_array(scene.image)).convert("RGB")
+        if isinstance(scene.primary_image_data, Image.Image):
+            return scene.primary_image_data.convert("RGB")
+        return Image.fromarray(to_array(scene.primary_image_data)).convert("RGB")

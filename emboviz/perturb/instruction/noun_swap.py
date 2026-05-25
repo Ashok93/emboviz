@@ -46,7 +46,7 @@ class NounSwapPerturber(Perturber):
 
     name = "noun_swap"
     axis = "language.noun_swap"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def __init__(self, max_swaps: int = 3):
         self.max_swaps = max_swaps

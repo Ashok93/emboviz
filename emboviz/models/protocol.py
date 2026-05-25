@@ -1,18 +1,28 @@
 """The VLAModel protocol.
 
-Every adapter must implement this interface. Diagnostics only call methods
-declared here — they never import a specific adapter — so swapping VLAs
-is a one-line change in the CLI.
+Every adapter implements this interface. Diagnostics only call methods
+declared here — they never import a specific adapter — so swapping
+VLAs is a one-line change in the CLI.
 
-Capabilities are FLAGS. An adapter declares what it supports; diagnostics
-check `Capability.X in model.capabilities` and gracefully skip if absent.
+Two dimensions of declarative metadata travel on every adapter:
+
+- `capabilities`: what the model can EXPOSE (attention, hidden states,
+  patching, etc.). Diagnostics that need a capability check before
+  running and emit a clean "skipped, reason: X" result if absent.
+
+- `required_inputs`: what the model needs to CONSUME from a Scene
+  (which cameras, whether it uses state/gripper/action_history). The
+  runner validates a Scene satisfies these before predict() runs;
+  perturbers use them (via Perturber.affects) to auto-skip mutations
+  against modalities the model doesn't read.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Flag, auto
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -21,9 +31,12 @@ from emboviz.core.types import (
     AttentionMaps,
     FFNActivations,
     HiddenStates,
-    ImageLike,
+    Scene,
     TokenSelector,
 )
+
+if TYPE_CHECKING:
+    pass
 
 
 class NotSupported(RuntimeError):
@@ -45,11 +58,86 @@ class Capability(Flag):
     FFN_VALUE_VECTORS = auto()     # get_ffn_value_vector_norms()
     VOCAB_LOGIT_LENS = auto()      # project_to_vocab() — needs a discrete vocab
     NEURON_ABLATION = auto()       # predict_with_neuron_ablation()
-    IMAGE_PERTURBATION = auto()    # predict_with_image() (always derivable from predict())
     GRADIENT = auto()              # backprop possible (for captum-style attribution)
     BATCH_INFERENCE = auto()
     CHUNK_PREDICTION = auto()      # predict_chunk() — multi-step action chunks
-    ACTIVATION_PATCHING = auto()   # predict_with_layer_patch() — for causal mediation
+    ACTIVATION_PATCHING = auto()   # predict_with_residual_patch() — causal mediation
+
+
+@dataclass(frozen=True)
+class RequiredInputs:
+    """What a model needs from a Scene to make a prediction.
+
+    Adapters declare this once; the framework validates Scenes against
+    it before calling predict (loud error at the boundary instead of a
+    silent wrong inference). Perturbers cross-check their `affects`
+    against this to auto-skip irrelevant perturbations.
+    """
+
+    cameras: frozenset[str] = frozenset({"primary"})
+    instruction: bool = True
+    state: bool = False
+    gripper: bool = False
+    action_history: bool = False
+    depth: bool = False
+    force_torque: bool = False
+    tactile: bool = False
+    extras: frozenset[str] = frozenset()
+
+    def validate(self, scene: Scene) -> Optional[str]:
+        """Returns None if `scene` satisfies the requirements, else a
+        human-readable reason."""
+        obs = scene.observations
+        for cam in self.cameras:
+            if cam not in obs.images:
+                return f"missing camera '{cam}' in scene.observations.images"
+        if self.instruction and not scene.instruction:
+            return "model requires instruction but scene.instruction is empty"
+        if self.state and obs.state is None:
+            return "model requires proprioceptive state but scene.observations.state is None"
+        if self.gripper and obs.gripper is None:
+            return "model requires gripper but scene.observations.gripper is None"
+        if self.action_history and obs.action_history is None:
+            return "model requires action_history but scene.observations.action_history is None"
+        if self.depth and not obs.depth:
+            return "model requires depth but scene.observations.depth is None/empty"
+        if self.force_torque and obs.force_torque is None:
+            return "model requires force_torque but scene.observations.force_torque is None"
+        if self.tactile and obs.tactile is None:
+            return "model requires tactile but scene.observations.tactile is None"
+        for key in self.extras:
+            if key not in obs.extras:
+                return f"model requires extras['{key}'] but it is missing"
+        return None
+
+    def consumes(self, affect: str) -> bool:
+        """Does this model consume the input modality named by `affect`?
+
+        Affect strings follow the perturber convention:
+          - "instruction"
+          - "images.<camera_id>"   (e.g. "images.primary", "images.wrist_left")
+          - "state", "gripper", "action_history", "depth", "force_torque", "tactile"
+          - "extras.<key>"
+        """
+        if affect == "instruction":
+            return self.instruction
+        if affect.startswith("images."):
+            return affect.split(".", 1)[1] in self.cameras
+        if affect == "state":
+            return self.state
+        if affect == "gripper":
+            return self.gripper
+        if affect == "action_history":
+            return self.action_history
+        if affect == "depth":
+            return self.depth
+        if affect == "force_torque":
+            return self.force_torque
+        if affect == "tactile":
+            return self.tactile
+        if affect.startswith("extras."):
+            return affect.split(".", 1)[1] in self.extras
+        return False
 
 
 class VLAModel(ABC):
@@ -73,6 +161,11 @@ class VLAModel(ABC):
     @abstractmethod
     def capabilities(self) -> Capability:
         """OR'd flags describing what this adapter implements."""
+
+    @property
+    @abstractmethod
+    def required_inputs(self) -> RequiredInputs:
+        """What the adapter needs from a Scene to make a prediction."""
 
     @property
     @abstractmethod
@@ -102,41 +195,27 @@ class VLAModel(ABC):
     # ----- core inference --------------------------------------------------
 
     @abstractmethod
-    def predict(self, image: ImageLike, instruction: str) -> ActionResult:
-        """Produce an action for one (image, instruction) pair.
+    def predict(self, scene: Scene) -> ActionResult:
+        """Produce an action for one Scene.
 
-        The returned ActionResult.action is always a continuous numpy vector
+        Adapters read the fields they declared in `required_inputs`. The
+        returned ActionResult.action is always a continuous numpy vector
         of length `self.action_dim`, even if the model internally produces
-        discrete action tokens or flow-matching trajectories — adapters
-        decode to that common space.
+        discrete action tokens or flow-matching trajectories.
         """
-
-    def predict_with_image(
-        self, perturbed_image: ImageLike, instruction: str
-    ) -> ActionResult:
-        """Convenience identical to `predict` with a different image.
-
-        Override only if there's a cheaper path (e.g., shared text encoding).
-        Default uses `predict`.
-        """
-        return self.predict(perturbed_image, instruction)
 
     # ----- internal inspection (capability-gated) -------------------------
 
-    def extract_attention(
-        self, image: ImageLike, instruction: str, query: TokenSelector,
-    ) -> AttentionMaps:
+    def extract_attention(self, scene: Scene, query: TokenSelector) -> AttentionMaps:
         raise NotSupported(f"{self.model_id} does not support attention extraction.")
 
     def extract_hidden_states(
-        self, image: ImageLike, instruction: str, layer_indices: list[int],
-        query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> HiddenStates:
         raise NotSupported(f"{self.model_id} does not support hidden-state extraction.")
 
     def extract_ffn_activations(
-        self, image: ImageLike, instruction: str, layer_indices: list[int],
-        query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> FFNActivations:
         raise NotSupported(f"{self.model_id} does not support FFN-activation extraction.")
 
@@ -161,16 +240,14 @@ class VLAModel(ABC):
     # ----- interventions (capability-gated) -------------------------------
 
     def predict_with_neuron_ablation(
-        self, image: ImageLike, instruction: str,
-        ablations: dict[tuple[int, int], float],
+        self, scene: Scene, ablations: dict[tuple[int, int], float],
     ) -> ActionResult:
         """Run inference with specific (layer_idx, neuron_idx) activations
         forced to a scalar value before the FFN's down_proj."""
         raise NotSupported(f"{self.model_id} does not support neuron ablation.")
 
     def predict_with_residual_patch(
-        self, image: ImageLike, instruction: str,
-        patches: dict[int, np.ndarray],
+        self, scene: Scene, patches: dict[int, np.ndarray],
         patch_position: Optional[int] = None,
     ) -> ActionResult:
         """Run inference, replacing the residual-stream output of each

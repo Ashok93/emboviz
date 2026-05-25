@@ -2,17 +2,34 @@
 
 Bridge has 53k episodes; we lazy-load. `load_episode` accepts integer IDs
 and uses batched LeRobotDataset() calls when many episodes are requested.
+
+The raw Bridge state vector is `[x, y, z, roll, pitch, yaw, gripper]` —
+6-DOF end-effector pose plus a normalized [0, 1] gripper value. We
+unpack that into typed Observations (Proprioception + GripperState) and
+attach a `BRIDGE_PROFILE` so perturbers and diagnostics know the layout.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 from PIL import Image
 
-from emboviz.core.types import Scene, Trajectory
+from emboviz.core.observations import (
+    GripperState,
+    Proprioception,
+    RGBImage,
+)
+from emboviz.core.profile import (
+    ActionSpec,
+    CameraSpec,
+    GripperSpec,
+    RobotProfile,
+    StateSpec,
+)
+from emboviz.core.types import Observations, Scene, Trajectory
 from emboviz.datasets.base import EpisodeSource
 
 
@@ -20,6 +37,29 @@ DATASET_REPO = "IPEC-COMMUNITY/bridge_orig_lerobot"
 PRIMARY_IMAGE_KEY = "observation.images.image_0"
 STATE_KEY = "observation.state"
 ACTION_KEY = "action"
+
+
+# Default RobotProfile for Bridge rollouts. Attached to every Scene loaded
+# from this source so downstream perturbers / diagnostics know how to
+# interpret state, gripper, and action.
+BRIDGE_PROFILE = RobotProfile(
+    name="bridge_orig",
+    cameras=[CameraSpec(name="primary")],
+    state=StateSpec(
+        dim=6,
+        convention="ee_pose",
+        joint_names=["x", "y", "z", "roll", "pitch", "yaw"],
+    ),
+    gripper=GripperSpec(
+        kind="parallel_jaw",
+        units="unit",
+        range=(0.0, 1.0),
+    ),
+    action=ActionSpec(
+        dim=7,
+        dim_names=["dx", "dy", "dz", "drx", "dry", "drz", "gripper"],
+    ),
+)
 
 
 class BridgeEpisodeSource(EpisodeSource):
@@ -51,19 +91,8 @@ class BridgeEpisodeSource(EpisodeSource):
             if ep_i not in out:
                 continue
             instruction = self._resolve_instruction(dataset, ep_i)
-            out[ep_i].append(Scene(
-                image=self._tensor_to_pil(sample[PRIMARY_IMAGE_KEY]),
-                instruction=instruction,
-                metadata={
-                    "state": sample[STATE_KEY].to(torch.float32).reshape(-1).tolist(),
-                    "expert_action": sample[ACTION_KEY].to(torch.float32).reshape(-1).tolist(),
-                    "fps": float(dataset.fps),
-                    "frame_index": i,
-                    "episode_index": ep_i,
-                    "dataset": DATASET_REPO,
-                },
-                scene_id=f"bridge:{ep_i}:{len(out[ep_i])}",
-            ))
+            scene = self._build_scene(sample, instruction, ep_i, len(out[ep_i]), dataset.fps)
+            out[ep_i].append(scene)
         return out
 
     def load_trajectory(self, episode_idx: int) -> Trajectory:
@@ -100,6 +129,39 @@ class BridgeEpisodeSource(EpisodeSource):
         return out
 
     # ---- helpers ----------------------------------------------------------
+
+    def _build_scene(
+        self, sample: dict, instruction: str,
+        episode_idx: int, frame_offset: int, fps: float,
+    ) -> Scene:
+        """Build a typed Scene from one raw Bridge sample."""
+        image = self._tensor_to_pil(sample[PRIMARY_IMAGE_KEY])
+        state_vals = sample[STATE_KEY].to(torch.float32).reshape(-1).numpy()
+
+        # Bridge state layout: [x, y, z, roll, pitch, yaw, gripper]
+        gripper_val = float(state_vals[6]) if state_vals.size >= 7 else 0.0
+        proprio_vals = state_vals[:6].copy() if state_vals.size >= 6 else state_vals.copy()
+
+        obs = Observations(
+            images={"primary": RGBImage(data=image, camera_id="primary")},
+            state=Proprioception(values=proprio_vals, convention="ee_pose"),
+            gripper=GripperState(value=gripper_val, kind="parallel_jaw", units="unit"),
+        )
+
+        return Scene(
+            observations=obs,
+            instruction=instruction,
+            profile=BRIDGE_PROFILE,
+            metadata={
+                "expert_action": sample[ACTION_KEY].to(torch.float32).reshape(-1).tolist(),
+                "fps": float(fps),
+                "frame_index": int(sample.get("frame_index", frame_offset)),
+                "episode_index": episode_idx,
+                "dataset": DATASET_REPO,
+                "raw_state": state_vals.tolist(),
+            },
+            scene_id=f"bridge:{episode_idx}:{frame_offset}",
+        )
 
     def _tensor_to_pil(self, t) -> Image.Image:
         a = t.detach().cpu().float().numpy() if hasattr(t, "detach") else np.asarray(t)

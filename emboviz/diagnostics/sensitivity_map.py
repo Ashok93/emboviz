@@ -40,8 +40,8 @@ class SensitivityMapDiagnostic(Diagnostic):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         metric = self._metric_override or ActionDivergenceMetric(model=model)
-        baseline = model.predict(scene.image, scene.instruction)
-        arr = to_array(scene.image)
+        baseline = model.predict(scene)
+        arr = to_array(scene.primary_image_data)
         H, W = arr.shape[:2]
         chan_mean = arr.reshape(-1, 3).mean(axis=0)
         ph = H // self.grid_side
@@ -53,7 +53,7 @@ class SensitivityMapDiagnostic(Diagnostic):
                 masked = arr.copy()
                 y0, x0 = gi * ph, gj * pw
                 masked[y0:y0 + ph, x0:x0 + pw] = chan_mean
-                pert = model.predict_with_image(to_pil(masked), scene.instruction)
+                pert = model.predict(scene.with_image(to_pil(masked)))
                 drops[gi, gj] = metric.compute(baseline, pert)
 
         # Scalar: concentration of sensitivity — top-K cells / total

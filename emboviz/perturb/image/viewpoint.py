@@ -26,7 +26,7 @@ class ViewpointJitterPerturber(Perturber):
 
     name = "viewpoint_jitter"
     axis = "vision.viewpoint"
-    domain = "image"
+    affects = frozenset({"images.primary"})
 
     def __init__(
         self,
@@ -39,8 +39,8 @@ class ViewpointJitterPerturber(Perturber):
         self.zooms = zooms or [0.9, 1.1]
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        pil = scene.image if isinstance(scene.image, Image.Image) else Image.fromarray(
-            to_array(scene.image)
+        pil = scene.primary_image_data if isinstance(scene.primary_image_data, Image.Image) else Image.fromarray(
+            to_array(scene.primary_image_data)
         )
         W, H = pil.size
 

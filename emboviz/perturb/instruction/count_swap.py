@@ -18,7 +18,7 @@ class CountSwapPerturber(Perturber):
 
     name = "count_swap"
     axis = "language.count_swap"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
         for vocab, label in ((COUNT_WORDS, "count"), (ORDINAL_WORDS, "ordinal")):

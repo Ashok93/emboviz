@@ -20,9 +20,15 @@ from emboviz.core.types import (
     FFNActivations,
     HiddenStates,
     ImageLike,
+    Scene,
     TokenSelector,
 )
-from emboviz.models.protocol import Capability, NotSupported, VLAModel
+from emboviz.models.protocol import (
+    Capability,
+    NotSupported,
+    RequiredInputs,
+    VLAModel,
+)
 from emboviz.models.registry import register_model
 
 
@@ -92,6 +98,16 @@ class OpenVLAAdapter(VLAModel):
         return self._CAPS
 
     @property
+    def required_inputs(self) -> RequiredInputs:
+        # OpenVLA-7B consumes one primary RGB camera + a text instruction.
+        # It ignores state/gripper/action_history — which is precisely why
+        # the state-side diagnostics are interesting on it.
+        return RequiredInputs(
+            cameras=frozenset({"primary"}),
+            instruction=True,
+        )
+
+    @property
     def action_dim(self) -> int:
         return self._action_dim
 
@@ -113,7 +129,9 @@ class OpenVLAAdapter(VLAModel):
 
     # ---- inference -----------------------------------------------------
 
-    def predict(self, image: ImageLike, instruction: str) -> ActionResult:
+    def predict(self, scene: Scene) -> ActionResult:
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
         action, tokens = self._generate_action(ids, pixel_values)
         return ActionResult(
@@ -129,10 +147,12 @@ class OpenVLAAdapter(VLAModel):
     # ---- attention extraction ------------------------------------------
 
     def extract_attention(
-        self, image: ImageLike, instruction: str, query: TokenSelector,
+        self, scene: Scene, query: TokenSelector,
     ) -> AttentionMaps:
         import torch
 
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -166,9 +186,11 @@ class OpenVLAAdapter(VLAModel):
     # ---- hidden states + FFN activations -------------------------------
 
     def extract_hidden_states(
-        self, image, instruction, layer_indices: list[int], query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> HiddenStates:
         import torch
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -190,9 +212,11 @@ class OpenVLAAdapter(VLAModel):
         )
 
     def extract_ffn_activations(
-        self, image, instruction, layer_indices: list[int], query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> FFNActivations:
         import torch
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
 
         captured: dict[int, torch.Tensor] = {}
@@ -256,7 +280,7 @@ class OpenVLAAdapter(VLAModel):
     # ---- residual-stream patching --------------------------------------
 
     def predict_with_residual_patch(
-        self, image, instruction, patches: dict, patch_position=None,
+        self, scene: Scene, patches: dict, patch_position=None,
     ):
         """Patch the residual-stream output of each named layer at `patch_position`
         with the provided vector, then run inference.
@@ -266,6 +290,8 @@ class OpenVLAAdapter(VLAModel):
         (the residual output) at `patch_position` with the patch tensor.
         """
         import torch
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
 
@@ -344,9 +370,11 @@ class OpenVLAAdapter(VLAModel):
     # ---- neuron ablation -----------------------------------------------
 
     def predict_with_neuron_ablation(
-        self, image, instruction, ablations: dict[tuple[int, int], float],
+        self, scene: Scene, ablations: dict[tuple[int, int], float],
     ) -> ActionResult:
         import torch
+        image = scene.primary_image_data
+        instruction = scene.instruction or ""
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
         handles = []

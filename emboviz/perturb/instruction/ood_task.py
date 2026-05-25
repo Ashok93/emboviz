@@ -24,7 +24,7 @@ DEFAULT_OOD_TASKS = [
 class OODTaskPerturber(Perturber):
     name = "ood_task"
     axis = "language.ood_task"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def __init__(self, ood_tasks: list[str] | None = None):
         self.ood_tasks = ood_tasks or DEFAULT_OOD_TASKS

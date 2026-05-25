@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Optional
 
 from emboviz.core.types import PerturbedScene, Scene
@@ -23,13 +23,12 @@ def make_perturbed_scene(
     description: str = "",
     parameters: Optional[dict] = None,
 ) -> PerturbedScene:
-    """Convenience: build a PerturbedScene with the new instruction."""
-    new_scene = Scene(
-        image=scene.image,
-        instruction=new_instruction,
-        metadata=scene.metadata,
-        scene_id=scene.scene_id,
-    )
+    """Build a PerturbedScene with the instruction replaced.
+
+    Observations are preserved (image, state, gripper, etc.); only the
+    text changes. Scene is frozen so we use `dataclasses.replace`.
+    """
+    new_scene = replace(scene, instruction=new_instruction)
     return PerturbedScene(
         scene=new_scene,
         perturber_name=perturber_name,

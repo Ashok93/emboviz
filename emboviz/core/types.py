@@ -9,9 +9,22 @@ representations into these types at the protocol boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import numpy as np
+
+from emboviz.core.observations import (
+    ActionHistory,
+    DepthMap,
+    ForceTorque,
+    GripperState,
+    Proprioception,
+    RGBImage,
+    TactileReading,
+)
+
+if TYPE_CHECKING:
+    from emboviz.core.profile import RobotProfile
 
 # Sentinel for "PIL image" without importing PIL here — we accept anything
 # that has a `.size` and is convertible via numpy.asarray, but adapters do
@@ -20,17 +33,102 @@ ImageLike = Any
 
 
 @dataclass(frozen=True)
-class Scene:
-    """A single (image, instruction) input to a VLA, plus optional metadata.
+class Observations:
+    """The full sensor payload at one timestep.
 
-    Scenes are the unit a diagnostic operates on. A trajectory is a list of
-    Scenes.
+    `images` is a dict from day one: single-camera setups populate
+    `{"primary": ...}`, multi-camera setups add more keys (e.g.
+    `"wrist_left"`, `"head"`). The `"primary"` key is the convention that
+    single-cam-aware diagnostics use.
+
+    All other fields are optional. A model that doesn't consume state can
+    receive a Scene whose `state` is None; the runtime validator (see
+    `VLAModel.required_inputs`) checks that what the model declares it
+    needs is actually present.
+
+    Experimental sensors that haven't earned a first-class slot yet live
+    in `extras` — promote to a typed field once ≥2 adapters use them.
     """
 
-    image: ImageLike            # PIL.Image.Image at runtime
-    instruction: str
+    images: dict[str, RGBImage]
+    state: Optional[Proprioception] = None
+    gripper: Optional[GripperState] = None
+    action_history: Optional[ActionHistory] = None
+    depth: Optional[dict[str, DepthMap]] = None
+    force_torque: Optional[ForceTorque] = None
+    tactile: Optional[TactileReading] = None
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def primary_image(self) -> RGBImage:
+        """The default `"primary"` camera. Raises KeyError if not present."""
+        return self.images["primary"]
+
+
+@dataclass(frozen=True)
+class Scene:
+    """One observation point — everything fed to the policy at one timestep.
+
+    Built around a typed `Observations` bag so multi-camera, proprio,
+    gripper, and action history are first-class. Single-camera + text-only
+    callers should use `Scene.from_image(image, instruction)` for the
+    common case.
+
+    A trajectory is a list of Scenes.
+    """
+
+    observations: Observations
+    instruction: Optional[str] = None
+    profile: Optional["RobotProfile"] = None
     metadata: dict = field(default_factory=dict)
-    scene_id: str = ""           # optional, for caching / reporting
+    scene_id: str = ""
+
+    @property
+    def primary_image_data(self) -> Any:
+        """PIL image of the primary camera — the most common access path."""
+        return self.observations.primary_image.data
+
+    @classmethod
+    def from_image(
+        cls,
+        image: ImageLike,
+        instruction: Optional[str] = None,
+        scene_id: str = "",
+        metadata: Optional[dict] = None,
+        profile: Optional["RobotProfile"] = None,
+    ) -> "Scene":
+        """Convenience constructor for the single-cam, text-only case."""
+        obs = Observations(images={"primary": RGBImage(data=image)})
+        return cls(
+            observations=obs,
+            instruction=instruction,
+            profile=profile,
+            scene_id=scene_id,
+            metadata=metadata or {},
+        )
+
+    def with_image(self, new_image: ImageLike, camera: str = "primary") -> "Scene":
+        """Return a new Scene with the named camera's image replaced.
+
+        Other modalities (state, gripper, action_history, etc.) and other
+        cameras are preserved. Used by diagnostics that need to swap one
+        camera's content (occlusion, sensitivity map, memorization mask).
+        """
+        from dataclasses import replace
+        new_images = dict(self.observations.images)
+        new_images[camera] = RGBImage(data=new_image, camera_id=camera)
+        new_obs = replace(self.observations, images=new_images)
+        return replace(self, observations=new_obs)
+
+    def with_instruction(self, new_instruction: str) -> "Scene":
+        """Return a new Scene with the instruction replaced.
+
+        All observations are preserved. Used by diagnostics that vary the
+        text input while holding the visual/state context constant
+        (cross-modal attention, ad-hoc instruction probes).
+        """
+        from dataclasses import replace
+        return replace(self, instruction=new_instruction)
 
 
 @dataclass
