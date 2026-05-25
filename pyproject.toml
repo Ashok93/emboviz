@@ -1,8 +1,9 @@
 [project]
 name = "emboviz"
-version = "0.0.1"
-description = "Emboviz — interpretability/debugging tool for robot policies. MVP: attribute Diffusion Policy actions on LeRobot PushT."
+version = "0.1.0"
+description = "Emboviz — diagnostic and interpretability framework for embodied-AI policies (VLAs, diffusion policies, world models, humanoids). Apache 2.0."
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<3.13"
 
 dependencies = [
