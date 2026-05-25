@@ -111,19 +111,30 @@ def main():
                  else [f"d{i}" for i in range(n_dims)])
     print(f"\nper-dim |Δ| across sampled frames:")
     print(f"  {'dim':<10s}  mean   max")
-    for nm, m_, mx in zip(dim_label, per_dim_mean, per_dim_max):
-        print(f"  {nm:<10s}  {m_:.3f}  {mx:.3f}")
-    median = float(np.median(per_dim_mean))
+    for _nm, _mean_v, _max_v in zip(dim_label, per_dim_mean, per_dim_max):
+        print(f"  {_nm:<10s}  {_mean_v:.3f}  {_max_v:.3f}")
+    # Convention-mismatch detector — use PER-DIM MEDIAN |Δ| across frames,
+    # not mean. A single bad-prediction frame can spike a dim's mean |Δ|
+    # without indicating a convention issue. A median that's systematically
+    # high means EVERY frame is off — that's the real convention smell.
+    per_dim_median = np.median(np.abs(diffs), axis=0)
+    overall_median = float(np.median(per_dim_median))
     suspects = [
-        (nm, v) for nm, v in zip(dim_label, per_dim_mean)
-        if median > 1e-6 and v >= 3 * median
+        (nm, m, mn) for nm, m, mn in zip(dim_label, per_dim_mean, per_dim_median)
+        if overall_median > 1e-6 and mn >= 3 * overall_median
     ]
+    print(f"\nper-dim MEDIAN |Δ| (more robust to outlier frames):")
+    for _nm, _med in zip(dim_label, per_dim_median):
+        print(f"  {_nm:<10s}  {_med:.3f}")
     if suspects:
-        print(f"\n⚠️ convention-mismatch suspects (mean|Δ| >= 3× median {median:.3f}):")
-        for nm, v in suspects:
-            print(f"    {nm}: {v:.3f}")
+        print(f"\n⚠️ likely convention mismatch (median|Δ| >= 3× overall median {overall_median:.3f}):")
+        for nm, mean_v, med_v in suspects:
+            print(f"    {nm}: median={med_v:.3f}  mean={mean_v:.3f}")
     else:
-        print(f"\n✓ no per-dim outliers (all dims within 3× median {median:.3f})")
+        print(f"\n✓ no systematic per-dim mismatch (all dim medians within "
+              f"3× overall median {overall_median:.3f}) — occasional high "
+              "mean|Δ| reflects model errors on specific frames, not "
+              "convention issues")
 
     # Noise floor probe
     print(f"\n[probe] {args.n_noise_reps}x identical-input variance on frame 0:")

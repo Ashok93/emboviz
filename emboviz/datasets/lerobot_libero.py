@@ -127,3 +127,72 @@ class Libero10Source(LeRobotEpisodeSource):
             n_episodes=379,
         )
         self.name = "libero_10"
+
+
+# ---------------------------------------------------------------------------
+# OFFICIAL openpi training dataset
+# ---------------------------------------------------------------------------
+# ``physical-intelligence/libero`` is the EXACT HuggingFace dataset openpi
+# trains its ``pi0_libero`` checkpoint on. Different schema than the
+# community variants above:
+#   • images: ``image`` and ``wrist_image`` (no ``observation.`` prefix; CHW
+#     tensors are auto-converted to PIL HWC by LeRobotEpisodeSource)
+#   • state: ``state`` — 8 dims = [x, y, z, roll, pitch, yaw, gripper_l, gripper_r]
+#   • action: ``actions`` (plural) — 7 dims, gripper binarized to {-1, +1}
+#     (≡ π0's output convention, so expert_delta gripper |Δ| ≈ 0 when paired
+#     with pi0_libero — no convention transform needed)
+
+PI_LIBERO_PROFILE = RobotProfile(
+    name="pi_libero",
+    cameras=[
+        CameraSpec(name="primary"),
+        CameraSpec(name="wrist"),
+    ],
+    state=StateSpec(
+        dim=8,
+        convention="ee_pose",
+        joint_names=["x", "y", "z", "roll", "pitch", "yaw", "gripper_l", "gripper_r"],
+    ),
+    gripper=GripperSpec(
+        kind="parallel_jaw",
+        units="m",
+        range=(-0.04, 0.04),
+    ),
+    action=ActionSpec(
+        dim=7,
+        dim_names=["dx", "dy", "dz", "drx", "dry", "drz", "gripper"],
+    ),
+)
+
+
+def _pi_libero_gripper_extractor(state: np.ndarray) -> tuple:
+    """physical-intelligence/libero state: 8 dims with two symmetric finger positions."""
+    if state.size != 8:
+        raise ValueError(
+            f"physical-intelligence/libero state size {state.size}; expected 8."
+        )
+    return state.copy(), float(state[6])
+
+
+class PhysicalIntelligenceLiberoSource(LeRobotEpisodeSource):
+    """``physical-intelligence/libero`` — openpi's official pi0_libero training set.
+
+    This is the dataset openpi trains the ``pi0_libero`` checkpoint on.
+    Conventions match the model end-to-end — expert_delta on a pi0_libero
+    rollout against this dataset is meaningful (gripper sign matches).
+    """
+
+    def __init__(self):
+        super().__init__(
+            repo_id="physical-intelligence/libero",
+            profile=PI_LIBERO_PROFILE,
+            image_keys={
+                "primary": "image",
+                "wrist":   "wrist_image",
+            },
+            state_key="state",
+            action_key="actions",   # PLURAL — openpi's naming
+            gripper_extractor=_pi_libero_gripper_extractor,
+            n_episodes=1693,
+        )
+        self.name = "pi_libero"

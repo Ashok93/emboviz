@@ -282,58 +282,80 @@ class Gr00tAdapter(VLAModel):
         state_cfg = self._modality_configs.get("state")
         state_horizon = len(state_cfg.delta_indices) if state_cfg else 1
 
-        # State: distribute Scene state/gripper across GR00T's declared
-        # state keys. validate() already checked state is present.
+        # State: distribute Scene state across GR00T's declared state keys.
+        #
+        # Routing priority:
+        #   1. If the dataset's RobotProfile.state.segment_layout has an
+        #      EXACT key match for the GR00T state key → use that slice
+        #      from the Scene's state vector. This is the precise path for
+        #      datasets shaped for GR00T (e.g. droid_sample stores 17-dim
+        #      state with segments eef_9d / gripper_position / joint_position).
+        #   2. Else if the key contains "gripper" → use the typed
+        #      observations.gripper.value (single scalar).
+        #   3. Else if the key looks like a proprioception key (eef/pose/joint)
+        #      → use the FULL state vector (only valid when the model's
+        #      state key dim matches the scene's state dim — checked below).
+        #   4. Else → raise (refuse to silently zero-fill).
         state: dict[str, np.ndarray] = {}
-        import warnings as _warnings
         proprio_vec = np.asarray(
             scene.observations.state.values, dtype=np.float32,
         ).reshape(-1)
         gripper = scene.observations.gripper
-        if gripper is None:
-            # Some GR00T embodiments declare a gripper state key. If the
-            # Scene doesn't carry one, that's a real mismatch — raise.
-            for sk in self._state_keys:
-                if "gripper" in sk.lower():
-                    raise ValueError(
-                        f"GR00T embodiment requires gripper state key '{sk}' "
-                        "but scene.observations.gripper is None. Populate "
-                        "gripper in the dataset adapter."
-                    )
-            gripper_vec = None
-        else:
-            gripper_vec = np.array([gripper.value], dtype=np.float32)
+
+        # Read segment_layout from profile if the dataset provides it.
+        segment_layout = (
+            scene.profile.state.segment_layout
+            if (scene.profile is not None
+                and scene.profile.state is not None
+                and scene.profile.state.segment_layout is not None)
+            else {}
+        )
 
         def _to_state_horizon(vec: np.ndarray) -> np.ndarray:
             stacked = np.stack([vec] * state_horizon, axis=0)
             return stacked[np.newaxis, ...]
 
         for sk in self._state_keys:
-            sk_lower = sk.lower()
             expected_dim = self._state_key_dim(sk)
-            if "gripper" in sk_lower:
-                vec = gripper_vec
+            sk_lower = sk.lower()
+
+            # 1. Exact segment_layout match — preferred when available.
+            if sk in segment_layout:
+                vec = proprio_vec[segment_layout[sk]]
+            # 2. Gripper key from the typed Scene field.
+            elif "gripper" in sk_lower:
+                if gripper is None:
+                    raise ValueError(
+                        f"GR00T embodiment requires state key '{sk}' (gripper) "
+                        "but scene.observations.gripper is None AND the "
+                        "dataset profile has no segment_layout entry for '{sk}'. "
+                        "Either populate gripper in the dataset adapter or "
+                        "declare segment_layout in RobotProfile.state."
+                    )
+                vec = np.array([gripper.value], dtype=np.float32)
+            # 3. Proprio-like key from the full state vector (only valid
+            #    when dims happen to match).
             elif "eef" in sk_lower or "pose" in sk_lower or "joint" in sk_lower:
                 vec = proprio_vec
+            # 4. Don't know what to put here — raise.
             else:
-                # GR00T declared a state key whose name we can't classify.
-                # Refuse to silently zero-fill — that produces meaningless
-                # diagnostic numbers. Require an explicit user-side mapping.
                 raise ValueError(
                     f"GR00T embodiment '{self._embodiment_name}' declares "
-                    f"state key '{sk}' (expected dim {expected_dim}) that "
-                    "we cannot route from Scene automatically (key name "
-                    "does not contain 'gripper'/'eef'/'pose'/'joint'). "
-                    "Subclass Gr00tAdapter and override _build_observation "
-                    "to fill this key with the right Scene field — we will "
-                    "NOT silently zero-fill (that produces meaningless "
-                    "diagnostic outputs)."
+                    f"state key '{sk}' (expected dim {expected_dim}). We "
+                    "cannot route it from the Scene because:\n"
+                    f"  • RobotProfile.state.segment_layout has no '{sk}' entry "
+                    f"(present keys: {sorted(segment_layout)})\n"
+                    "  • the key name doesn't contain "
+                    "'gripper'/'eef'/'pose'/'joint'.\n"
+                    "Add the segment to RobotProfile.state.segment_layout, "
+                    "or subclass Gr00tAdapter._build_observation."
                 )
             if vec.size != expected_dim:
                 raise ValueError(
                     f"GR00T state key '{sk}' expects dim {expected_dim} "
-                    f"but Scene provides {vec.size}. Fix the dataset adapter "
-                    "or the gripper extractor — no silent pad/truncate."
+                    f"but routed Scene segment provides {vec.size}. Either "
+                    "fix the dataset profile's segment_layout or the gripper "
+                    "extractor — no silent pad/truncate."
                 )
             state[sk] = _to_state_horizon(vec)
 

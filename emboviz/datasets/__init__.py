@@ -24,15 +24,19 @@ from emboviz.datasets.lerobot_aloha import (
 from emboviz.datasets.lerobot_bridge import BridgeEpisodeSource, BRIDGE_PROFILE
 from emboviz.datasets.lerobot_droid import (
     DROID_PROFILE,
+    GR00T_DROID_PROFILE,
     Droid100Source,
     DroidFullSource,
+    GR00TDroidSampleSource,
 )
 from emboviz.datasets.lerobot_libero import (
     LIBERO_PROFILE,
+    PI_LIBERO_PROFILE,
     Libero10Source,
     LiberoGoalSource,
     LiberoObjectSource,
     LiberoSpatialSource,
+    PhysicalIntelligenceLiberoSource,
 )
 
 __all__ = [
@@ -54,6 +58,10 @@ __all__ = [
     "DROID_PROFILE",
     "Droid100Source",
     "DroidFullSource",
+    "GR00T_DROID_PROFILE",
+    "GR00TDroidSampleSource",
+    "PI_LIBERO_PROFILE",
+    "PhysicalIntelligenceLiberoSource",
 ]
 
 

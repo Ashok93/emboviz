@@ -94,18 +94,40 @@ class LeRobotEpisodeSource(EpisodeSource):
           • ``lerobot.common.datasets.lerobot_dataset``  (0.1.x — vendored
             by openpi and other VLA projects that pin the legacy stub)
 
-        Same ``LeRobotDataset(repo_id, episodes=[...])`` constructor in both
-        eras, so once we pick the right import the rest is identical. This
-        is what lets the same emboviz dataset adapter work seamlessly in
-        every model's venv without per-venv configuration.
+        ``self.repo_id`` may be:
+          • a HuggingFace repo id (``namespace/dataset``) — standard case
+          • a local filesystem path containing a lerobot-format dataset
+            (``meta/``, ``data/``, ``videos/``) — used for NVIDIA-shipped
+            demo datasets that don't live on HF
+        Local paths are detected and routed via the ``root=`` kwarg so
+        lerobot skips its hub lookup entirely.
         """
+        import os
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
         except ImportError:
             from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
         indices = sorted(set(episode_indices))
-        dataset = LeRobotDataset(self.repo_id, episodes=indices)
+        is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
+        if is_local:
+            # Local path: tell lerobot the root + a synthetic repo_id so it
+            # skips the hub call. Some lerobot versions key off ``root`` arg;
+            # others off ``local_files_only`` + ``cache_dir``. We try both.
+            try:
+                dataset = LeRobotDataset(
+                    "local", root=self.repo_id, episodes=indices,
+                )
+            except TypeError:
+                # Fallback for lerobot variants without a ``root`` kwarg.
+                dataset = LeRobotDataset(
+                    "local",
+                    download_videos=False,
+                    cache_dir=os.path.dirname(self.repo_id.rstrip("/")),
+                    episodes=indices,
+                )
+        else:
+            dataset = LeRobotDataset(self.repo_id, episodes=indices)
         out: dict[int, list[Scene]] = {i: [] for i in indices}
 
         for i in range(dataset.num_frames):
