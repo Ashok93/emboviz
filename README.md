@@ -49,37 +49,37 @@ No prose synthesis, no "we think your model is broken because…" — just evide
 | Family | Status |
 |---|---|
 | OpenVLA-7B | ✅ shipped |
-| OpenVLA-OFT | 🚧 in progress |
-| π0 / π0.5 | 🚧 in progress (gated on public weights) |
-| GR00T-N1 | 🚧 in progress |
-| ACT | 🚧 in progress |
-| Diffusion Policy | 🚧 in progress |
-| RDT-1B | 🚧 in progress |
-| Octo | 🚧 in progress |
+| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ shipped via `LeRobotPolicyAdapter` |
 | Mock (no GPU) | ✅ shipped — for diagnostic-side dev |
+| OpenVLA-OFT | 📅 roadmap |
+| π0 / π0.5 | 📅 roadmap (gated on public weights) |
+| GR00T-N1 | 📅 roadmap |
+| RDT-1B | 📅 roadmap |
+| Octo | 📅 roadmap |
 
 ### Robot profiles (preshipped configs)
 
 | Robot | Status |
 |---|---|
-| Franka Panda + Robotiq 2F-85 | 🚧 in progress |
-| UR5 / UR10 + Robotiq | 🚧 in progress |
-| Trossen (ALOHA single arm) | 🚧 in progress |
+| BridgeV2 (`bridge_orig`) | ✅ shipped |
+| Franka Panda + Robotiq 2F-85 | ✅ shipped |
+| UR5 / UR10 + Robotiq | ✅ shipped |
+| Trossen ViperX-300 (single-arm ALOHA) | ✅ shipped |
 | ALOHA bimanual | 📅 roadmap |
 | Unitree H1 / G1 | 📅 roadmap |
 
-Custom robots: write a ~30-line YAML profile + (optional) custom adapter.
+Custom robots: write a ~30-line `RobotProfile` and drop it in `emboviz/profiles/`.
 
 ### Data formats
 
 | Format | Ingest | Export |
 |---|---|---|
-| LeRobot v3 (BridgeV2, etc.) | ✅ | — |
-| Rerun `.rrd` | 🚧 | 🚧 **(killer feature)** |
-| Foxglove `.mcap` | 🚧 | 🚧 |
-| ROS bag (mcap) | 🚧 | — |
-| HuggingFace dataset (generic) | 🚧 | — |
-| RLDS | 🚧 | — |
+| LeRobot v3 (BridgeV2, ALOHA, custom uploads) | ✅ | — |
+| Rerun `.rrd` | ✅ | ✅ **(killer feature)** |
+| Foxglove `.mcap` | ✅ | ✅ |
+| HuggingFace `datasets` (generic) | ✅ | — |
+| ROS bag (native) | 📅 roadmap | — |
+| RLDS | 📅 roadmap | — |
 
 ---
 
