@@ -46,16 +46,22 @@ No prose synthesis, no "we think your model is broken because…" — just evide
 
 ### Model adapters (one file per model)
 
-| Family | Status |
-|---|---|
-| OpenVLA-7B | ✅ shipped |
-| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ shipped via `LeRobotPolicyAdapter` |
-| Mock (no GPU) | ✅ shipped — for diagnostic-side dev |
-| OpenVLA-OFT | 📅 roadmap |
-| π0 / π0.5 | 📅 roadmap (gated on public weights) |
-| GR00T-N1 | 📅 roadmap |
-| RDT-1B | 📅 roadmap |
-| Octo | 📅 roadmap |
+| Family | Status | Install |
+|---|---|---|
+| OpenVLA-7B | ✅ shipped, verified on Bridge | `uv add emboviz[openvla]` |
+| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ shipped via `LeRobotPolicyAdapter` | base install |
+| Mock (no GPU) | ✅ shipped — for diagnostic-side dev | base install |
+| **GR00T-N1 / N1.7** | 🟡 adapter code shipped; **separate venv** | `uv add emboviz[gr00t]` + `git+https://github.com/NVIDIA/Isaac-GR00T.git` |
+| **π0 / π0.5** | 🟡 adapter code shipped via LeRobot wrapper; **separate venv** | `uv add emboviz[pi0]` |
+| **OpenVLA-OFT** | 🟡 adapter code shipped; **separate venv** (needs the moojink/transformers fork) | see [openvla-oft](https://github.com/moojink/openvla-oft) |
+| RDT-1B | 📅 planned (flash-attn build complexity) | |
+| Octo | 📅 planned (JAX backend) | |
+
+> **Why separate venvs?** Several upstream VLA/robotics packages pin
+> different (and incompatible) versions of `transformers` and `torch`. We
+> ship adapter code that wraps each cleanly, but mixing all of them in one
+> venv is not possible today. Per-adapter optional-dep groups in
+> `pyproject.toml` make this explicit.
 
 ### Robot profiles (preshipped configs)
 

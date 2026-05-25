@@ -45,8 +45,9 @@ def _try_lazy_register(name: str) -> None:
         "openvla": "emboviz.models.openvla",
         "mock": "emboviz.models.mock",
         "lerobot": "emboviz.models.lerobot_policy",
+        "gr00t": "emboviz.models.gr00t",
+        "gr00t-n1": "emboviz.models.gr00t",
         # "pi0": "emboviz.models.pi0",      # future
-        # "gr00t": "emboviz.models.gr00t",  # future
         # "openvla-oft": "emboviz.models.openvla_oft",  # future
     }
     module = builtin.get(name)

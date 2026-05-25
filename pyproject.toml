@@ -35,6 +35,48 @@ dependencies = [
     "mcap>=1.3.1",
 ]
 
+[project.optional-dependencies]
+# Each adapter ships its own dep group so users install only what their
+# setup needs. Several adapters have incompatible transformers pins —
+# install each in its own virtualenv when mixing.
+openvla = [
+    "transformers>=4.40,<4.50",
+    "timm>=0.9.10,<1.0",
+]
+gr00t = [
+    # NOTE: requires transformers>=4.57 which is INCOMPATIBLE with openvla.
+    # Use a separate virtualenv. Isaac-GR00T is git-only; install with:
+    #   uv pip install --no-deps git+https://github.com/NVIDIA/Isaac-GR00T.git
+    "transformers>=4.57",
+    "diffusers",
+    "dm-tree",
+    "tyro",
+    "lmdb",
+    "msgpack",
+    "msgpack-numpy",
+    "peft",
+    "termcolor",
+    "omegaconf",
+    "jsonlines",
+    "gymnasium",
+    "einops",
+    "albumentations",
+    "opencv-python-headless",
+    "kornia",
+]
+openvla-oft = [
+    # NOTE: requires the moojink/transformers-openvla-oft fork, NOT mainline
+    # transformers. Incompatible with both `openvla` and `gr00t`. Use a
+    # separate virtualenv. See https://github.com/moojink/openvla-oft for the
+    # full install recipe.
+]
+pi0 = [
+    # NOTE: π0 checkpoints on HF (lerobot/pi0_base, lerobot/pi05_base) require
+    # a newer LeRobot than `openvla` is compatible with. Use a separate
+    # virtualenv. See https://huggingface.co/lerobot/pi0_base.
+    "lerobot>=0.5",
+]
+
 [project.scripts]
 emboviz-run = "emboviz.cli:main"
 

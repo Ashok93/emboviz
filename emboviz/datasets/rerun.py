@@ -71,44 +71,64 @@ class RerunEpisodeSource(EpisodeSource):
             ) from e
 
         recording = rrdf.load_recording(str(self.rrd_path))
-        # Collect time-aligned rows across the entities we care about.
-        wanted = list(self.image_entities.values())
-        if self.state_entity:
-            wanted.append(self.state_entity)
-        if self.gripper_entity:
-            wanted.append(self.gripper_entity)
 
-        view = recording.view(index="log_time", contents=wanted)
-        df = view.select().read_all().to_pylist()
+        def _norm(p: str) -> str:
+            return p if p.startswith("/") else "/" + p
 
-        # Group rows by primary camera's timestamp; one Scene per row.
-        primary_key = (
-            self.image_entities.get("primary")
-            or next(iter(self.image_entities.values()))
-        )
+        # Rerun's `contents` arg accepts a comma-separated string of entity
+        # path expressions (e.g. "/cameras/primary/image, /state").
+        image_paths = {cam: _norm(p) for cam, p in self.image_entities.items()}
+        wanted_paths = list(image_paths.values())
+        state_path = _norm(self.state_entity) if self.state_entity else None
+        gripper_path = _norm(self.gripper_entity) if self.gripper_entity else None
+        if state_path:
+            wanted_paths.append(state_path)
+        if gripper_path:
+            wanted_paths.append(gripper_path)
+        contents_expr = ", ".join(wanted_paths)
+
+        view = recording.view(index="log_time", contents=contents_expr).fill_latest_at()
+        rows: list[dict] = view.select().read_all().to_pylist()
+
+        primary_key = image_paths.get("primary") or next(iter(image_paths.values()))
+
+        def _find_component(row: dict, path: str, component: str) -> Optional[object]:
+            """Look up row[`{path}:{component}`] tolerantly."""
+            target = f"{path}:{component}"
+            for k, v in row.items():
+                if k == target:
+                    return v
+            return None
+
         scenes: list[Scene] = []
-        for i, row in enumerate(df):
-            primary_img = self._extract_image(row.get(primary_key))
+        for i, row in enumerate(rows):
+            primary_img = self._extract_image_pair(row, primary_key)
             if primary_img is None:
                 continue
 
             images: dict[str, RGBImage] = {}
-            for cam_name, entity in self.image_entities.items():
-                img = self._extract_image(row.get(entity))
+            for cam_name, path in image_paths.items():
+                img = self._extract_image_pair(row, path)
                 if img is not None:
                     images[cam_name] = RGBImage(data=img, camera_id=cam_name)
             if "primary" not in images:
                 images["primary"] = RGBImage(data=primary_img, camera_id="primary")
 
             state = None
-            if self.state_entity:
-                vals = self._extract_vector(row.get(self.state_entity))
+            if state_path:
+                # Rerun's Scalar / Vector components don't have a fixed name
+                # — try a few common ones the writer might have used.
+                vals = None
+                for comp in ("Scalar", "Float32Array", "Vector"):
+                    vals = self._extract_vector(_find_component(row, state_path, comp))
+                    if vals is not None:
+                        break
                 if vals is not None and self.profile.state is not None:
                     state = Proprioception(values=vals, convention=self.profile.state.convention)
 
             gripper = None
-            if self.gripper_entity:
-                val = self._extract_scalar(row.get(self.gripper_entity))
+            if gripper_path:
+                val = self._extract_scalar(_find_component(row, gripper_path, "Scalar"))
                 if val is not None and self.profile.gripper is not None:
                     gripper = GripperState(
                         value=float(val),
@@ -141,19 +161,60 @@ class RerunEpisodeSource(EpisodeSource):
 
     # ----- helpers ---------------------------------------------------
 
-    def _extract_image(self, cell) -> Optional[Image.Image]:
-        """Convert a Rerun image cell to a PIL.Image."""
-        if cell is None:
+    def _extract_image_pair(self, row: dict, path: str) -> Optional[Image.Image]:
+        """Reconstruct a PIL image from Rerun's ImageBuffer + ImageFormat pair.
+
+        Rerun stores images as two components per entity:
+          - ImageBuffer: flat uint8 bytes
+          - ImageFormat: dict-like with width / height / channel info
+        We grab both, decode the format, and reshape the buffer.
+        """
+        buf = None
+        fmt = None
+        for k, v in row.items():
+            if k.startswith(path + ":"):
+                if k.endswith("ImageBuffer"):
+                    buf = v
+                elif k.endswith("ImageFormat"):
+                    fmt = v
+        if buf is None:
             return None
-        arr = np.asarray(cell)
-        # Rerun image components are typically (H, W, 3) or (H, W) uint8
-        if arr.ndim == 0:
-            return None
-        if arr.ndim == 2:
-            arr = np.stack([arr, arr, arr], axis=-1)
-        if arr.dtype != np.uint8:
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-        return Image.fromarray(arr)
+        arr = np.asarray(buf).reshape(-1).astype(np.uint8)
+        # Try to read width/height from the format component; fall back to
+        # square uint8 RGB if format is missing.
+        width, height, channels = self._parse_image_format(fmt)
+        if width is None or height is None:
+            side = int(np.sqrt(arr.size // 3))
+            width = height = side
+            channels = 3
+        if channels == 1:
+            return Image.fromarray(arr.reshape(height, width))
+        return Image.fromarray(arr.reshape(height, width, channels))
+
+    def _parse_image_format(self, fmt) -> tuple[Optional[int], Optional[int], int]:
+        """Pull width/height/channels out of Rerun's ImageFormat component.
+
+        ImageFormat is delivered as a python dict-or-struct; we extract
+        common field names defensively.
+        """
+        if fmt is None:
+            return None, None, 3
+        # ImageFormat is often wrapped in a one-element list/array.
+        if isinstance(fmt, (list, tuple, np.ndarray)) and len(fmt) > 0:
+            fmt = fmt[0]
+        width = None
+        height = None
+        channels = 3
+        if hasattr(fmt, "width"):
+            width = int(fmt.width)
+            height = int(fmt.height)
+        elif isinstance(fmt, dict):
+            width = int(fmt.get("width", fmt.get("size", [0, 0])[1]) or 0) or None
+            height = int(fmt.get("height", fmt.get("size", [0, 0])[0]) or 0) or None
+            color_model = fmt.get("color_model") or fmt.get("colorModel")
+            if color_model in ("L", "Grayscale", 0, "0"):
+                channels = 1
+        return width, height, channels
 
     def _extract_vector(self, cell) -> Optional[np.ndarray]:
         if cell is None:
