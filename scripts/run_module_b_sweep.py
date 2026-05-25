@@ -31,14 +31,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.counterfactual import run_counterfactuals
-from policylens.dataset_bridge import load_bridge_episode
-from policylens.instruction_perturb import build_perturbations
-from policylens.openvla import OpenVLAInference
+from emboviz.counterfactual import run_counterfactuals
+from emboviz.dataset_bridge import load_bridge_episode
+from emboviz.instruction_perturb import build_perturbations
+from emboviz.openvla import OpenVLAInference
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PolicyLens Module B — multi-episode sweep")
+    parser = argparse.ArgumentParser(description="Emboviz Module B — multi-episode sweep")
     parser.add_argument("--episodes", type=int, nargs="+", default=list(range(10)),
                         help="Bridge episode indices to sweep")
     parser.add_argument("--frame-stride", type=int, default=6)

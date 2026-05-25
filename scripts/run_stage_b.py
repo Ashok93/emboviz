@@ -18,16 +18,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.attribute_vla import attribute_image, attribute_tokens
-from policylens.dataset_bridge import load_bridge_episode
-from policylens.faithfulness import image_occlusion_curve
-from policylens.openvla import OpenVLAInference
-from policylens.replay_vla import pick_keyframes, replay_vla
-from policylens.visualize_vla import render_frame_grid, render_image_faithfulness
+from emboviz.attribute_vla import attribute_image, attribute_tokens
+from emboviz.dataset_bridge import load_bridge_episode
+from emboviz.faithfulness import image_occlusion_curve
+from emboviz.openvla import OpenVLAInference
+from emboviz.replay_vla import pick_keyframes, replay_vla
+from emboviz.visualize_vla import render_frame_grid, render_image_faithfulness
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PolicyLens Stage B")
+    parser = argparse.ArgumentParser(description="Emboviz Stage B")
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--keyframes", type=int, default=4,
                         help="Number of keyframes to render & attribute (kept small — IG on 7B is expensive)")
@@ -129,7 +129,7 @@ def _write_hypothesis_b(
         f"  • t={k}: " + ", ".join(f"**{t}**={v:.3f}" for t, v in toks)
         for k, toks in top_tokens_per_kf.items()
     )
-    body = f"""# PolicyLens Stage B — OpenVLA-7B on BridgeV2
+    body = f"""# Emboviz Stage B — OpenVLA-7B on BridgeV2
 
 **Episode**: {episode_idx}
 **Instruction**: "{instruction}"

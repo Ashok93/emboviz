@@ -1,4 +1,4 @@
-# PolicyLens
+# Emboviz
 
 A diagnostic and interpretability framework for **Vision-Language-Action (VLA) robot policies**.
 
@@ -26,7 +26,7 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design contract.
 
 ## What it does
 
-Given a `(VLAModel, Scene | Trajectory)` pair, PolicyLens runs diagnostics across:
+Given a `(VLAModel, Scene | Trajectory)` pair, Emboviz runs diagnostics across:
 
 - **Language grounding** — noun swap, preposition swap, color swap, count, negation, refusal-on-absent, empty, OOD task
 - **Visual robustness** — occlusion sweep, viewpoint jitter, lighting shift, distractor injection, sensor noise, target-removal memorization probe, BYOVLA-style sensitivity map
@@ -70,27 +70,27 @@ The **core engine** (everything outside `models/`) is model-agnostic. Adding a n
 uv sync
 
 # Engine smoke (no GPU)
-uv run python -m policylens.cli.run_suite \
+uv run python -m emboviz.cli.run_suite \
     --model mock --suite quick_smoke --scene bridge:0
 
 # Full battery + coverage analysis + verdict card (real OpenVLA, ~15 min)
-uv run python -m policylens.cli.run_battery \
+uv run python -m emboviz.cli.run_battery \
     --model openvla-7b --scene bridge:0 \
     --outdir outputs/battery
 
 # Per-frame trajectory analysis (the failure tape)
-uv run python -m policylens.cli.run_trajectory \
+uv run python -m emboviz.cli.run_trajectory \
     --model openvla-7b --suite quick_smoke \
     --trajectory bridge:0 --stride 4 \
     --outdir outputs/traj
 
 # Train a SAFE-style failure prediction probe from labeled rollouts
-uv run python -m policylens.cli.train_failure_probe \
+uv run python -m emboviz.cli.train_failure_probe \
     --model openvla-7b --episodes 0 1 2 3 4 5 \
     --layers 14 22 30 --outdir probes_trained
 
 # Diff two model checkpoints on the same suite
-uv run python -m policylens.cli.compare_models \
+uv run python -m emboviz.cli.compare_models \
     --model-a openvla-7b --model-b mock \
     --suite language_grounding --scene bridge:0
 ```
@@ -175,7 +175,7 @@ Write `models/pi0.py` implementing the protocol against PhysicalIntelligence's �
 After these, the core produces **100 %** of the per-frame data a Rerun/Foxglove timeline UX would need. The UI then becomes a thin exporter.
 
 ### E — UI layer (later)
-- `policylens/exporters/rerun.py` — `.rrd` file emission for Rerun playback
+- `emboviz/exporters/rerun.py` — `.rrd` file emission for Rerun playback
 - HTML dashboard with frame scrubber (Plotly / React)
 - Polished single-PNG verdict card (designer pass)
 
@@ -186,7 +186,7 @@ After these, the core produces **100 %** of the per-frame data a Rerun/Foxglove 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full tree + contracts.
 
 ```
-policylens/
+emboviz/
   core/            Layer 0 — pure types + math (Scene, Trajectory, ActionResult, ...)
   models/          Layer 1 — VLAModel protocol + Capability flags + adapters
                               (openvla.py, mock.py)

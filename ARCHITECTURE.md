@@ -1,4 +1,4 @@
-# PolicyLens — Architecture
+# Emboviz — Architecture
 
 ## Goal
 
@@ -47,7 +47,7 @@ A **diagnostic and interpretability framework for robot policies** (VLAs and suc
 ## Directory layout
 
 ```
-policylens/
+emboviz/
 ├── core/                     # Layer 0 — pure foundation
 │   ├── types.py              # Scene, Action, ActionResult, AttentionMaps, HiddenStates, ...
 │   ├── distances.py          # action distance metrics
@@ -263,10 +263,10 @@ Nothing in the core hierarchy needs to change. New techniques drop in as additio
 
 ## What this enables for the user
 
-- One command: `policylens run --model openvla --suite full_profile --episode bridge:0` → 14-axis failure profile + verdict card.
-- Compare two checkpoints: `policylens compare --models ckpt1.bin ckpt2.bin --suite language_grounding`.
+- One command: `emboviz run --model openvla --suite full_profile --episode bridge:0` → 14-axis failure profile + verdict card.
+- Compare two checkpoints: `emboviz compare --models ckpt1.bin ckpt2.bin --suite language_grounding`.
 - CI integration: any diagnostic emits JSON for regression dashboards.
-- Custom workflows: `from policylens import Diagnostic, Perturber, ...` and compose.
+- Custom workflows: `from emboviz import Diagnostic, Perturber, ...` and compose.
 
 ---
 

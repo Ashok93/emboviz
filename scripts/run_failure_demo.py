@@ -3,7 +3,7 @@
 The user story:
   Engineer fine-tunes OpenVLA for kitchen tasks. They run a rollout where
   the instruction says "pick the fork" — but the scene only has a spoon.
-  The robot picks the spoon anyway. The engineer opens PolicyLens.
+  The robot picks the spoon anyway. The engineer opens Emboviz.
 
 This script reproduces that exact moment on BridgeV2 (a real dataset
 OpenVLA was trained on), diagnoses it end-to-end, and emits a poster-quality
@@ -29,27 +29,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.action_viz import aggregate_trajectory
-from policylens.attention_grounding import (
+from emboviz.action_viz import aggregate_trajectory
+from emboviz.attention_grounding import (
     extract_attention_to_image,
     find_noun_token_positions,
     score_head_language_sensitivity,
 )
-from policylens.counterfactual import run_counterfactuals
-from policylens.coverage_analysis import (
+from emboviz.counterfactual import run_counterfactuals
+from emboviz.coverage_analysis import (
     analyze_dataset_coverage,
     collect_bridge_instructions,
     detect_gaps,
     render_coverage_report,
 )
-from policylens.dataset_bridge import DATASET_REPO, load_bridge_episodes
-from policylens.demo_viz import (
+from emboviz.dataset_bridge import DATASET_REPO, load_bridge_episodes
+from emboviz.demo_viz import (
     FailureDemoPayload,
     VariantPanel,
     render_failure_demo,
 )
-from policylens.instruction_perturb import NOUN_CATEGORIES, OBJECT_CATEGORIES, build_perturbations
-from policylens.openvla import OpenVLAInference
+from emboviz.instruction_perturb import NOUN_CATEGORIES, OBJECT_CATEGORIES, build_perturbations
+from emboviz.openvla import OpenVLAInference
 
 
 def main() -> int:
@@ -220,7 +220,7 @@ def _write_demo_report(path: Path, payload: FailureDemoPayload, ep, args, cf) ->
         )
     gap_block = "\n\n".join(gap_blocks)
 
-    body = f"""# PolicyLens — Failure Scenario Demo
+    body = f"""# Emboviz — Failure Scenario Demo
 
 **Scene**: BridgeV2 episode {args.primary_episode}, frame t={len(payload.variant_panels) // 2}
 **Correct instruction**: `"{payload.correct_instruction}"`

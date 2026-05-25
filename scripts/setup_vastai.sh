@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot Vast.ai env setup for PolicyLens.
+# One-shot Vast.ai env setup for Emboviz.
 # Idempotent: safe to re-run. Targets Linux + (optional) CUDA.
 #
 # Usage (from repo root):
@@ -13,7 +13,7 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "[setup] PolicyLens — Vast.ai env bootstrap"
+echo "[setup] Emboviz — Vast.ai env bootstrap"
 echo "[setup] repo: $REPO_ROOT"
 
 # --- 1. Install uv (fast Python package manager) ------------------------------

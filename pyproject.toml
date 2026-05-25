@@ -1,7 +1,7 @@
 [project]
-name = "policylens"
+name = "emboviz"
 version = "0.0.1"
-description = "PolicyLens — interpretability/debugging tool for robot policies. MVP: attribute Diffusion Policy actions on LeRobot PushT."
+description = "Emboviz — interpretability/debugging tool for robot policies. MVP: attribute Diffusion Policy actions on LeRobot PushT."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 
@@ -33,14 +33,14 @@ dependencies = [
 ]
 
 [project.scripts]
-policylens-run = "policylens.cli:main"
+emboviz-run = "emboviz.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["policylens"]
+packages = ["emboviz"]
 
 # Make uv pick the right torch wheel automatically.
 # - Linux + CUDA (Vast.ai): falls back to PyPI default, which is CUDA-enabled.

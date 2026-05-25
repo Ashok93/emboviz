@@ -25,15 +25,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.attention_grounding import (
+from emboviz.attention_grounding import (
     extract_attention_to_image,
     find_noun_token_positions,
     score_head_language_sensitivity,
 )
-from policylens.counterfactual import classify_grounding, run_counterfactuals
-from policylens.dataset_bridge import load_bridge_episode
-from policylens.openvla import OpenVLAInference
-from policylens.visualize_verdict import VerdictPayload, render_verdict_card
+from emboviz.counterfactual import classify_grounding, run_counterfactuals
+from emboviz.dataset_bridge import load_bridge_episode
+from emboviz.openvla import OpenVLAInference
+from emboviz.visualize_verdict import VerdictPayload, render_verdict_card
 
 
 # Counterfactual instruction variants for testing the spoon/fork-style failure.
@@ -54,7 +54,7 @@ DEFAULT_VARIANTS_TEMPLATE = [
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PolicyLens Module B — language-grounding diagnostic")
+    parser = argparse.ArgumentParser(description="Emboviz Module B — language-grounding diagnostic")
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--frame-stride", type=int, default=4,
                         help="Subsample factor across the episode for counterfactual rollouts.")
@@ -202,7 +202,7 @@ def _write_report(path, payload, viz_idx, ep, args) -> None:
         for h in payload.head_sensitivities[:10]
     ) if payload.head_sensitivities else "  (no head data — noun positions not found in prompts)"
 
-    body = f"""# PolicyLens Module B — Language-Grounding Diagnostic
+    body = f"""# Emboviz Module B — Language-Grounding Diagnostic
 
 **Episode**: {args.episode}
 **Baseline instruction**: "{ep.instruction}"

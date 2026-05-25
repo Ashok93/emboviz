@@ -1,4 +1,4 @@
-"""End-to-end entry point for the PolicyLens first test.
+"""End-to-end entry point for the Emboviz first test.
 
 One command takes you from "no outputs" to "GIF + frame grid + deviation plot
 + HYPOTHESIS.md stub" in your outputs/ folder.
@@ -25,10 +25,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.attribute import compute_attributions
-from policylens.load import load_episode, load_policy
-from policylens.replay import pick_keyframes, replay_episode
-from policylens.visualize import (
+from emboviz.attribute import compute_attributions
+from emboviz.load import load_episode, load_policy
+from emboviz.replay import pick_keyframes, replay_episode
+from emboviz.visualize import (
     render_deviation_plot,
     render_frame_grid_png,
     render_side_by_side_gif,
@@ -36,7 +36,7 @@ from policylens.visualize import (
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PolicyLens first test")
+    parser = argparse.ArgumentParser(description="Emboviz first test")
     parser.add_argument("--episode", type=int, default=0, help="LeRobot pusht episode index")
     parser.add_argument("--num-keyframes", type=int, default=7, help="Frames to attribute & render")
     parser.add_argument("--ig-steps", type=int, default=16, help="Integrated Gradients integration steps")
@@ -119,7 +119,7 @@ def _write_hypothesis_stub(
     The whole point of the experiment is the human read of these images;
     forcing a written readout makes the result legible to non-authors.
     """
-    body = f"""# PolicyLens hypothesis check — episode {episode_idx}
+    body = f"""# Emboviz hypothesis check — episode {episode_idx}
 
 **Hypothesis**: small robot policy + gradient attribution → heatmaps that
 concentrate on task-relevant pixels (the T-block and the target), beating a

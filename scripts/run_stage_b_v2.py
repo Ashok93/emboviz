@@ -36,19 +36,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.concepts import (
+from emboviz.concepts import (
     build_concept_dictionary,
     extract_frame_concepts,
     find_anomalous_concepts,
 )
-from policylens.dataset_bridge import load_bridge_episode
-from policylens.openvla import OpenVLAInference
-from policylens.replay_vla import pick_keyframes, replay_vla
-from policylens.visual_attribution import (
+from emboviz.dataset_bridge import load_bridge_episode
+from emboviz.openvla import OpenVLAInference
+from emboviz.replay_vla import pick_keyframes, replay_vla
+from emboviz.visual_attribution import (
     compute_attention_rollout,
     compute_per_neuron_image_attribution,
 )
-from policylens.visualize_concepts import (
+from emboviz.visualize_concepts import (
     render_anomaly_comparison,
     render_concept_timeline,
     render_cross_modal_binding,
@@ -57,7 +57,7 @@ from policylens.visualize_concepts import (
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PolicyLens Stage B v2 — concept decomposition")
+    parser = argparse.ArgumentParser(description="Emboviz Stage B v2 — concept decomposition")
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--keyframes", type=int, default=4)
     parser.add_argument("--max-frames", type=int, default=12,
@@ -213,7 +213,7 @@ def _write_hypothesis_v2(
         for i, h in enumerate(top_concepts_at_failure)
     )
 
-    body = f"""# PolicyLens Stage B v2 — Concept Decomposition of OpenVLA-7B
+    body = f"""# Emboviz Stage B v2 — Concept Decomposition of OpenVLA-7B
 
 **Episode**: {episode_idx}
 **Instruction**: "{instruction}"

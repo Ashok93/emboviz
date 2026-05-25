@@ -35,25 +35,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from policylens.attention_grounding import (
+from emboviz.attention_grounding import (
     extract_attention_to_image,
     find_noun_token_positions,
     score_head_language_sensitivity,
 )
-from policylens.counterfactual import run_counterfactuals
-from policylens.coverage_analysis import (
+from emboviz.counterfactual import run_counterfactuals
+from emboviz.coverage_analysis import (
     analyze_dataset_coverage,
     collect_bridge_instructions,
     detect_gaps,
     render_coverage_report,
 )
-from policylens.dataset_bridge import DATASET_REPO, load_bridge_episodes
-from policylens.instruction_perturb import (
+from emboviz.dataset_bridge import DATASET_REPO, load_bridge_episodes
+from emboviz.instruction_perturb import (
     OBJECT_CATEGORIES,
     build_perturbations,
     pick_target_noun,
 )
-from policylens.openvla import OpenVLAInference
+from emboviz.openvla import OpenVLAInference
 
 
 def main() -> int:
@@ -346,7 +346,7 @@ def _render_full_card(out_path, *, primary_ep, primary_cf, primary_per_axis,
     import numpy as np
     from PIL import Image
 
-    from policylens.attention_grounding import aggregate_attention_across_heads
+    from emboviz.attention_grounding import aggregate_attention_across_heads
 
     fig = plt.figure(figsize=(16, 18))
     gs = fig.add_gridspec(
@@ -567,7 +567,7 @@ def _write_final_report(path, *, primary_ep, axis_summary, paired_noun_vs_ood,
     tag, verdict = _make_sharp_verdict(primary_per_axis, axis_summary, paired_noun_vs_ood)
 
     lines = [
-        "# PolicyLens — Final Verdict",
+        "# Emboviz — Final Verdict",
         "",
         f"## VERDICT: **{tag.upper()}**",
         "",
