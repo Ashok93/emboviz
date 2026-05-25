@@ -263,16 +263,18 @@ def run_story(args) -> None:
     print(f"      sensitivity frames: {len(sensitivity_per_frame)}", flush=True)
     print(f"      target-mask frames: {len(target_mask_per_frame)}", flush=True)
 
-    # --- 6. expert delta + Rerun export + failure moments ----------------
-    # We report L2 expert delta AND per-dim absolute delta (with dim names
-    # from the robot profile when available). This is the single most
-    # important signal for spotting action-space convention mismatches —
-    # if dim "gripper" has Δ=2.0 while every other dim has Δ=0.05, you're
-    # comparing models that use different sign/range conventions for the
-    # gripper. The L2 alone would just look like "model is bad."
-    print(f"[6/7] per-frame expert delta (L2 + per-dim) + Rerun export...", flush=True)
-    expert_delta_per_frame: list[float] = []
-    expert_delta_per_frame_per_dim: list[list[float]] = []
+    # --- 6. expert delta (imitation-accuracy only) + Rerun + failure moments
+    # expert_delta is an IMITATION-ACCURACY metric, not a deployment-debugging
+    # metric. It compares the model's prediction to the action a human
+    # demonstrator recorded for the SAME frame. Only meaningful when the
+    # dataset has recorded expert actions (training/validation demos) —
+    # NOT for raw deployment rollouts where the robot was driven by the
+    # model and no human ever teleoperated those frames.
+    print(f"[6/7] expert delta (imitation accuracy) + Rerun export...", flush=True)
+    has_expert = any(
+        scene.metadata.get("expert_action") is not None
+        for scene in trajectory.frames
+    )
     profile = trajectory.frames[0].profile
     dim_names: list[str] = (
         list(profile.action.dim_names)
@@ -280,69 +282,69 @@ def run_story(args) -> None:
            and profile.action.dim_names is not None
         else []
     )
-    pred_means = None
-    expert_means = None
-    n_compared_dims = 0
-    for scene in trajectory.frames:
-        pred = model.predict(scene).action
-        expert = scene.metadata.get("expert_action")
-        if expert is None:
-            expert_delta_per_frame.append(float("nan"))
-            expert_delta_per_frame_per_dim.append([])
-            continue
-        expert_arr = np.asarray(expert, dtype=np.float32)
-        n = min(len(pred), len(expert_arr))
-        n_compared_dims = n
-        per_dim = (pred[:n] - expert_arr[:n]).tolist()
-        expert_delta_per_frame_per_dim.append(per_dim)
-        expert_delta_per_frame.append(float(np.linalg.norm(per_dim)))
-        pred_means = (pred[:n].astype(np.float64)
-                      if pred_means is None
-                      else pred_means + pred[:n].astype(np.float64))
-        expert_means = (expert_arr[:n].astype(np.float64)
-                        if expert_means is None
-                        else expert_means + expert_arr[:n].astype(np.float64))
-    valid = [d for d in expert_delta_per_frame if not (d != d)]
-    mean_delta = float(np.mean(valid)) if valid else float("nan")
 
-    # Per-dim mean absolute Δ across frames. If a single dim dominates the
-    # L2 sum, that dim is the convention-mismatch suspect.
+    expert_delta_per_frame: list[float] = []
+    expert_delta_per_frame_per_dim: list[list[float]] = []
     per_dim_mean_abs: list[float] = []
     per_dim_max_abs: list[float] = []
-    if expert_delta_per_frame_per_dim and n_compared_dims > 0:
-        arr = np.array(
-            [d for d in expert_delta_per_frame_per_dim if d],
-            dtype=np.float32,
-        )
-        per_dim_mean_abs = np.abs(arr).mean(axis=0).tolist()
-        per_dim_max_abs  = np.abs(arr).max(axis=0).tolist()
+    dim_label: list[str] = []
+    mean_delta: float = float("nan")
 
-    dim_label = (
-        dim_names[:n_compared_dims]
-        if dim_names and len(dim_names) >= n_compared_dims
-        else [f"d{i}" for i in range(n_compared_dims)]
-    )
-    print(f"      expert Δ L2 per-frame: {[f'{d:.3f}' for d in expert_delta_per_frame]}", flush=True)
-    print(f"      mean L2: {mean_delta:.3f}", flush=True)
-    if per_dim_mean_abs:
-        print(f"      per-dim mean |Δ|:", flush=True)
-        for nm, m, mx in zip(dim_label, per_dim_mean_abs, per_dim_max_abs):
-            print(f"        {nm:>10s} : mean={m:.3f}  max={mx:.3f}", flush=True)
-        # Detect convention-mismatch suspects: dims whose mean|Δ| is
-        # >= 3× the median across dims.
-        med = float(np.median(per_dim_mean_abs))
-        suspects = [
-            (nm, m) for nm, m in zip(dim_label, per_dim_mean_abs)
-            if med > 1e-6 and m >= 3 * med
-        ]
-        if suspects:
-            print(f"      ⚠️ convention-mismatch suspects (dim |Δ| >= 3× median):", flush=True)
-            for nm, m in suspects:
-                print(f"        {nm} mean|Δ|={m:.3f} vs median={med:.3f}", flush=True)
+    if not has_expert:
+        print(f"      expert_delta SKIPPED — dataset has no recorded "
+              f"expert actions (typical for deployment rollouts).", flush=True)
+        not_applicable["evaluation.expert_delta"] = (
+            "dataset has no recorded expert action column "
+            "(scene.metadata['expert_action'] is None on every frame). "
+            "expert_delta only applies to training/validation demos where "
+            "a human demonstrator's action was recorded per frame; raw "
+            "deployment rollouts can't be evaluated against an expert "
+            "they don't have."
+        )
+    else:
+        n_compared_dims = 0
+        for scene in trajectory.frames:
+            pred = model.predict(scene).action
+            expert = scene.metadata.get("expert_action")
+            if expert is None:
+                # Mixed case: this frame lacks expert; skip cleanly
+                continue
+            expert_arr = np.asarray(expert, dtype=np.float32)
+            n = min(len(pred), len(expert_arr))
+            n_compared_dims = n
+            per_dim = (pred[:n] - expert_arr[:n]).tolist()
+            expert_delta_per_frame_per_dim.append(per_dim)
+            expert_delta_per_frame.append(float(np.linalg.norm(per_dim)))
+        if expert_delta_per_frame:
+            mean_delta = float(np.mean(expert_delta_per_frame))
+            arr = np.array(expert_delta_per_frame_per_dim, dtype=np.float32)
+            per_dim_mean_abs = np.abs(arr).mean(axis=0).tolist()
+            per_dim_max_abs  = np.abs(arr).max(axis=0).tolist()
+            dim_label = (
+                dim_names[:n_compared_dims]
+                if dim_names and len(dim_names) >= n_compared_dims
+                else [f"d{i}" for i in range(n_compared_dims)]
+            )
+            print(f"      imitation L2 per-frame: "
+                  f"{[f'{d:.3f}' for d in expert_delta_per_frame]}", flush=True)
+            print(f"      mean L2: {mean_delta:.3f}", flush=True)
+            print(f"      per-dim |Δ| (NOTE: imitation accuracy on demo "
+                  f"data; not a deployment-failure signal):", flush=True)
+            for nm, m, mx in zip(dim_label, per_dim_mean_abs, per_dim_max_abs):
+                print(f"        {nm:>10s} : mean={m:.3f}  max={mx:.3f}", flush=True)
+            med = float(np.median(per_dim_mean_abs))
+            suspects = [
+                (nm, m) for nm, m in zip(dim_label, per_dim_mean_abs)
+                if med > 1e-6 and m >= 3 * med
+            ]
+            if suspects:
+                print(f"      ⚠️ convention-mismatch suspects (dim |Δ| >= 3× median):", flush=True)
+                for nm, m in suspects:
+                    print(f"        {nm} mean|Δ|={m:.3f} vs median={med:.3f}", flush=True)
 
     moments = find_failure_moments(
         per_axis,
-        expert_delta_per_frame=expert_delta_per_frame,
+        expert_delta_per_frame=expert_delta_per_frame if has_expert else None,
         min_critical_axes=2,
     )
     print(f"      failure moments (≥2 critical):", flush=True)
@@ -369,17 +371,29 @@ def run_story(args) -> None:
         "frame_indices":     list(trajectory.frame_indices),
         "instruction":       trajectory.frames[0].instruction,
         "calibration":       calibration.to_summary(),
-        "action_dim_names":  dim_label,
-        "expert_delta_per_dim_mean_abs": per_dim_mean_abs,
-        "expert_delta_per_dim_max_abs":  per_dim_max_abs,
-        "expert_delta_per_frame_per_dim": expert_delta_per_frame_per_dim,
         "per_axis":          {axis: tr.to_summary() for axis, tr in per_axis.items()},
         "trajectory_axes":   trajectory_axes,
         "not_applicable":    not_applicable,
         "paraphrase_deltas": paraphrase_deltas,
         "paraphrase_mean_delta": paraphrase_mean,
-        "expert_delta_per_frame": expert_delta_per_frame,
-        "expert_delta_mean": mean_delta,
+        # Imitation-accuracy block — only populated when the dataset has
+        # recorded expert actions. Absent when running on deployment rollouts.
+        "imitation_accuracy": (
+            {
+                "expert_delta_per_frame":         expert_delta_per_frame,
+                "expert_delta_mean":              mean_delta,
+                "action_dim_names":               dim_label,
+                "expert_delta_per_dim_mean_abs":  per_dim_mean_abs,
+                "expert_delta_per_dim_max_abs":   per_dim_max_abs,
+                "expert_delta_per_frame_per_dim": expert_delta_per_frame_per_dim,
+                "note": (
+                    "Imitation-accuracy is per-frame distance between the "
+                    "model's prediction and the dataset's recorded expert "
+                    "action. Useful for validation runs against training/demo "
+                    "data; NOT a deployment-debug signal."
+                ),
+            } if has_expert else None
+        ),
         "failure_moments": [
             {
                 "frame_idx": fm.frame_idx,
