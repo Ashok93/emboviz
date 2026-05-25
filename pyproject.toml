@@ -4,18 +4,19 @@ version = "0.1.0"
 description = "Emboviz — diagnostic and interpretability framework for embodied-AI policies (VLAs, diffusion policies, world models, humanoids). Apache 2.0."
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.13"
 
+# Base install is intentionally model-free: torch + viz + general infra only.
+# Every model adapter is an optional group below; users install the one
+# matching their setup (often in its own virtualenv due to upstream pins).
 dependencies = [
     # Core ML
     "torch>=2.2.0",
     "torchvision>=0.17.0",
-    "numpy>=1.26,<2.0",
-    # LeRobot — provides pretrained Diffusion Policy + pusht dataset
-    "lerobot>=0.3.0",
-    # Attribution
-    "captum>=0.7.0",
-    # Visualization
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    # Visualization + media
     "matplotlib>=3.8",
     "imageio>=2.34",
     "imageio-ffmpeg>=0.4.9",
@@ -23,28 +24,45 @@ dependencies = [
     # Utilities
     "tqdm>=4.66",
     "huggingface_hub>=0.24",
-    "scikit-learn>=1.3", # linear probes (trainer.py)
-    # Stage B (OpenVLA-7B + faithfulness)
-    "transformers>=4.40,<4.50",
-    "accelerate>=0.30",
-    "scipy>=1.11",
-    "timm>=0.9.10,<1.0", # OpenVLA's modeling code hard-checks this range
-    "tokenizers>=0.19",
-    "sentencepiece>=0.2",
+    # Playback / export targets — small deps, always useful
     "rerun-sdk>=0.22.1",
     "mcap>=1.3.1",
 ]
 
 [project.optional-dependencies]
-# Each adapter ships its own dep group so users install only what their
-# setup needs. Several adapters have incompatible transformers/torch pins
-# with the base install — those are NOT listed here (would break uv
-# resolution); instead they're documented in each adapter's docstring
-# and the README. Install conflicting adapters in their own virtualenv.
+# Each model adapter has its own group. Most adapters require their own
+# virtualenv because upstream packages pin incompatible transformers/torch.
+# `emboviz init` walks new users through picking + installing one.
+openvla = [
+    "lerobot>=0.3,<0.4",
+    "transformers>=4.40,<4.50",
+    "huggingface_hub>=0.26,<1.0",  # transformers<4.50 requires this
+    "accelerate>=0.30",
+    "timm>=0.9.10,<1.0",          # OpenVLA's modeling code hard-checks this
+    "tokenizers>=0.19",
+    "sentencepiece>=0.2",
+    "captum>=0.7.0",              # for OpenVLA attribution diagnostics
+]
+smolvla = [
+    # SmolVLA needs lerobot>=0.5; INCOMPATIBLE with openvla group above
+    "lerobot>=0.5",
+    "transformers>=4.45",
+    "accelerate>=0.30",
+]
+pi0 = [
+    # π0 / π0.5 / π0-FAST via lerobot's PI0Policy (needs newest lerobot).
+    # Alternative path: install Physical Intelligence's `openpi` from
+    # https://github.com/Physical-Intelligence/openpi in its own venv.
+    "lerobot>=0.5",
+    "transformers>=4.45",
+    "accelerate>=0.30",
+]
 gr00t = [
-    # See models/gr00t.py docstring — also install:
+    # NVIDIA Isaac-GR00T needs transformers>=4.57 (incompatible with openvla).
+    # Also install the gr00t package itself:
     #   uv pip install --no-deps git+https://github.com/NVIDIA/Isaac-GR00T.git
-    #   uv pip install transformers>=4.57
+    "transformers>=4.57",
+    "accelerate>=0.30",
     "diffusers",
     "dm-tree",
     "tyro",
@@ -61,12 +79,12 @@ gr00t = [
     "opencv-python-headless",
     "kornia",
 ]
-# openvla-oft and pi0 require entirely separate virtualenvs due to upstream
-# transformers fork pins. No optional group here — see their respective
-# adapter docstrings (models/openvla_oft.py, future models/pi0.py).
+# openvla-oft requires the moojink/transformers-openvla-oft fork (custom);
+# no PyPI install. See models/openvla_oft.py for instructions.
 
 [project.scripts]
 emboviz-run = "emboviz.cli:main"
+emboviz-init = "emboviz.cli.init:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -75,7 +93,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["emboviz"]
 
-# Make uv pick the right torch wheel automatically.
-# - Linux + CUDA (Vast.ai): falls back to PyPI default, which is CUDA-enabled.
-# - macOS: PyPI default is CPU/MPS.
-# If a specific CUDA version is needed on Vast.ai, set TORCH_INDEX in setup_vastai.sh.
+# Tell uv that adapter optional groups are mutually exclusive — they pin
+# incompatible transformers/lerobot versions and must live in separate
+# virtualenvs. Without this, `uv sync` tries to satisfy all extras at once
+# and fails.
+[tool.uv]
+conflicts = [
+    [{ extra = "openvla" }, { extra = "gr00t" }],
+    [{ extra = "openvla" }, { extra = "smolvla" }],
+    [{ extra = "openvla" }, { extra = "pi0" }],
+    [{ extra = "smolvla" }, { extra = "gr00t" }],
+    [{ extra = "pi0" }, { extra = "gr00t" }],
+]
