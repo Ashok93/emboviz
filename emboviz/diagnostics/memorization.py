@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration
+from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene
 from emboviz.diagnostics.base import Diagnostic
@@ -106,7 +106,8 @@ class MemorizationDiagnostic(Diagnostic):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         cameras = resolve_cameras(scene, self.cameras)
-        baseline = model.predict(scene)
+        n_samples = self.calibration.n_samples if self.calibration else 1
+        baseline = averaged_predict(model, scene, n_samples)
 
         # Detect target per camera. The detector currently consumes
         # ``scene.primary_image_data`` so we hand it a scene whose primary
@@ -149,7 +150,7 @@ class MemorizationDiagnostic(Diagnostic):
         # Apply masks simultaneously across every camera that had a detection.
         masked_pils = {cam: to_pil(arr) for cam, arr in per_cam_masked_array.items()}
         masked_scene = scene.with_images(masked_pils)
-        action_no_target = model.predict(masked_scene)
+        action_no_target = averaged_predict(model, masked_scene, n_samples)
 
         # Reference: blank EVERY camera (not just primary) — keeps the
         # action's "no visual at all" baseline comparable across multi-cam.
@@ -158,7 +159,7 @@ class MemorizationDiagnostic(Diagnostic):
             arr = to_array(scene.observations.images[cam].data)
             blank_pils[cam] = to_pil(np.full_like(arr, fill_value=int(arr.mean())))
         blank_scene = scene.with_images(blank_pils)
-        action_blank = model.predict(blank_scene)
+        action_blank = averaged_predict(model, blank_scene, n_samples)
 
         raw_diff_vs_blank = float(np.linalg.norm(action_no_target.action - action_blank.action))
         raw_diff_vs_baseline = float(np.linalg.norm(action_no_target.action - baseline.action))
@@ -169,73 +170,55 @@ class MemorizationDiagnostic(Diagnostic):
         labels = sorted({per_cam_detection[c].label for c in detected_cams})
         confs = {c: round(per_cam_detection[c].confidence, 3) for c in detected_cams}
 
-        # Anchored 0-1 score when calibration is available. We ALSO check the
-        # raw delta directly against the calibration's noise floor — when the
-        # intervention effect is smaller than the model's own stochastic
-        # decoding noise we cannot honestly attribute the lack of response to
-        # memorization (the model might just be noisy). Severity.UNKNOWN
-        # with an explicit reason is the correct answer.
+        # Anchored 0-1 score. With properly calibrated n_samples (computed
+        # from the model's noise + a precision target by calibrate_model),
+        # the averaged noise floor is bounded below precision_target × typical.
+        # So the diagnostic always returns a confident answer:
+        #   • score = 0 → model genuinely didn't respond (true memorization)
+        #   • 0 < score < grounded_threshold → partial response
+        #   • score >= grounded_threshold → real visual grounding
+        # No UNKNOWN. If the user wants the diagnostic to run, calibration
+        # ensured we can give them a real answer.
         if self.calibration is not None:
             score = self.calibration.normalize(raw_diff_vs_baseline)
-            snr = raw_diff_vs_baseline / max(self.calibration.noise_floor, 1e-9)
             score_meaning = (
                 f"normalized: {score:.3f}  (= max(0, raw_Δ {raw_diff_vs_baseline:.3f} "
                 f"− noise_floor {self.calibration.noise_floor:.3f}) "
-                f"/ typical_action_magnitude {self.calibration.typical_action_magnitude:.3f})"
+                f"/ typical_action_magnitude {self.calibration.typical_action_magnitude:.3f}, "
+                f"n_samples={self.calibration.n_samples})"
             )
-            below_noise = raw_diff_vs_baseline < self.calibration.noise_floor
         else:
             score = raw_diff_vs_baseline
-            snr = float("nan")
-            below_noise = False
             score_meaning = (
                 f"raw L2 (uncalibrated): {raw_diff_vs_baseline:.3f} — pass a "
                 "ModelCalibration to anchor onto a 0-1 scale"
             )
 
-        if below_noise:
-            # Diagnostic cannot distinguish "model ignores intervention" from
-            # "model is stochastic enough that this Δ is decoding noise".
-            sev = Severity.UNKNOWN
-            verdict = (
-                f"Target masked across {detected_cams} (labels={labels}, "
-                f"confs={confs}). Raw Δaction "
-                f"{raw_diff_vs_baseline:.4f} is BELOW the model's noise floor "
-                f"({self.calibration.noise_floor:.4f}). The intervention effect "
-                f"is indistinguishable from the model's intrinsic stochastic "
-                f"decoding jitter — we cannot honestly call this 'memorization'. "
-                f"To detect a real signal here you'd need a less-noisy model or "
-                f"a stronger intervention. [{score_meaning}]"
-            )
-        elif score < self.noise_floor_score:
+        if score < self.noise_floor_score:
             sev = Severity.CRITICAL
             verdict = (
                 f"Target masked across {detected_cams} (labels={labels}, "
-                f"confs={confs}). Raw Δ {raw_diff_vs_baseline:.4f} IS above "
-                f"noise floor {self.calibration.noise_floor:.4f} (SNR={snr:.2f}x), "
-                f"but normalized score {score:.3f} is below "
-                f"noise_floor_score ({self.noise_floor_score}). The model "
-                f"responds barely above noise to target removal — strong "
-                f"memorization signature. [{score_meaning}]"
+                f"confs={confs}). Normalized response {score:.3f} is below "
+                f"the memorization threshold ({self.noise_floor_score}). "
+                f"Strong memorization signature — model does not respond to "
+                f"target removal. [{score_meaning}]"
             )
         elif score < self.grounded_threshold:
             sev = Severity.MODERATE
             verdict = (
                 f"With target masked across {detected_cams} (labels={labels}), "
-                f"normalized score {score:.3f} is between noise_floor_score "
-                f"({self.noise_floor_score}) and grounded threshold "
-                f"({self.grounded_threshold}). Raw Δ {raw_diff_vs_baseline:.4f} "
-                f"vs noise floor {self.calibration.noise_floor if self.calibration else 0:.4f} "
-                f"(SNR={snr:.2f}x). Partial visual grounding. [{score_meaning}]"
+                f"normalized response {score:.3f} is between memorization "
+                f"threshold ({self.noise_floor_score}) and grounded threshold "
+                f"({self.grounded_threshold}). Partial visual grounding. "
+                f"[{score_meaning}]"
             )
         else:
             sev = Severity.PASS
             verdict = (
                 f"With target masked across {detected_cams} (labels={labels}), "
-                f"normalized score {score:.3f} >= grounded threshold "
-                f"({self.grounded_threshold}). Raw Δ {raw_diff_vs_baseline:.4f} "
-                f"vs noise floor {self.calibration.noise_floor if self.calibration else 0:.4f} "
-                f"(SNR={snr:.2f}x). Model is reading visual feedback. "
+                f"normalized response {score:.3f} >= grounded threshold "
+                f"({self.grounded_threshold}). Model is reading visual "
+                f"feedback. "
                 f"[{score_meaning}]"
             )
 

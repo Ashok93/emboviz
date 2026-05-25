@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 
+from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
@@ -41,10 +42,12 @@ class SensitivityMapDiagnostic(Diagnostic):
         grid_side: int = 8,
         metric: Optional[ActionDivergenceMetric] = None,
         cameras: Optional[list[str]] = None,
+        calibration: Optional[ModelCalibration] = None,
     ):
         self.grid_side = grid_side
         self._metric_override = metric
         self.cameras = cameras
+        self.calibration = calibration
         self.name = f"sensitivity_map_{grid_side}x{grid_side}"
         self.axis = "vision.scene_sensitivity"
 
@@ -54,7 +57,8 @@ class SensitivityMapDiagnostic(Diagnostic):
 
         cameras = resolve_cameras(scene, self.cameras)
         metric = self._metric_override or ActionDivergenceMetric(model=model)
-        baseline = model.predict(scene)
+        n_samples = self.calibration.n_samples if self.calibration else 1
+        baseline = averaged_predict(model, scene, n_samples)
 
         per_camera_grid: dict[str, np.ndarray] = {}
         per_camera_top_k: dict[str, float] = {}
@@ -74,7 +78,7 @@ class SensitivityMapDiagnostic(Diagnostic):
                     y0, x0 = gi * ph, gj * pw
                     masked[y0:y0 + ph, x0:x0 + pw] = chan_mean
                     pert_scene = scene.with_image(to_pil(masked), camera=cam)
-                    pert = model.predict(pert_scene)
+                    pert = averaged_predict(model, pert_scene, n_samples)
                     drops[gi, gj] = metric.compute(baseline, pert)
             per_camera_grid[cam] = drops
             per_camera_image_shape[cam] = (H, W)

@@ -37,7 +37,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration
+from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene, Trajectory
 from emboviz.diagnostics.base import Diagnostic
@@ -102,7 +102,8 @@ class ChunkConsistencyDiagnostic(Diagnostic):
         # Collect chunks from every frame.
         chunks: list[np.ndarray] = []
         for scene in trajectory.frames:
-            ar = model.predict(scene)
+            n_samples = self.calibration.n_samples if self.calibration else 1
+            ar = averaged_predict(model, scene, n_samples)
             if ar.action_chunk is None:
                 return self._not_applicable(
                     model, scene,

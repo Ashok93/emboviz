@@ -106,6 +106,11 @@ def run_story(args) -> None:
     calibration = calibrate_model(model, trajectory, n_noise_probes=5)
     print(f"      noise_floor              = {calibration.noise_floor:.4f}", flush=True)
     print(f"      typical_action_magnitude = {calibration.typical_action_magnitude:.4f}", flush=True)
+    print(f"      n_samples (averaging)    = {calibration.n_samples}", flush=True)
+    if calibration.single_sample_noise_floor is not None:
+        print(f"      (single-sample noise floor was "
+              f"{calibration.single_sample_noise_floor:.4f}; "
+              f"averaging reduces it to {calibration.noise_floor:.4f})", flush=True)
     print(f"      → diagnostic scores reported on a 0-1 anchored scale", flush=True)
 
     # --- 3b. per-frame diagnostics with calibration ----------------------
@@ -113,24 +118,47 @@ def run_story(args) -> None:
     gd_sam = GroundingDINOSAMDetector(device="cuda")
     per_axis: dict = {}
 
-    drift_res = None
-    if model.capabilities & Capability.ATTENTION:
-        try:
-            drift_res = AttentionDriftDiagnostic().run_trajectory(model, trajectory)
-            print(f"      attention_drift: {drift_res.severity.value} ({drift_res.scalar_score:.1f}px)", flush=True)
-        except Exception as e:
-            print(f"      attention_drift skipped: {type(e).__name__}: {e}", flush=True)
-    else:
-        print(f"      attention_drift skipped: model lacks ATTENTION", flush=True)
+    # Track diagnostics that SKIP for architectural reasons (model doesn't
+    # support what the axis measures). These don't appear in per_axis at all
+    # — they're listed separately in summary.json as "not_applicable" so
+    # the user knows why a given axis isn't reported.
+    not_applicable: dict[str, str] = {}
 
-    try:
-        chunk_res = ChunkConsistencyDiagnostic(calibration=calibration).run_trajectory(model, trajectory)
-        print(f"      chunk_consistency: {chunk_res.severity.value} "
-              f"(normalized mean_delta={chunk_res.scalar_score:.3f}, "
-              f"raw={chunk_res.raw['raw_mean_delta']:.3f})", flush=True)
-    except Exception as e:
-        chunk_res = None
-        print(f"      chunk_consistency failed: {type(e).__name__}: {e}", flush=True)
+    # Trajectory-level scalars (attention_drift, chunk_consistency) live in
+    # ``trajectory_axes`` and follow the same shape as per_axis but they're
+    # not wrapped in TrajectoryDiagnosticResult.
+    trajectory_axes: dict = {}
+
+    if model.capabilities & Capability.ATTENTION:
+        drift = AttentionDriftDiagnostic().run_trajectory(model, trajectory)
+        if drift.severity == Severity.UNKNOWN:
+            not_applicable["internal.attention_drift"] = drift.explanation
+        else:
+            trajectory_axes["internal.attention_drift"] = {
+                "severity":      drift.severity.value,
+                "scalar_score":  drift.scalar_score,
+                "explanation":   drift.explanation,
+            }
+            print(f"      attention_drift: {drift.severity.value} "
+                  f"({drift.scalar_score:.1f}px)", flush=True)
+    else:
+        not_applicable["internal.attention_drift"] = (
+            f"model {model.model_id} does not expose Capability.ATTENTION"
+        )
+
+    chunk = ChunkConsistencyDiagnostic(calibration=calibration).run_trajectory(model, trajectory)
+    if chunk.severity == Severity.UNKNOWN:
+        not_applicable["internal.chunk_consistency"] = chunk.explanation
+    else:
+        trajectory_axes["internal.chunk_consistency"] = {
+            "severity":     chunk.severity.value,
+            "scalar_score": chunk.scalar_score,
+            "explanation":  chunk.explanation,
+            "raw_mean_delta": chunk.raw.get("raw_mean_delta"),
+        }
+        print(f"      chunk_consistency: {chunk.severity.value} "
+              f"(normalized mean_delta={chunk.scalar_score:.3f}, "
+              f"raw={chunk.raw['raw_mean_delta']:.3f})", flush=True)
 
     print(f"      memorization (GD+SAM per camera, calibrated) ...", flush=True)
     memo = TrajectoryDiagnostic(
@@ -139,15 +167,38 @@ def run_story(args) -> None:
     )
     per_axis["vision.memorization"] = memo.run(model, trajectory)
 
+    # Compute trajectory-level substitution values for state + action_history
+    # so ModalityDropoutDiagnostic can substitute with a from-distribution
+    # valid sample instead of zeros (zeros break structured representations
+    # like GR00T's 6D rotation in eef_9d). Use the LAST frame's state as the
+    # substitution for every frame — it's a real recorded state, guaranteed
+    # valid, and uninformative for any non-last frame.
+    last_scene = trajectory.frames[-1]
+    sub_state = (
+        np.asarray(last_scene.observations.state.values, dtype=np.float32)
+        if last_scene.observations.state is not None else None
+    )
+    sub_hist = (
+        np.asarray(last_scene.observations.action_history.actions, dtype=np.float32)
+        if last_scene.observations.action_history is not None else None
+    )
     print(f"      modality dropout (per camera + per modality, calibrated) ...", flush=True)
     md = TrajectoryDiagnostic(
-        ModalityDropoutDiagnostic(calibration=calibration), progress=True,
+        ModalityDropoutDiagnostic(
+            calibration=calibration,
+            substitution_state=sub_state,
+            substitution_action_history=sub_hist,
+        ),
+        progress=True,
     )
     per_axis["input.modality_dropout"] = md.run(model, trajectory)
 
     print(f"      [3c] sensitivity map ({args.sensitivity_grid_side}x{args.sensitivity_grid_side}, per camera) ...", flush=True)
     sm = TrajectoryDiagnostic(
-        SensitivityMapDiagnostic(grid_side=args.sensitivity_grid_side), progress=True,
+        SensitivityMapDiagnostic(
+            grid_side=args.sensitivity_grid_side, calibration=calibration,
+        ),
+        progress=True,
     )
     per_axis["vision.scene_sensitivity"] = sm.run(model, trajectory)
 
@@ -323,20 +374,8 @@ def run_story(args) -> None:
         "expert_delta_per_dim_max_abs":  per_dim_max_abs,
         "expert_delta_per_frame_per_dim": expert_delta_per_frame_per_dim,
         "per_axis":          {axis: tr.to_summary() for axis, tr in per_axis.items()},
-        "attention_drift": (
-            {
-                "severity": drift_res.severity.value,
-                "mean_drift_px": drift_res.scalar_score,
-                "explanation": drift_res.explanation,
-            } if drift_res else None
-        ),
-        "chunk_consistency": (
-            {
-                "severity": chunk_res.severity.value,
-                "mean_delta": chunk_res.scalar_score,
-                "explanation": chunk_res.explanation,
-            } if chunk_res else None
-        ),
+        "trajectory_axes":   trajectory_axes,
+        "not_applicable":    not_applicable,
         "paraphrase_deltas": paraphrase_deltas,
         "paraphrase_mean_delta": paraphrase_mean,
         "expert_delta_per_frame": expert_delta_per_frame,
