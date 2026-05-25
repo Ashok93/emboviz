@@ -49,14 +49,11 @@ smolvla = [
     "transformers>=4.45",
     "accelerate>=0.30",
 ]
-pi0 = [
-    # π0 / π0.5 / π0-FAST via lerobot's PI0Policy (needs newest lerobot).
-    # Alternative path: install Physical Intelligence's `openpi` from
-    # https://github.com/Physical-Intelligence/openpi in its own venv.
-    "lerobot>=0.5",
-    "transformers>=4.45",
-    "accelerate>=0.30",
-]
+# pi0 has NO extras here — it runs in openpi's own venv (their pyproject
+# pins everything correctly). See models/pi0.py docstring for the
+# `openpi clone + uv sync` flow. Including pi0 in extras would force
+# lerobot>=0.5 (which needs Python>=3.12) into the global resolver and
+# conflict with openvla's lerobot<0.4.
 gr00t = [
     # NVIDIA Isaac-GR00T needs transformers>=4.57 (incompatible with openvla).
     # Also install the gr00t package itself:
@@ -101,7 +98,5 @@ packages = ["emboviz"]
 conflicts = [
     [{ extra = "openvla" }, { extra = "gr00t" }],
     [{ extra = "openvla" }, { extra = "smolvla" }],
-    [{ extra = "openvla" }, { extra = "pi0" }],
     [{ extra = "smolvla" }, { extra = "gr00t" }],
-    [{ extra = "pi0" }, { extra = "gr00t" }],
 ]

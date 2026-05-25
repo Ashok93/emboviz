@@ -1,0 +1,29 @@
+π0 (pi0_aloha_sim) — language-axis diagnostics
+Instruction: grab the red cube and place it in the bin
+
+  critical   counterfactual.noun_swap                  score=0.0884
+  critical   counterfactual.color_swap                 score=0.0953
+  critical   counterfactual.empty                      score=0.0967
+  critical   counterfactual.refusal_absent             score=0.1204
+  critical   counterfactual.ood_task                   score=0.0866
+  critical   counterfactual.negation                   score=0.0823
+
+=== Per-finding ===
+
+[CRITICAL] language.noun_swap
+  Action divergence under noun_swap averages 0.088, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.noun_swap cue.
+
+[CRITICAL] language.color_swap
+  Action divergence under color_swap averages 0.095, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.color_swap cue.
+
+[CRITICAL] language.empty
+  Action divergence under empty averages 0.097, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.empty cue.
+
+[CRITICAL] language.refusal_absent
+  Action divergence under refusal_absent averages 0.120, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.refusal_absent cue.
+
+[CRITICAL] language.ood_task
+  Action divergence under ood_task averages 0.087, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.ood_task cue.
+
+[CRITICAL] language.negation
+  Action divergence under negation averages 0.082, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.negation cue.

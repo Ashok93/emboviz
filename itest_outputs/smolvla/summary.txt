@@ -1,0 +1,33 @@
+SmolVLA on lerobot/aloha_sim_transfer_cube_human
+Instruction: pick up the red cube and transfer it to the other arm
+
+  critical   counterfactual.noun_swap                  score=0.1646
+  critical   counterfactual.empty                      score=0.0970
+  critical   counterfactual.ood_task                   score=0.0433
+  critical   counterfactual.lighting_shift             score=0.1471
+  critical   counterfactual.gaussian_noise             score=0.2132
+  critical   memorization_test                         score=0.1252
+  pass       sweep.occlusion                           score=0.1817
+
+=== Per-finding ===
+
+[CRITICAL] language.noun_swap
+  Action divergence under noun_swap averages 0.165, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.noun_swap cue.
+
+[CRITICAL] language.empty
+  Action divergence under empty averages 0.097, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.empty cue.
+
+[CRITICAL] language.ood_task
+  Action divergence under ood_task averages 0.043, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the language.ood_task cue.
+
+[PASS] vision.occlusion
+  AUC over sweep = 0.182; robust along vision.occlusion.
+
+[CRITICAL] vision.lighting
+  Action divergence under lighting_shift averages 0.147, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the vision.lighting cue.
+
+[CRITICAL] vision.sensor_noise
+  Action divergence under gaussian_noise averages 0.213, below the noise floor (0.5). The model produces nearly identical actions across variants — it isn't using the vision.sensor_noise cue.
+
+[CRITICAL] vision.memorization
+  Even with the target masked, the model produces an action that is nearly identical to the original (Δ=0.125) and has substantial magnitude (0.917). It's memorizing the trajectory rather than reading the scene.
