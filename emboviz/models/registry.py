@@ -48,7 +48,8 @@ def _try_lazy_register(name: str) -> None:
         "gr00t": "emboviz.models.gr00t",
         "gr00t-n1": "emboviz.models.gr00t",
         "openvla-oft": "emboviz.models.openvla_oft",
-        # "pi0": "emboviz.models.pi0",      # future — needs custom adapter (lerobot version conflicts)
+        "pi0": "emboviz.models.pi0",
+        "pi05": "emboviz.models.pi0",
     }
     module = builtin.get(name)
     if module:
