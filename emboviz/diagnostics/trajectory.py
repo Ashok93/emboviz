@@ -87,21 +87,50 @@ class TrajectoryDiagnosticResult:
             if rank.get(r.severity, -1) >= threshold
         ]
 
+    def bootstrap_ci(
+        self,
+        n_resamples: int = 1000,
+        alpha: float = 0.05,
+        seed: int = 0,
+    ) -> tuple[float, float]:
+        """Bootstrap 95% confidence interval for ``mean_score``.
+
+        Resamples the per-frame scores with replacement and reports the
+        percentile interval. Returns ``(NaN, NaN)`` if fewer than 2 valid
+        scores are available. The interval communicates "how much would
+        this number wobble if we picked a different set of frames from
+        the same distribution?" — a critical sanity check when each
+        trajectory only has 8 frames.
+        """
+        s = self.scores[~np.isnan(self.scores)]
+        if s.size < 2:
+            return (float("nan"), float("nan"))
+        rng = np.random.default_rng(seed)
+        means = np.array([
+            rng.choice(s, size=s.size, replace=True).mean()
+            for _ in range(n_resamples)
+        ], dtype=np.float64)
+        lo = float(np.percentile(means, 100 * alpha / 2))
+        hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
+        return (lo, hi)
+
     def to_summary(self) -> dict:
+        ci_lo, ci_hi = self.bootstrap_ci()
         return {
-            "diagnostic_name": self.diagnostic_name,
-            "axis": self.axis,
-            "model_id": self.model_id,
+            "diagnostic_name":   self.diagnostic_name,
+            "axis":              self.axis,
+            "model_id":          self.model_id,
             "trajectory_source": self.trajectory_source,
-            "n_frames": len(self.per_frame),
-            "mean_score": self.mean_score,
-            "median_score": self.median_score,
-            "worst_frame_idx": self.worst_frame_idx,
-            "failure_moments": self.failure_moments(),
-            "direction": self.direction,
-            "frame_indices": self.frame_indices,
-            "scores": self.scores.tolist(),
-            "severities": [s.value for s in self.severities],
+            "n_frames":          len(self.per_frame),
+            "mean_score":        self.mean_score,
+            "mean_score_ci95":   [ci_lo, ci_hi],
+            "median_score":      self.median_score,
+            "worst_frame_idx":   self.worst_frame_idx,
+            "failure_moments":   self.failure_moments(),
+            "direction":         self.direction,
+            "frame_indices":     self.frame_indices,
+            "scores":            self.scores.tolist(),
+            "severities":        [s.value for s in self.severities],
         }
 
 

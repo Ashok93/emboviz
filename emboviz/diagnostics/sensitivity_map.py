@@ -58,6 +58,7 @@ class SensitivityMapDiagnostic(Diagnostic):
 
         per_camera_grid: dict[str, np.ndarray] = {}
         per_camera_top_k: dict[str, float] = {}
+        per_camera_consumed: dict[str, bool] = {}
         per_camera_image_shape: dict[str, tuple[int, int]] = {}
 
         for cam in cameras:
@@ -78,34 +79,62 @@ class SensitivityMapDiagnostic(Diagnostic):
             per_camera_grid[cam] = drops
             per_camera_image_shape[cam] = (H, W)
             flat = drops.flatten()
-            top_k = float(np.sort(flat)[-self.grid_side:].sum() / max(flat.sum(), 1e-9))
-            per_camera_top_k[cam] = top_k
+            total = float(flat.sum())
+            # "Consumed" = some intervention on this camera moved the action.
+            # Cameras the model doesn't read produce flat-zero grids — we
+            # mark those explicitly rather than reporting a misleading
+            # concentration of 0/0.
+            if total < 1e-9:
+                per_camera_top_k[cam] = 0.0
+                per_camera_consumed[cam] = False
+            else:
+                per_camera_top_k[cam] = float(np.sort(flat)[-self.grid_side:].sum() / total)
+                per_camera_consumed[cam] = True
 
-        # Aggregate: the worst (most-diffuse) camera drives the verdict —
-        # a model that uses one camera well but ignores another should
-        # still raise a flag here.
-        worst_cam = min(per_camera_top_k, key=per_camera_top_k.get)
-        scalar = float(per_camera_top_k[worst_cam])
+        consumed_cams = [c for c in cameras if per_camera_consumed[c]]
+        ignored_cams = [c for c in cameras if not per_camera_consumed[c]]
 
-        if scalar > 0.5:
+        # Scalar: mean concentration across CONSUMED cameras only. The fact
+        # that ignored cameras exist is reported separately in the verdict
+        # (not folded into the headline number as a misleading min()).
+        if consumed_cams:
+            scalar = float(np.mean([per_camera_top_k[c] for c in consumed_cams]))
+        else:
+            scalar = 0.0
+
+        if not consumed_cams:
+            sev = Severity.UNKNOWN
+            verdict = (
+                f"Model did not respond to per-cell masking on ANY of "
+                f"{cameras}. Either the model genuinely ignores all "
+                "visual input on this scene, or the perturbation magnitudes "
+                "are below the model's noise floor."
+            )
+        elif scalar > 0.5:
             sev = Severity.PASS
             verdict = (
-                f"All cameras' sensitivity is concentrated (worst={worst_cam} "
-                f"at {scalar:.1%}). Model uses focused regions per camera."
+                f"Mean concentration across consumed cameras {consumed_cams} "
+                f"is {scalar:.1%} (top {self.grid_side} cells per cam capture "
+                f">50% of sensitivity). Model uses focused regions."
             )
         elif scalar > 0.25:
             sev = Severity.INFO
             verdict = (
-                f"Sensitivity moderately distributed; worst camera "
-                f"{worst_cam}={scalar:.1%}. Model uses several regions on "
-                f"at least one camera."
+                f"Mean concentration across consumed cameras {consumed_cams} "
+                f"is {scalar:.1%}. Sensitivity moderately distributed; "
+                f"model uses several regions per camera."
             )
         else:
             sev = Severity.MODERATE
             verdict = (
-                f"Sensitivity diffuse on camera {worst_cam} ({scalar:.1%}); "
-                f"model may be relying on background / distractor cues there, "
-                f"or ignoring that camera entirely."
+                f"Mean concentration across consumed cameras {consumed_cams} "
+                f"is {scalar:.1%}. Sensitivity diffuse — model may be relying "
+                f"on background cues."
+            )
+        if ignored_cams:
+            verdict += (
+                f" Cameras with zero sensitivity (model does not consume): "
+                f"{ignored_cams}."
             )
 
         return DiagnosticResult(
@@ -117,17 +146,22 @@ class SensitivityMapDiagnostic(Diagnostic):
             severity=sev,
             direction="higher_is_worse",   # diffuse sensitivity = worse
             explanation=verdict,
-            per_variant={f"cam:{cam}": v for cam, v in per_camera_top_k.items()},
+            per_variant={
+                **{f"cam:{cam}:concentration": v for cam, v in per_camera_top_k.items()},
+                **{f"cam:{cam}:consumed": float(per_camera_consumed[cam]) for cam in cameras},
+            },
             raw={
                 "sensitivity_grid_per_camera": {
                     cam: g.tolist() for cam, g in per_camera_grid.items()
                 },
                 "top_k_concentration_per_camera": per_camera_top_k,
+                "per_camera_consumed":            per_camera_consumed,
+                "consumed_cameras":               consumed_cams,
+                "ignored_cameras":                ignored_cams,
                 "image_shape_per_camera": {
                     cam: list(shape) for cam, shape in per_camera_image_shape.items()
                 },
-                "grid_side": self.grid_side,
-                "cameras_evaluated": cameras,
-                "worst_camera": worst_cam,
+                "grid_side":          self.grid_side,
+                "cameras_evaluated":  cameras,
             },
         )

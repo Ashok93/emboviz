@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from emboviz.calibration import calibrate_model
 from emboviz.core.results import Severity
 from emboviz.core.types import TokenSelector, resolve_cameras
 from emboviz.diagnostics.attention_drift import AttentionDriftDiagnostic
@@ -99,12 +100,19 @@ def run_story(args) -> None:
     print(f"      cameras in scene: {sorted(trajectory.frames[0].observations.images)}", flush=True)
     print(f'      instruction: "{trajectory.frames[0].instruction}"', flush=True)
 
-    # --- 3. per-frame diagnostics (per-camera now!) ----------------------
-    print(f"[3/7] per-frame diagnostics across the window...", flush=True)
+    # --- 3a. CALIBRATION: noise floor + typical action magnitude --------
+    print(f"[3a/7] calibrating model on this trajectory "
+          f"(noise-floor + typical action magnitude)...", flush=True)
+    calibration = calibrate_model(model, trajectory, n_noise_probes=5)
+    print(f"      noise_floor              = {calibration.noise_floor:.4f}", flush=True)
+    print(f"      typical_action_magnitude = {calibration.typical_action_magnitude:.4f}", flush=True)
+    print(f"      → diagnostic scores reported on a 0-1 anchored scale", flush=True)
+
+    # --- 3b. per-frame diagnostics with calibration ----------------------
+    print(f"[3b/7] per-frame diagnostics across the window...", flush=True)
     gd_sam = GroundingDINOSAMDetector(device="cuda")
     per_axis: dict = {}
 
-    # Trajectory-level (require multi-frame; capability-gated)
     drift_res = None
     if model.capabilities & Capability.ATTENTION:
         try:
@@ -116,21 +124,25 @@ def run_story(args) -> None:
         print(f"      attention_drift skipped: model lacks ATTENTION", flush=True)
 
     try:
-        chunk_res = ChunkConsistencyDiagnostic().run_trajectory(model, trajectory)
-        print(f"      chunk_consistency: {chunk_res.severity.value} (mean_delta={chunk_res.scalar_score:.3f})", flush=True)
+        chunk_res = ChunkConsistencyDiagnostic(calibration=calibration).run_trajectory(model, trajectory)
+        print(f"      chunk_consistency: {chunk_res.severity.value} "
+              f"(normalized mean_delta={chunk_res.scalar_score:.3f}, "
+              f"raw={chunk_res.raw['raw_mean_delta']:.3f})", flush=True)
     except Exception as e:
         chunk_res = None
         print(f"      chunk_consistency failed: {type(e).__name__}: {e}", flush=True)
 
-    # Single-scene diagnostics (per-camera) over the trajectory window
-    print(f"      [3a] memorization (GD+SAM per camera) ...", flush=True)
+    print(f"      memorization (GD+SAM per camera, calibrated) ...", flush=True)
     memo = TrajectoryDiagnostic(
-        MemorizationDiagnostic(target_detector=gd_sam), progress=True,
+        MemorizationDiagnostic(target_detector=gd_sam, calibration=calibration),
+        progress=True,
     )
     per_axis["vision.memorization"] = memo.run(model, trajectory)
 
-    print(f"      [3b] modality dropout (per camera + per modality) ...", flush=True)
-    md = TrajectoryDiagnostic(ModalityDropoutDiagnostic(), progress=True)
+    print(f"      modality dropout (per camera + per modality, calibrated) ...", flush=True)
+    md = TrajectoryDiagnostic(
+        ModalityDropoutDiagnostic(calibration=calibration), progress=True,
+    )
     per_axis["input.modality_dropout"] = md.run(model, trajectory)
 
     print(f"      [3c] sensitivity map ({args.sensitivity_grid_side}x{args.sensitivity_grid_side}, per camera) ...", flush=True)
@@ -237,15 +249,16 @@ def run_story(args) -> None:
 
     # --- 7. JSON summary -------------------------------------------------
     summary = {
-        "story_id": args.story_id,
-        "model": model.model_id,
-        "required_cameras": sorted(model.required_inputs.cameras),
-        "scene_cameras": sorted(trajectory.frames[0].observations.images),
+        "story_id":          args.story_id,
+        "model":             model.model_id,
+        "required_cameras":  sorted(model.required_inputs.cameras),
+        "scene_cameras":     sorted(trajectory.frames[0].observations.images),
         "trajectory_source": trajectory.source,
-        "n_frames": len(trajectory.frames),
-        "frame_indices": list(trajectory.frame_indices),
-        "instruction": trajectory.frames[0].instruction,
-        "per_axis": {axis: tr.to_summary() for axis, tr in per_axis.items()},
+        "n_frames":          len(trajectory.frames),
+        "frame_indices":     list(trajectory.frame_indices),
+        "instruction":       trajectory.frames[0].instruction,
+        "calibration":       calibration.to_summary(),
+        "per_axis":          {axis: tr.to_summary() for axis, tr in per_axis.items()},
         "attention_drift": (
             {
                 "severity": drift_res.severity.value,

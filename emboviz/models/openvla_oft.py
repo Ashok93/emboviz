@@ -188,15 +188,18 @@ class OpenVLAOFTAdapter(VLAModel):
             observation, observation["task_description"],
             self._action_head, self._proprio_projector,
         )
-        # `actions` is a chunk; take the first immediate action.
-        action = np.asarray(actions, dtype=np.float32).reshape(-1, self._action_dim)[0]
+        # `actions` is a chunk (chunk_len, action_dim); expose the full
+        # chunk via action_chunk and the first row as the immediate action.
+        chunk = np.asarray(actions, dtype=np.float32).reshape(-1, self._action_dim)
+        action = chunk[0]
         return ActionResult(
             action=action,
             action_dim=self._action_dim,
+            action_chunk=chunk,
             metadata={
                 "checkpoint": self.checkpoint,
                 "unnorm_key": self.unnorm_key,
-                "chunk_size": int(np.asarray(actions).reshape(-1, self._action_dim).shape[0]),
+                "chunk_size": int(chunk.shape[0]),
             },
         )
 

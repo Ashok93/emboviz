@@ -30,6 +30,7 @@ from typing import Optional
 
 import numpy as np
 
+from emboviz.calibration import ModelCalibration
 from emboviz.core.observations import (
     ActionHistory,
     GripperState,
@@ -46,11 +47,20 @@ from emboviz.perturb.image._image_utils import to_array, to_pil
 class ModalityDropoutDiagnostic(Diagnostic):
     """Drop each declared input modality (per camera for images) and measure drift.
 
+    Calibration (recommended):
+        When ``calibration`` is passed, every Δaction is normalized into a
+        0-1 anchored score so thresholds mean the same thing across models.
+
     Args:
-        noise_floor: Δaction below this counts as "model didn't notice."
-        grounded_threshold: Δaction above this counts as "model genuinely uses it."
+        noise_floor: normalized score below which the model is treated as
+            "ignoring" that modality (memorization-like signature on that input).
+        grounded_threshold: normalized score above which the model genuinely
+            uses the modality.
         cameras: which cameras to test individually. None = every required
                  camera declared by the model that is also present in the scene.
+        calibration: per-model anchors from ``emboviz.calibration.calibrate_model``.
+            Without it scores are raw L2 and thresholds become model-specific
+            magic numbers.
     """
 
     required_capabilities = Capability.INFERENCE
@@ -60,10 +70,12 @@ class ModalityDropoutDiagnostic(Diagnostic):
         noise_floor: float = 0.05,
         grounded_threshold: float = 0.30,
         cameras: Optional[list[str]] = None,
+        calibration: Optional[ModelCalibration] = None,
     ):
         self.noise_floor = noise_floor
         self.grounded_threshold = grounded_threshold
         self.cameras = cameras
+        self.calibration = calibration
         self.name = "modality_dropout"
         self.axis = "input.modality_dropout"
 
@@ -74,7 +86,11 @@ class ModalityDropoutDiagnostic(Diagnostic):
         reqs = model.required_inputs
         baseline = model.predict(scene)
 
+        def _norm(raw_delta: float) -> float:
+            return self.calibration.normalize(raw_delta) if self.calibration else raw_delta
+
         per_modality: dict[str, float] = {}
+        per_modality_raw: dict[str, float] = {}
 
         # 1. Image dropout — one variant per camera the model requires AND
         # the scene actually provides, plus an ALL-cameras combined drop.
@@ -83,23 +99,25 @@ class ModalityDropoutDiagnostic(Diagnostic):
         )
         droppable_cams = [c for c in requested_cams if c in scene.observations.images]
         skipped_cams = [c for c in requested_cams if c not in scene.observations.images]
+        def _record(key: str, raw: float):
+            per_modality_raw[key] = raw
+            per_modality[key] = _norm(raw)
+
         for cam in droppable_cams:
             arr = to_array(scene.observations.images[cam].data)
             blank = to_pil(np.full_like(arr, fill_value=int(arr.mean())))
             blank_scene = scene.with_image(blank, camera=cam)
             ar = model.predict(blank_scene)
-            per_modality[f"drop_image:{cam}"] = float(
-                np.linalg.norm(ar.action - baseline.action)
-            )
+            _record(f"drop_image:{cam}",
+                    float(np.linalg.norm(ar.action - baseline.action)))
         if len(droppable_cams) > 1:
             all_blank = {}
             for cam in droppable_cams:
                 arr = to_array(scene.observations.images[cam].data)
                 all_blank[cam] = to_pil(np.full_like(arr, fill_value=int(arr.mean())))
             ar = model.predict(scene.with_images(all_blank))
-            per_modality["drop_image:ALL"] = float(
-                np.linalg.norm(ar.action - baseline.action)
-            )
+            _record("drop_image:ALL",
+                    float(np.linalg.norm(ar.action - baseline.action)))
 
         # 2. State dropout.
         if reqs.state and scene.observations.state is not None:
@@ -109,7 +127,7 @@ class ModalityDropoutDiagnostic(Diagnostic):
             )
             new_obs = replace(scene.observations, state=zeroed_state)
             ar = model.predict(replace(scene, observations=new_obs))
-            per_modality["state"] = float(np.linalg.norm(ar.action - baseline.action))
+            _record("state", float(np.linalg.norm(ar.action - baseline.action)))
 
         # 3. Gripper dropout.
         if reqs.gripper and scene.observations.gripper is not None:
@@ -122,7 +140,7 @@ class ModalityDropoutDiagnostic(Diagnostic):
             new_gripper = replace(gripper, value=float(mid))
             new_obs = replace(scene.observations, gripper=new_gripper)
             ar = model.predict(replace(scene, observations=new_obs))
-            per_modality["gripper"] = float(np.linalg.norm(ar.action - baseline.action))
+            _record("gripper", float(np.linalg.norm(ar.action - baseline.action)))
 
         # 4. Action-history dropout.
         if reqs.action_history and scene.observations.action_history is not None:
@@ -130,20 +148,16 @@ class ModalityDropoutDiagnostic(Diagnostic):
             zeroed_hist = replace(hist, actions=np.zeros_like(hist.actions))
             new_obs = replace(scene.observations, action_history=zeroed_hist)
             ar = model.predict(replace(scene, observations=new_obs))
-            per_modality["action_history"] = float(
-                np.linalg.norm(ar.action - baseline.action)
-            )
+            _record("action_history",
+                    float(np.linalg.norm(ar.action - baseline.action)))
 
-        # 5. Instruction dropout — we substitute a single space rather than
-        # an empty string. Models with strict required_inputs validation
-        # reject empty instructions outright (correct contract), and we
-        # want to MEASURE the model's response, not trip the validator.
-        # A space is non-empty (passes validation), tokenizes to whitespace
-        # only, and conveys no task content — a clean "instruction absent"
-        # signal.
+        # 5. Instruction dropout — substitute a single space (non-empty so
+        # strict instruction validation passes; semantically empty so the
+        # model sees no task content).
         if reqs.instruction and scene.instruction is not None:
             ar = model.predict(scene.with_instruction(" "))
-            per_modality["instruction"] = float(np.linalg.norm(ar.action - baseline.action))
+            _record("instruction",
+                    float(np.linalg.norm(ar.action - baseline.action)))
 
         if not per_modality:
             return self._not_applicable(
@@ -212,12 +226,14 @@ class ModalityDropoutDiagnostic(Diagnostic):
             explanation=verdict,
             per_variant=per_modality,
             raw={
-                "per_modality_delta": per_modality,
-                "per_modality_verdict": per_modality_severity,
-                "noise_floor": self.noise_floor,
-                "grounded_threshold": self.grounded_threshold,
-                "ignored": ignored,
-                "partial": partial,
+                "per_modality_score":    per_modality,          # normalized (or raw if no calib)
+                "per_modality_raw_delta": per_modality_raw,     # always raw L2
+                "per_modality_verdict":  per_modality_severity,
+                "calibration_used":      self.calibration.to_summary() if self.calibration else None,
+                "noise_floor":           self.noise_floor,
+                "grounded_threshold":    self.grounded_threshold,
+                "ignored":               ignored,
+                "partial":               partial,
                 "used": used,
                 "tested_cameras": droppable_cams,
                 "skipped_cameras_absent_from_scene": skipped_cams,

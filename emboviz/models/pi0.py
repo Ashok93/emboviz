@@ -298,15 +298,22 @@ class Pi0Adapter(VLAModel):
         observation = self._observation_builder(scene)
         result = self._policy.infer(observation)
         actions = np.asarray(result["actions"], dtype=np.float32)
-        # openpi returns an action chunk; take the first immediate action.
+        # openpi returns an action chunk (chunk_len, action_dim). Expose
+        # the full chunk via action_chunk so ChunkConsistencyDiagnostic
+        # can test chunk[t][1] vs chunk[t+1][0] coherence — that's the
+        # actual chunk-planning quality test, not just adjacent-frame
+        # single-step delta.
         if actions.ndim >= 2:
-            action = actions[0]
+            chunk = actions if actions.ndim == 2 else actions.reshape(-1, actions.shape[-1])
+            action = chunk[0]
         else:
+            chunk = actions[np.newaxis, :]
             action = actions
         self._action_dim = int(action.size)
         return ActionResult(
             action=action,
             action_dim=self._action_dim,
+            action_chunk=chunk,
             metadata={
                 "config_name": self.config_name,
                 "chunk_shape": list(actions.shape),

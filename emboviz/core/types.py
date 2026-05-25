@@ -206,6 +206,13 @@ class ActionResult:
     action_tokens: Optional[Any] = None                 # discrete tokens if any
     action_distribution: Optional[Any] = None           # logits if available
     confidence: Optional[float] = None                  # adapter-defined scalar
+    # Multi-step action chunk if the model predicts one (π0, OFT, ACT, GR00T,
+    # diffusion policies). Shape (chunk_len, action_dim). The first row is
+    # the immediate action — same as ``self.action`` — and subsequent rows
+    # are the model's predicted future actions. Adapters that predict a
+    # single action leave this None. ChunkConsistencyDiagnostic needs this
+    # populated to do the real chunk-coherence test.
+    action_chunk: Optional[np.ndarray] = None
     metadata: dict = field(default_factory=dict)
 
 

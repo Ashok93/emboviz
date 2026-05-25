@@ -156,31 +156,45 @@ class Gr00tAdapter(VLAModel):
         observation = self._build_observation(scene)
         action_dict, _info = self.policy.get_action(observation)
 
-        # Concatenate per-action-key arrays in declared order; take the first
-        # timestep so we return a single immediate action consistent with
-        # OpenVLA-style outputs.
-        flat_parts: list[np.ndarray] = []
+        # Concatenate per-action-key arrays in declared order. GR00T's
+        # output shape is conventionally (B, T, D_key) — we keep the full
+        # T axis as the action_chunk and expose the first timestep as the
+        # immediate action (consistent with OpenVLA-style outputs).
+        chunks_per_key: list[np.ndarray] = []
         for key in self._action_keys:
             arr = action_dict.get(key)
             if arr is None:
                 continue
             arr = np.asarray(arr)
-            # Shape conventionally (B, T, D) → take batch 0, first timestep.
-            if arr.ndim == 3:
-                arr = arr[0, 0, :]
-            elif arr.ndim == 2:
-                arr = arr[0, :]
-            flat_parts.append(arr.reshape(-1))
-        action = np.concatenate(flat_parts).astype(np.float32) if flat_parts else np.zeros(0, dtype=np.float32)
+            if arr.ndim == 3:                # (B, T, D)
+                key_chunk = arr[0]           # (T, D)
+            elif arr.ndim == 2:              # (T, D)
+                key_chunk = arr
+            else:                            # (D,) — single-step
+                key_chunk = arr[np.newaxis, :]
+            chunks_per_key.append(key_chunk.astype(np.float32))
+
+        if chunks_per_key:
+            # Align time dim across keys (take min T) then concat along D.
+            min_t = min(c.shape[0] for c in chunks_per_key)
+            chunk = np.concatenate(
+                [c[:min_t] for c in chunks_per_key], axis=-1,
+            ).astype(np.float32)
+            action = chunk[0]
+        else:
+            chunk = np.zeros((1, 0), dtype=np.float32)
+            action = np.zeros(0, dtype=np.float32)
 
         self._action_dim = int(action.size)
         return ActionResult(
             action=action,
             action_dim=self._action_dim,
+            action_chunk=chunk,
             metadata={
-                "model_path": self.model_path,
+                "model_path":     self.model_path,
                 "embodiment_tag": self._embodiment_name,
-                "action_keys": list(self._action_keys),
+                "action_keys":    list(self._action_keys),
+                "chunk_shape":    list(chunk.shape),
             },
         )
 

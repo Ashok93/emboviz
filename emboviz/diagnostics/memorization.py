@@ -25,6 +25,7 @@ from typing import Optional
 
 import numpy as np
 
+from emboviz.calibration import ModelCalibration
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene
 from emboviz.diagnostics.base import Diagnostic
@@ -53,13 +54,26 @@ class MemorizationDiagnostic(Diagnostic):
         perturbed scene — exposing the action to the same intervention the
         model would see if every camera lost sight of the object.
 
+    Calibration (recommended):
+        When ``calibration`` is passed, the per-frame Δaction (raw L2 in the
+        model's action units) is normalized into a 0-1 anchored score:
+        ``score = max(0, raw_delta − noise_floor) / typical_action_magnitude``.
+        Below the noise floor the score reads 0.0 (no signal); a score of
+        ``>= grounded_threshold`` means the model is genuinely using vision.
+
     Args:
         target_detector: how to locate the target. Default = GD+SAM.
         bbox: shortcut — if you already know the target's bbox (same in
             every camera). Use only when cameras share resolution/intrinsics.
-        coherent_threshold: action magnitude / divergence threshold for
-            calling a model "memorizing." Defaults match LIBERO-Pro paper.
+        noise_floor_score: anchored 0-1 score below which the model is
+            "ignoring the intervention" (memorization signature).
+        grounded_threshold: anchored 0-1 score above which the model is
+            "genuinely reading the scene".
         cameras: which cameras to operate on. None = every camera in the scene.
+        calibration: per-model anchors from ``emboviz.calibration.calibrate_model``.
+            When None, the diagnostic falls back to raw L2 scores and a
+            single hardcoded threshold — interpretable only against this
+            model's own scale.
     """
 
     required_capabilities = Capability.INFERENCE
@@ -68,8 +82,10 @@ class MemorizationDiagnostic(Diagnostic):
         self,
         target_detector: Optional[TargetDetector] = None,
         bbox: Optional[tuple[int, int, int, int]] = None,
-        coherent_threshold: float = 0.20,
+        noise_floor_score: float = 0.05,
+        grounded_threshold: float = 0.30,
         cameras: Optional[list[str]] = None,
+        calibration: Optional["ModelCalibration"] = None,
     ):
         if bbox is not None:
             self.detector: TargetDetector = BBoxDetector(bbox)
@@ -77,8 +93,10 @@ class MemorizationDiagnostic(Diagnostic):
             self.detector = target_detector
         else:
             self.detector = GroundingDINOSAMDetector()
-        self.coherent_threshold = coherent_threshold
+        self.noise_floor_score = noise_floor_score
+        self.grounded_threshold = grounded_threshold
         self.cameras = cameras
+        self.calibration = calibration
         self.name = "memorization_test"
         self.axis = "vision.memorization"
 
@@ -142,37 +160,54 @@ class MemorizationDiagnostic(Diagnostic):
         blank_scene = scene.with_images(blank_pils)
         action_blank = model.predict(blank_scene)
 
-        diff_vs_blank = float(np.linalg.norm(action_no_target.action - action_blank.action))
-        diff_vs_baseline = float(np.linalg.norm(action_no_target.action - baseline.action))
+        raw_diff_vs_blank = float(np.linalg.norm(action_no_target.action - action_blank.action))
+        raw_diff_vs_baseline = float(np.linalg.norm(action_no_target.action - baseline.action))
         action_magnitude = float(np.linalg.norm(action_no_target.action))
+
+        # Anchored 0-1 score when calibration is available.
+        if self.calibration is not None:
+            score = self.calibration.normalize(raw_diff_vs_baseline)
+            score_meaning = (
+                f"normalized: {score:.3f} (= max(0, raw_Δ {raw_diff_vs_baseline:.3f} "
+                f"− noise_floor {self.calibration.noise_floor:.3f}) "
+                f"/ typical_action_magnitude {self.calibration.typical_action_magnitude:.3f})"
+            )
+        else:
+            score = raw_diff_vs_baseline
+            score_meaning = (
+                f"raw L2 (uncalibrated): {raw_diff_vs_baseline:.3f} — pass a "
+                "ModelCalibration to anchor onto a 0-1 scale"
+            )
 
         detected_cams = sorted(per_cam_masked_array)
         skipped_cams = sorted(c for c in cameras if c not in per_cam_masked_array)
         labels = sorted({per_cam_detection[c].label for c in detected_cams})
         confs = {c: round(per_cam_detection[c].confidence, 3) for c in detected_cams}
 
-        if diff_vs_baseline < self.coherent_threshold and action_magnitude > self.coherent_threshold:
+        if score < self.noise_floor_score:
             sev = Severity.CRITICAL
             verdict = (
                 f"Target masked across {detected_cams} (labels={labels}, "
-                f"confs={confs}). The model still produces a substantial action "
-                f"(‖a‖={action_magnitude:.3f}) nearly identical to baseline "
-                f"(Δ={diff_vs_baseline:.3f}). It's memorizing the trajectory "
-                f"rather than reading the scene."
+                f"confs={confs}). Score={score:.3f} is below the noise-floor "
+                f"threshold ({self.noise_floor_score}) — the model is not "
+                f"responding to target removal. Memorization signature. "
+                f"[{score_meaning}]"
             )
-        elif diff_vs_baseline < 2 * self.coherent_threshold:
+        elif score < self.grounded_threshold:
             sev = Severity.MODERATE
             verdict = (
                 f"With target masked across {detected_cams} (labels={labels}), "
-                f"the action stays similar (Δ={diff_vs_baseline:.3f}). Partial "
-                f"memorization."
+                f"score={score:.3f} is between noise floor "
+                f"({self.noise_floor_score}) and grounded threshold "
+                f"({self.grounded_threshold}). Partial visual grounding. "
+                f"[{score_meaning}]"
             )
         else:
             sev = Severity.PASS
             verdict = (
                 f"With target masked across {detected_cams} (labels={labels}), "
-                f"the model's action changes substantially (Δ={diff_vs_baseline:.3f}) "
-                f"— it's reading visual feedback."
+                f"score={score:.3f} >= grounded threshold ({self.grounded_threshold}) "
+                f"— model is reading visual feedback. [{score_meaning}]"
             )
 
         return DiagnosticResult(
@@ -180,28 +215,33 @@ class MemorizationDiagnostic(Diagnostic):
             axis=self.axis,
             model_id=model.model_id,
             scene_id=scene.scene_id,
-            scalar_score=diff_vs_baseline,
+            scalar_score=score,
             severity=sev,
             direction="lower_is_worse",
             explanation=verdict,
             per_variant={
-                "diff_vs_baseline": diff_vs_baseline,
-                "diff_vs_blank": diff_vs_blank,
-                "action_magnitude": action_magnitude,
+                "score_normalized":   score,
+                "raw_diff_vs_baseline": raw_diff_vs_baseline,
+                "raw_diff_vs_blank":  raw_diff_vs_blank,
+                "action_magnitude":   action_magnitude,
                 **{f"detected:{c}": 1.0 for c in detected_cams},
                 **{f"skipped:{c}": 0.0 for c in skipped_cams},
             },
             raw={
-                "baseline_action": baseline.action.tolist(),
-                "action_target_masked": action_no_target.action.tolist(),
-                "action_blank_scene": action_blank.action.tolist(),
-                "detected_cameras": detected_cams,
-                "skipped_cameras": skipped_cams,
+                "baseline_action":         baseline.action.tolist(),
+                "action_target_masked":    action_no_target.action.tolist(),
+                "action_blank_scene":      action_blank.action.tolist(),
+                "raw_diff_vs_baseline":    raw_diff_vs_baseline,
+                "raw_diff_vs_blank":       raw_diff_vs_blank,
+                "score_normalized":        score,
+                "calibration_used":        self.calibration.to_summary() if self.calibration else None,
+                "detected_cameras":        detected_cams,
+                "skipped_cameras":         skipped_cams,
                 "per_camera_detection": {
                     c: {
-                        "label": per_cam_detection[c].label,
-                        "bbox": list(per_cam_detection[c].bbox),
-                        "confidence": per_cam_detection[c].confidence,
+                        "label":         per_cam_detection[c].label,
+                        "bbox":          list(per_cam_detection[c].bbox),
+                        "confidence":    per_cam_detection[c].confidence,
                         "mask_provided": per_cam_detection[c].mask is not None,
                     } for c in detected_cams
                 },
