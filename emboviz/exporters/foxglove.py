@@ -120,7 +120,10 @@ def export_foxglove(
                 pil.save(buf, format="JPEG", quality=85)
                 import base64
                 payload = json.dumps({
-                    "timestamp": {"sec": i // int(fps), "nsec": 0},
+                    "timestamp": {
+                        "sec": log_time_ns // 1_000_000_000,
+                        "nsec": log_time_ns % 1_000_000_000,
+                    },
                     "frame_id": cam_name,
                     "data": base64.b64encode(buf.getvalue()).decode("ascii"),
                     "format": "jpeg",
