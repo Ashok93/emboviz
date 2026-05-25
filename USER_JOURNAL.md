@@ -100,23 +100,33 @@
 
 ## What this proves about why Emboviz exists
 
-A real user trying to debug ANY one of these four models — OpenVLA, SmolVLA,
-π0, GR00T — would spend most of a day navigating the dep hell I just
-described. Each model has its own ecosystem with its own pyproject
-quirks, its own version pins, its own undocumented init expectations.
-The actual debugging work — running diagnostics, looking at outputs —
-takes minutes once the environment is set up.
+**The product is the interpretability lens.** Emboviz is the backbone
+that lets users see inside their embodied-AI policies — why π0 isn't
+grounding on the noun, why SmolVLA produces identical actions across
+cube→block→ball, where GR00T partially responds to noun perturbation
+on a DROID-shape state. Those are answers users cannot get anywhere
+else, derived from a suite of 18 diagnostic primitives spanning
+language counterfactuals, vision robustness, causal mediation
+(activation patching), FFN concept decomposition, sensitivity mapping,
+and failure-prediction probes — many of them productizations of
+recent interpretability research (MINT, BYOVLA, SAFE, Heimersheim &
+Nanda 2024, Berkeley FFN logit-lens). **Nobody else is shipping this
+across the VLA ecosystem uniformly.** That's the moat.
 
-**The moat is the install + run abstraction**, not the diagnostic algorithms.
-The diagnostics are well-published research; the orchestration across
-fragile per-model ecosystems is what we contribute.
+The install layer is plumbing — necessary cost of admission. Each
+upstream VLA has its own fragile ecosystem (incompatible
+`transformers` pins, custom forks, gated HuggingFace models, dataset
+format generations) and a real user trying to debug ANY one of these
+models would spend most of a day navigating dep hell first. We
+absorb that pain so they don't have to. Specifically: every fix I made
+this session (LeRobotPolicyAdapter's policy-class dispatch + language
+tokenization; Gr00tAdapter's per-state-key dim dispatch + multi-cam
+fallback + temporal-horizon stacking; Pi0Adapter's platform-aware
+observation builders) is something **every future user of those models
+would otherwise have to write themselves**.
 
-Specifically: every fix I made in this session (LeRobotPolicyAdapter's
-policy-class dispatch + language tokenization, Gr00tAdapter's
-per-state-key dim dispatch + multi-cam fallback + temporal-horizon stacking,
-Pi0Adapter's platform-aware observation builders) is something **every
-future user of those models would otherwise have to write themselves**. We
-write it once, ship it in the adapter, and they call `model.predict(scene)`.
+**But the install abstraction is the cost of doing business, not the
+product.** Users come for what happens *after* the model loads.
 
 ## What I'd ship next to make this easier for users
 
@@ -138,14 +148,27 @@ write it once, ship it in the adapter, and they call `model.predict(scene)`.
 
 ## Honest score
 
-Emboviz is **about 90% of an end-to-end product** for tabletop manipulation
-debugging on the four flagship VLAs tested. The remaining 10% is:
-- Wizard polish (the install steps should be auto-executed, not printed)
-- Pre-flight environment checks (gated models, dataset compat, dep verification)
-- The cloud aggregation layer (which we haven't built yet by design)
+The **interpretability backbone is real and working**. The same
+`predict(scene)` API, the same `CounterfactualDiagnostic` framework,
+the same `Severity.CRITICAL/MODERATE/PASS` thresholds produce
+comparable, real findings across four flagship VLAs running in their
+own native ecosystems. That's the product, and it's solid.
 
-The diagnostic engine itself is solid: the same `predict(scene)` API,
-the same `CounterfactualDiagnostic` framework, the same
-`Severity.CRITICAL/MODERATE/PASS` thresholds produce comparable, real
-findings across all four models on the VM. That's the foundation —
-everything else is polish on top.
+Emboviz is **about 90% of an end-to-end product** for tabletop
+manipulation debugging. The remaining 10% is install/onboarding
+polish:
+- Wizard auto-executes install scripts instead of printing them
+- Pre-flight checks for gated HF models / dataset format compat /
+  Python version matches
+- Cross-team aggregation layer (Cloud Hub — by design not in v1)
+
+Plus a continuing investment in:
+- **More diagnostics** — the field publishes new mechanistic-interp
+  techniques monthly; each is one file in `emboviz/diagnostics/`
+- **More adapter coverage** — each new VLA family unlocks a new user
+  segment
+- **Verdict synthesis quality** — turning structured findings into
+  per-team, per-failure-mode recommendations
+
+The diagnostics are the product. Everything else is what lets users
+reach the product.
