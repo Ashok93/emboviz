@@ -31,6 +31,8 @@ dependencies = [
     "timm>=0.9.10,<1.0", # OpenVLA's modeling code hard-checks this range
     "tokenizers>=0.19",
     "sentencepiece>=0.2",
+    "rerun-sdk>=0.22.1",
+    "mcap>=1.3.1",
 ]
 
 [project.scripts]
