@@ -121,6 +121,8 @@ class RequiredInputs:
         """
         if affect == "instruction":
             return self.instruction
+        if affect == "images.*":
+            return bool(self.cameras)
         if affect.startswith("images."):
             return affect.split(".", 1)[1] in self.cameras
         if affect == "state":

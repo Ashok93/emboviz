@@ -87,8 +87,22 @@ class LeRobotEpisodeSource(EpisodeSource):
         return self.load_episodes([int(episode_id)])[int(episode_id)]
 
     def load_episodes(self, episode_indices: list[int]) -> dict[int, list[Scene]]:
-        """Batched load — single LeRobotDataset init for all indices."""
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        """Batched load — single LeRobotDataset init for all indices.
+
+        We tolerate both lerobot layouts:
+          • ``lerobot.datasets.lerobot_dataset``   (≥0.3 — the modern path)
+          • ``lerobot.common.datasets.lerobot_dataset``  (0.1.x — vendored
+            by openpi and other VLA projects that pin the legacy stub)
+
+        Same ``LeRobotDataset(repo_id, episodes=[...])`` constructor in both
+        eras, so once we pick the right import the rest is identical. This
+        is what lets the same emboviz dataset adapter work seamlessly in
+        every model's venv without per-venv configuration.
+        """
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError:
+            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
         indices = sorted(set(episode_indices))
         dataset = LeRobotDataset(self.repo_id, episodes=indices)
@@ -117,7 +131,10 @@ class LeRobotEpisodeSource(EpisodeSource):
         )
 
     def all_instructions(self) -> list[str]:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        try:
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError:
+            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
         if self._meta_dataset is None:
             self._meta_dataset = LeRobotDataset(self.repo_id, episodes=[0])
         tasks = getattr(self._meta_dataset.meta, "tasks", None)

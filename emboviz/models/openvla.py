@@ -81,10 +81,24 @@ class OpenVLAAdapter(VLAModel):
 
         # Cache invariants we'll need across diagnostics
         self._action_dim = int(self.model.get_action_dim(self.unnorm_key))
+        # action_scale is OPTIONAL — some checkpoints lack norm stats.
+        # If get_action_stats raises a known "no such norm stat" error
+        # we set action_scale to None with a warning so the user knows
+        # normalized_l2 metrics will fall back to plain L2. Any other
+        # error (e.g. malformed checkpoint) propagates.
+        import warnings as _warnings
         try:
             stats = self.model.get_action_stats(self.unnorm_key)
-            self._action_scale = (np.asarray(stats["q99"]) - np.asarray(stats["q01"])).astype(np.float32)
-        except Exception:
+            self._action_scale = (
+                np.asarray(stats["q99"]) - np.asarray(stats["q01"])
+            ).astype(np.float32)
+        except (KeyError, AttributeError, ValueError) as e:
+            _warnings.warn(
+                f"OpenVLA action_scale unavailable for unnorm_key="
+                f"'{self.unnorm_key}': {type(e).__name__}: {e}. "
+                "Normalized-L2 metrics will fall back to plain L2.",
+                stacklevel=2,
+            )
             self._action_scale = None
 
     # ---- identification ------------------------------------------------
@@ -129,9 +143,20 @@ class OpenVLAAdapter(VLAModel):
 
     # ---- inference -----------------------------------------------------
 
+    def _validated_inputs(self, scene: Scene) -> tuple:
+        """Validate the scene against required_inputs; return (image, instruction).
+
+        Centralises the strict-contract check so every public entrypoint
+        fails the same way on missing primary camera or empty instruction.
+        Never silently substitutes "".
+        """
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"OpenVLAAdapter: {reason}")
+        return scene.observations.images["primary"].data, scene.instruction
+
     def predict(self, scene: Scene) -> ActionResult:
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         action, tokens = self._generate_action(ids, pixel_values)
         return ActionResult(
@@ -151,8 +176,7 @@ class OpenVLAAdapter(VLAModel):
     ) -> AttentionMaps:
         import torch
 
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -189,8 +213,7 @@ class OpenVLAAdapter(VLAModel):
         self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> HiddenStates:
         import torch
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -215,8 +238,7 @@ class OpenVLAAdapter(VLAModel):
         self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> FFNActivations:
         import torch
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
 
         captured: dict[int, torch.Tensor] = {}
@@ -290,8 +312,7 @@ class OpenVLAAdapter(VLAModel):
         (the residual output) at `patch_position` with the patch tensor.
         """
         import torch
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
 
@@ -373,8 +394,7 @@ class OpenVLAAdapter(VLAModel):
         self, scene: Scene, ablations: dict[tuple[int, int], float],
     ) -> ActionResult:
         import torch
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
         handles = []
@@ -505,12 +525,11 @@ class OpenVLAAdapter(VLAModel):
 
     def _extract_instruction_from_ids(self, ids) -> str:
         """Recover the original instruction by decoding ids and unwrapping the
-        prompt template. Fallback to empty string if the template isn't present.
+        prompt template. If the template structure is missing we return the
+        raw decoded text — the caller is expected to handle both cases.
         """
         decoded = self.processor.tokenizer.decode(ids[0], skip_special_tokens=True)
-        if "to " in decoded and "?\nOut" in decoded:
-            try:
-                return decoded.split("take to ")[1].split("?\nOut")[0]
-            except Exception:
-                pass
+        if "take to " in decoded and "?\nOut" in decoded:
+            # Both anchors present — the split below is guaranteed to work.
+            return decoded.split("take to ")[1].split("?\nOut")[0]
         return decoded

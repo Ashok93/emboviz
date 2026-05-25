@@ -3,8 +3,9 @@
 The `openpi` repository (https://github.com/Physical-Intelligence/openpi)
 is PI's official open-source inference path for the π0 family. Each
 checkpoint is paired with a platform-specific observation format (DROID,
-ALOHA, LIBERO, UR5, custom). This adapter wraps openpi's `create_trained_policy`
-and maps our typed `Scene` into the format the chosen config expects.
+ALOHA, LIBERO, UR5, custom). This adapter wraps openpi's
+`create_trained_policy` and maps our typed `Scene` into the format the
+chosen config expects.
 
 **Install (its own virtualenv):**
 
@@ -16,6 +17,15 @@ and maps our typed `Scene` into the format the chosen config expects.
 
 Then construct with a config name (e.g. "pi0_aloha_sim", "pi0_libero",
 "pi0_fast_droid", "pi05_libero", "pi05_droid").
+
+Strict contract:
+  • Each platform builder REQUIRES the cameras / state shape its
+    upstream policy was trained on. Missing cameras or mis-shaped state
+    raise ValueError — we never silently feed the primary camera into
+    the wrist slot or zero-pad an unexpected state vector.
+  • Each platform declares its own ``RequiredInputs`` so the framework's
+    Scene-validation can surface the failure at the boundary, before
+    we ever call the model.
 
 Capabilities: INFERENCE only. openpi's inference path doesn't expose
 hidden states or attention through a stable API; capability-gated
@@ -45,90 +55,158 @@ def _to_chw_uint8(pil_or_arr) -> np.ndarray:
     return arr.astype(np.uint8)
 
 
+def _require_image(scene: Scene, *names: str) -> "np.ndarray":
+    """Return the image data for the FIRST name present in the scene.
+
+    Raises KeyError listing the names tried + the cameras actually
+    available — no silent substitution.
+    """
+    images = scene.observations.images
+    for n in names:
+        if n in images:
+            return images[n].data
+    raise KeyError(
+        f"None of the required cameras {list(names)} are in the scene. "
+        f"Available cameras: {sorted(images)}. The dataset adapter must "
+        "load one of the listed cameras under the expected name (rename "
+        "via image_keys) — we never substitute another camera silently."
+    )
+
+
+def _require_state_exact(scene: Scene, expected_dim: int, platform: str) -> "np.ndarray":
+    """Return the state vector, raising if missing or the wrong shape.
+
+    Pads and truncates were previously silent; now the caller is told
+    EXACTLY what shape mismatch they have so they can fix the loader.
+    """
+    state = scene.observations.state
+    if state is None:
+        raise ValueError(
+            f"π0 ({platform}) requires proprioceptive state with dim "
+            f"{expected_dim}, but scene.observations.state is None. "
+            "Either populate state in the dataset adapter or use a config "
+            "that doesn't need state."
+        )
+    vec = np.asarray(state.values, dtype=np.float32).reshape(-1)
+    if vec.size != expected_dim:
+        raise ValueError(
+            f"π0 ({platform}) requires state dim {expected_dim} but scene "
+            f"provides {vec.size}. Fix the dataset adapter's state_key / "
+            "gripper_extractor to emit the expected layout — we never "
+            "silently pad or truncate."
+        )
+    return vec
+
+
 def _aloha_observation_builder(scene: Scene) -> dict:
     """openpi ALOHA observation format — bimanual, 4 cameras, state(14)."""
-    images = scene.observations.images
-    primary = images.get("primary")
-    high = images.get("cam_high") or images.get("head") or primary
-    low = images.get("cam_low") or images.get("front") or primary
-    wrist_l = images.get("wrist_left") or images.get("cam_left_wrist") or primary
-    wrist_r = images.get("wrist_right") or images.get("cam_right_wrist") or primary
-    state = (
-        scene.observations.state.values.astype(np.float32)
-        if scene.observations.state is not None
-        else np.zeros(14, dtype=np.float32)
-    )
-    if state.size < 14:
-        state = np.pad(state, (0, 14 - state.size))
-    else:
-        state = state[:14]
-    zeros = np.zeros((3, 224, 224), dtype=np.uint8)
+    state = _require_state_exact(scene, 14, "aloha")
     return {
         "state": state,
         "images": {
-            "cam_high": _to_chw_uint8(high.data) if high else zeros,
-            "cam_low": _to_chw_uint8(low.data) if low else zeros,
-            "cam_left_wrist": _to_chw_uint8(wrist_l.data) if wrist_l else zeros,
-            "cam_right_wrist": _to_chw_uint8(wrist_r.data) if wrist_r else zeros,
+            "cam_high":        _to_chw_uint8(_require_image(scene, "cam_high", "head")),
+            "cam_low":         _to_chw_uint8(_require_image(scene, "cam_low", "front")),
+            "cam_left_wrist":  _to_chw_uint8(_require_image(scene, "cam_left_wrist", "wrist_left")),
+            "cam_right_wrist": _to_chw_uint8(_require_image(scene, "cam_right_wrist", "wrist_right")),
         },
-        "prompt": scene.instruction or "",
+        "prompt": _require_instruction(scene, "aloha"),
     }
 
 
 def _droid_observation_builder(scene: Scene) -> dict:
     """openpi DROID observation format — single arm + wrist + state(7)+gripper."""
-    images = scene.observations.images
-    primary = images.get("primary")
-    wrist = images.get("wrist_left") or images.get("wrist") or primary
-    obs: dict = {}
-    if primary is not None:
-        obs["observation/exterior_image_1_left"] = np.asarray(primary.data, dtype=np.uint8)
-    if wrist is not None:
-        obs["observation/wrist_image_left"] = np.asarray(wrist.data, dtype=np.uint8)
-    if scene.observations.state is not None:
-        obs["observation/joint_position"] = scene.observations.state.values.astype(np.float32)
-    if scene.observations.gripper is not None:
-        obs["observation/gripper_position"] = np.array(
-            [scene.observations.gripper.value], dtype=np.float32,
+    obs: dict = {
+        "observation/exterior_image_1_left":
+            np.asarray(_require_image(scene, "primary"), dtype=np.uint8),
+        "observation/wrist_image_left":
+            np.asarray(_require_image(scene, "wrist_left", "wrist"), dtype=np.uint8),
+        "observation/joint_position":
+            _require_state_exact(scene, 7, "droid"),
+        "prompt": _require_instruction(scene, "droid"),
+    }
+    if scene.observations.gripper is None:
+        raise ValueError(
+            "π0 (droid) requires gripper state but scene.observations.gripper "
+            "is None. Populate gripper in the dataset adapter."
         )
-    obs["prompt"] = scene.instruction or ""
+    obs["observation/gripper_position"] = np.array(
+        [scene.observations.gripper.value], dtype=np.float32,
+    )
     return obs
 
 
 def _libero_observation_builder(scene: Scene) -> dict:
     """openpi LIBERO observation format — 2 cameras + state(8)."""
-    images = scene.observations.images
-    primary = images.get("primary")
-    wrist = images.get("wrist") or primary
-    state = (
-        scene.observations.state.values.astype(np.float32)
-        if scene.observations.state is not None
-        else np.zeros(8, dtype=np.float32)
-    )
-    if state.size < 8:
-        state = np.pad(state, (0, 8 - state.size))
     return {
-        "observation/image": _to_chw_uint8(primary.data) if primary else np.zeros((3, 256, 256), dtype=np.uint8),
-        "observation/wrist_image": _to_chw_uint8(wrist.data) if wrist else np.zeros((3, 256, 256), dtype=np.uint8),
-        "observation/state": state[:8],
-        "prompt": scene.instruction or "",
+        "observation/image":
+            _to_chw_uint8(_require_image(scene, "primary")),
+        "observation/wrist_image":
+            _to_chw_uint8(_require_image(scene, "wrist", "wrist_left")),
+        "observation/state":
+            _require_state_exact(scene, 8, "libero"),
+        "prompt": _require_instruction(scene, "libero"),
     }
+
+
+def _require_instruction(scene: Scene, platform: str) -> str:
+    instr = scene.instruction
+    if not instr:
+        raise ValueError(
+            f"π0 ({platform}) requires a non-empty instruction but "
+            "scene.instruction is None or empty. The dataset adapter "
+            "must produce a task string."
+        )
+    return instr
 
 
 # Built-in observation builders keyed by config-name fragment.
 _BUILDER_REGISTRY: dict[str, Callable[[Scene], dict]] = {
-    "aloha": _aloha_observation_builder,
-    "droid": _droid_observation_builder,
+    "aloha":  _aloha_observation_builder,
+    "droid":  _droid_observation_builder,
     "libero": _libero_observation_builder,
 }
 
 
-def _auto_observation_builder(config_name: str) -> Callable[[Scene], dict]:
-    """Pick the right builder based on substring match in config_name."""
-    for key, builder in _BUILDER_REGISTRY.items():
-        if key in config_name.lower():
-            return builder
-    return _droid_observation_builder   # DROID is the most generic default
+# Per-platform RequiredInputs declarations. Matches what the builders
+# actually consume so RequiredInputs.validate() catches missing fields
+# at the framework boundary instead of inside the builder.
+_REQUIRED_INPUTS_REGISTRY: dict[str, RequiredInputs] = {
+    "aloha": RequiredInputs(
+        cameras=frozenset({"cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist"}),
+        instruction=True,
+        state=True,
+    ),
+    "droid": RequiredInputs(
+        cameras=frozenset({"primary", "wrist_left"}),
+        instruction=True,
+        state=True,
+        gripper=True,
+    ),
+    "libero": RequiredInputs(
+        cameras=frozenset({"primary", "wrist"}),
+        instruction=True,
+        state=True,
+    ),
+}
+
+
+def _resolve_platform(config_name: str) -> str:
+    """Pick a platform key based on substring match in config_name.
+
+    Raises ValueError if the config doesn't match a known platform — we
+    do not silently default to DROID (the old behaviour quietly fed
+    DROID-shaped observations to a non-DROID checkpoint).
+    """
+    low = config_name.lower()
+    for key in _BUILDER_REGISTRY:
+        if key in low:
+            return key
+    raise ValueError(
+        f"Cannot infer π0 platform from config_name='{config_name}'. "
+        f"Known platforms: {sorted(_BUILDER_REGISTRY)}. Pass "
+        "observation_builder + required_inputs explicitly for a custom "
+        "platform."
+    )
 
 
 @register_model("pi0")
@@ -140,11 +218,12 @@ class Pi0Adapter(VLAModel):
         Pi0Adapter()                                        # pi0_fast_droid default
         Pi0Adapter(config_name="pi0_libero")
         Pi0Adapter(config_name="pi05_droid",
-                   observation_builder=my_custom_builder)
+                   observation_builder=my_custom_builder,
+                   required_inputs=my_custom_inputs)
 
-    `observation_builder` defaults to a DROID-style dict; override for
-    ALOHA or LIBERO setups (see openpi.policies.aloha_policy /
-    openpi.policies.libero_policy for the exact dict shapes).
+    For known platforms (DROID/ALOHA/LIBERO) the builder + required-inputs
+    are picked automatically. For a custom platform pass both explicitly —
+    we do not fall back to DROID silently.
     """
 
     _CAPS = Capability.INFERENCE
@@ -154,6 +233,7 @@ class Pi0Adapter(VLAModel):
         config_name: str = "pi0_fast_droid",
         checkpoint_uri: Optional[str] = None,
         observation_builder: Optional[Callable[[Scene], dict]] = None,
+        required_inputs: Optional[RequiredInputs] = None,
     ):
         try:
             from openpi.policies import policy_config as _policy_config
@@ -174,11 +254,21 @@ class Pi0Adapter(VLAModel):
         checkpoint_dir = download.maybe_download(ckpt_uri)
         self._policy = _policy_config.create_trained_policy(cfg, checkpoint_dir)
         self._cfg = cfg
-        # Auto-select the platform-specific observation builder.
-        self._observation_builder = (
-            observation_builder or _auto_observation_builder(config_name)
-        )
-        # Populated on first predict.
+
+        if observation_builder is not None and required_inputs is not None:
+            self._observation_builder = observation_builder
+            self._required_inputs = required_inputs
+        elif observation_builder is None and required_inputs is None:
+            platform = _resolve_platform(config_name)
+            self._observation_builder = _BUILDER_REGISTRY[platform]
+            self._required_inputs = _REQUIRED_INPUTS_REGISTRY[platform]
+        else:
+            raise ValueError(
+                "Pi0Adapter: pass BOTH observation_builder and required_inputs "
+                "together (for a custom platform), or NEITHER (auto-pick from "
+                "config_name). Mixing one custom + one auto would silently lie "
+                "about what the model actually consumes."
+            )
         self._action_dim = 0
 
     # ----- identification ------------------------------------------------
@@ -193,14 +283,7 @@ class Pi0Adapter(VLAModel):
 
     @property
     def required_inputs(self) -> RequiredInputs:
-        # π0's DROID/LIBERO/ALOHA configs canonically expect a primary cam
-        # plus state + instruction. Multi-cam configs additionally need
-        # wrist_left/wrist_right — the observation_builder handles them.
-        return RequiredInputs(
-            cameras=frozenset({"primary"}),
-            instruction=True,
-            state=True,
-        )
+        return self._required_inputs
 
     @property
     def action_dim(self) -> int:
@@ -209,6 +292,9 @@ class Pi0Adapter(VLAModel):
     # ----- inference -----------------------------------------------------
 
     def predict(self, scene: Scene) -> ActionResult:
+        reason = self._required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"Pi0Adapter.predict: {reason}")
         observation = self._observation_builder(scene)
         result = self._policy.infer(observation)
         actions = np.asarray(result["actions"], dtype=np.float32)

@@ -38,9 +38,9 @@ class CrossModalAttentionDiagnostic(Diagnostic):
             return self._not_applicable(model, scene, "model lacks ATTENTION capability")
 
         # Build the counterfactual instruction (replace noun_a with noun_b).
-        instr_a = scene.instruction or ""
-        if not instr_a:
+        if not scene.instruction:
             return self._not_applicable(model, scene, "scene has no instruction")
+        instr_a = scene.instruction
         instr_b = re.sub(rf"\b{re.escape(self.noun_a)}\b", self.noun_b, instr_a,
                          flags=re.IGNORECASE)
         if instr_a == instr_b:

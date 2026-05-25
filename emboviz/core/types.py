@@ -113,10 +113,43 @@ class Scene:
         Other modalities (state, gripper, action_history, etc.) and other
         cameras are preserved. Used by diagnostics that need to swap one
         camera's content (occlusion, sensitivity map, memorization mask).
+
+        Raises KeyError if ``camera`` is not already present in the scene —
+        we never invent a new camera silently. To add a new camera, use
+        ``with_images({...})`` and pass the full image dict.
         """
+        if camera not in self.observations.images:
+            raise KeyError(
+                f"Camera '{camera}' is not in scene.observations.images "
+                f"(available: {sorted(self.observations.images)}). "
+                "with_image only replaces existing cameras."
+            )
         from dataclasses import replace
         new_images = dict(self.observations.images)
         new_images[camera] = RGBImage(data=new_image, camera_id=camera)
+        new_obs = replace(self.observations, images=new_images)
+        return replace(self, observations=new_obs)
+
+    def with_images(self, new_images_by_camera: dict[str, ImageLike]) -> "Scene":
+        """Return a new Scene with multiple cameras replaced in one step.
+
+        Each key must already be present in the scene — we do not invent
+        new cameras. All other modalities and any cameras not in the dict
+        are preserved.
+        """
+        existing = set(self.observations.images.keys())
+        requested = set(new_images_by_camera.keys())
+        missing = requested - existing
+        if missing:
+            raise KeyError(
+                f"with_images: cameras {sorted(missing)} are not in the scene "
+                f"(available: {sorted(existing)}). To replace an existing "
+                "camera use this method; to add a new camera, build a new Scene."
+            )
+        from dataclasses import replace
+        new_images = dict(self.observations.images)
+        for cam, img in new_images_by_camera.items():
+            new_images[cam] = RGBImage(data=img, camera_id=cam)
         new_obs = replace(self.observations, images=new_images)
         return replace(self, observations=new_obs)
 
@@ -129,6 +162,34 @@ class Scene:
         """
         from dataclasses import replace
         return replace(self, instruction=new_instruction)
+
+
+def resolve_cameras(scene: "Scene", requested: Optional[list[str]]) -> list[str]:
+    """Resolve a (possibly-None) camera selection against a scene's cameras.
+
+    - ``requested=None`` → return every camera in the scene (alphabetical).
+    - ``requested=["primary", "wrist_left"]`` → return those exact cameras.
+      Raises ValueError if any requested camera is missing from the scene.
+
+    This is the single source of truth for "which cameras does this
+    diagnostic / perturber operate on?". Callers must use it instead of
+    silently defaulting to ``"primary"`` — that pattern silently makes
+    multi-camera scenes look single-camera and hides real model behaviour.
+    """
+    available = set(scene.observations.images.keys())
+    if requested is None:
+        return sorted(available)
+    requested_set = set(requested)
+    missing = requested_set - available
+    if missing:
+        raise ValueError(
+            f"resolve_cameras: requested cameras {sorted(missing)} are "
+            f"not in the scene (available: {sorted(available)}). Either "
+            "remove them from the cameras list, load the missing cameras "
+            "in the dataset adapter, or pass cameras=None to iterate "
+            "every camera the scene actually provides."
+        )
+    return sorted(requested_set)
 
 
 @dataclass
@@ -189,16 +250,25 @@ class AttentionMaps:
     metadata: dict = field(default_factory=dict)
 
     def image_weights(self) -> np.ndarray:
-        """Slice and reshape the attention to (n_layers, n_heads, side, side)."""
+        """Slice and reshape the attention to (n_layers, n_heads, side, side).
+
+        Raises ValueError if the image-token slice does not match the
+        declared ``image_grid_side``. Previously this silently zero-padded
+        or truncated, which produced meaningless heatmaps on fake tokens.
+        Adapters must report an accurate ``image_grid_side``.
+        """
         s, e = self.image_token_range
         img = self.weights[..., s:e]
         side = self.image_grid_side
         n_image = side * side
-        if img.shape[-1] >= n_image:
-            img = img[..., :n_image]
-        elif img.shape[-1] < n_image:
-            pad = np.zeros(img.shape[:-1] + (n_image - img.shape[-1],), dtype=img.dtype)
-            img = np.concatenate([img, pad], axis=-1)
+        if img.shape[-1] != n_image:
+            raise ValueError(
+                f"AttentionMaps.image_weights: image_token_range {(s, e)} "
+                f"yields {img.shape[-1]} tokens but image_grid_side={side} "
+                f"requires {n_image}. The adapter producing this AttentionMaps "
+                f"has the wrong image_grid_side or image_token_range. Fix the "
+                f"adapter — do not silently pad."
+            )
         return img.reshape(*img.shape[:-1], side, side)
 
 

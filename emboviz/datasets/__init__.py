@@ -14,7 +14,26 @@ Observations populated from the format's native fields.
 from emboviz.datasets.base import EpisodeSource
 from emboviz.datasets.huggingface import HuggingFaceEpisodeSource
 from emboviz.datasets.lerobot import LeRobotEpisodeSource
+from emboviz.datasets.lerobot_aloha import (
+    ALOHA_BIMANUAL_PROFILE_1CAM,
+    ALOHA_BIMANUAL_PROFILE_4CAM,
+    AlohaSimInsertionSource,
+    AlohaSimTransferCubeSource,
+    AlohaStatic4CamSource,
+)
 from emboviz.datasets.lerobot_bridge import BridgeEpisodeSource, BRIDGE_PROFILE
+from emboviz.datasets.lerobot_droid import (
+    DROID_PROFILE,
+    Droid100Source,
+    DroidFullSource,
+)
+from emboviz.datasets.lerobot_libero import (
+    LIBERO_PROFILE,
+    Libero10Source,
+    LiberoGoalSource,
+    LiberoObjectSource,
+    LiberoSpatialSource,
+)
 
 __all__ = [
     "EpisodeSource",
@@ -22,6 +41,19 @@ __all__ = [
     "LeRobotEpisodeSource",
     "BridgeEpisodeSource",
     "BRIDGE_PROFILE",
+    "ALOHA_BIMANUAL_PROFILE_1CAM",
+    "ALOHA_BIMANUAL_PROFILE_4CAM",
+    "AlohaSimTransferCubeSource",
+    "AlohaSimInsertionSource",
+    "AlohaStatic4CamSource",
+    "LIBERO_PROFILE",
+    "LiberoSpatialSource",
+    "LiberoObjectSource",
+    "LiberoGoalSource",
+    "Libero10Source",
+    "DROID_PROFILE",
+    "Droid100Source",
+    "DroidFullSource",
 ]
 
 

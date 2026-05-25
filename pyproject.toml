@@ -43,12 +43,9 @@ openvla = [
     "sentencepiece>=0.2",
     "captum>=0.7.0",              # for OpenVLA attribution diagnostics
 ]
-smolvla = [
-    # SmolVLA needs lerobot>=0.5; INCOMPATIBLE with openvla group above
-    "lerobot>=0.5",
-    "transformers>=4.45",
-    "accelerate>=0.30",
-]
+# smolvla has NO extras here — lerobot>=0.5 pins Python>=3.12 which
+# conflicts with GR00T/OFT's Python 3.10 requirement. Install in its own
+# venv following models/lerobot_policy.py docstring.
 # pi0 has NO extras here — it runs in openpi's own venv (their pyproject
 # pins everything correctly). See models/pi0.py docstring for the
 # `openpi clone + uv sync` flow. Including pi0 in extras would force
@@ -97,6 +94,4 @@ packages = ["emboviz"]
 [tool.uv]
 conflicts = [
     [{ extra = "openvla" }, { extra = "gr00t" }],
-    [{ extra = "openvla" }, { extra = "smolvla" }],
-    [{ extra = "smolvla" }, { extra = "gr00t" }],
 ]

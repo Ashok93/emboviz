@@ -42,34 +42,38 @@ class LeRobotPolicyAdapter(VLAModel):
         self,
         repo_id: str,
         device: str = "cuda",
-        image_camera: str = "primary",
+        camera_mapping: Optional[dict[str, str]] = None,
     ):
+        """Args:
+            repo_id: HuggingFace repo id of a LeRobot-trained policy.
+            device: torch device.
+            camera_mapping: Scene camera name → LeRobot image key
+              (e.g. ``{"primary": "observation.images.top", "wrist_left":
+              "observation.images.cam_left_wrist"}``). REQUIRED whenever
+              the policy declares more than one image key; auto-mapped only
+              when the policy declares exactly one image key (no ambiguity).
+        """
         import torch
         from lerobot.policies.pretrained import PreTrainedPolicy
 
         self.repo_id = repo_id
         self.device = device
-        self.image_camera = image_camera
-        # PreTrainedPolicy.from_pretrained on the abstract base only works in
-        # older lerobot. Newer lerobot (0.5+) needs the policy-class-specific
-        # from_pretrained; resolve via config type.
         self.policy = self._load_policy(repo_id).to(device).eval()
-        # Reset internal state (some policies keep recurrent state).
         if hasattr(self.policy, "reset"):
             self.policy.reset()
 
-        # Inspect declared input/output features so required_inputs is correct.
         self._input_features: dict = getattr(self.policy.config, "input_features", {})
         self._output_features: dict = getattr(self.policy.config, "output_features", {})
 
-        # Determine action_dim from output_features → action.shape
         action_feat = self._output_features.get("action")
-        if action_feat is not None and hasattr(action_feat, "shape"):
-            self._action_dim = int(np.prod(action_feat.shape))
-        else:
-            self._action_dim = 7  # reasonable fallback
+        if action_feat is None or not hasattr(action_feat, "shape"):
+            raise ValueError(
+                f"LeRobot policy {repo_id} does not declare an 'action' "
+                "output_feature with a .shape — we cannot infer action_dim "
+                "and won't guess 7 silently. Fix the policy config."
+            )
+        self._action_dim = int(np.prod(action_feat.shape))
 
-        # Cache which input keys the policy actually consumes.
         self._needs_state = any(
             k.startswith("observation.state") for k in self._input_features
         )
@@ -77,6 +81,36 @@ class LeRobotPolicyAdapter(VLAModel):
         self._image_keys = [
             k for k in self._input_features if k.startswith("observation.images")
         ]
+
+        # Build the camera_mapping. Strict: every declared image key must be
+        # covered; never feed the same camera into multiple slots silently.
+        if camera_mapping is None:
+            if len(self._image_keys) == 0:
+                self._camera_mapping: dict[str, str] = {}
+            elif len(self._image_keys) == 1:
+                self._camera_mapping = {"primary": self._image_keys[0]}
+            else:
+                raise ValueError(
+                    f"LeRobot policy {repo_id} declares {len(self._image_keys)} "
+                    f"image keys {self._image_keys}. Pass an explicit "
+                    "camera_mapping={scene_cam: lerobot_image_key, ...} — we "
+                    "do not silently feed the same camera into multiple slots."
+                )
+        else:
+            mapped_keys = set(camera_mapping.values())
+            missing = set(self._image_keys) - mapped_keys
+            extra = mapped_keys - set(self._image_keys)
+            if missing:
+                raise ValueError(
+                    f"camera_mapping missing entries for image keys "
+                    f"{sorted(missing)}. Every declared key must be routed."
+                )
+            if extra:
+                raise ValueError(
+                    f"camera_mapping has entries {sorted(extra)} that are "
+                    f"not declared by the policy. Known keys: {self._image_keys}."
+                )
+            self._camera_mapping = dict(camera_mapping)
         # Some LeRobot policies are VLAs (SmolVLA, PI0, PI05) and consume
         # tokenized language even when the config's input_features doesn't
         # explicitly list it. We detect both ways: declared in features OR
@@ -100,13 +134,8 @@ class LeRobotPolicyAdapter(VLAModel):
 
     @property
     def required_inputs(self) -> RequiredInputs:
-        # LeRobot policies typically take one image (some take multi-cam, but
-        # those use named keys like observation.images.wrist, etc.). We map
-        # the user-supplied `image_camera` to whatever single image input the
-        # policy declares. VLA-style policies (SmolVLA, PI0) also need an
-        # instruction string we tokenize for them.
         return RequiredInputs(
-            cameras=frozenset({self.image_camera}),
+            cameras=frozenset(self._camera_mapping.keys()),
             instruction=self._needs_language,
             state=self._needs_state,
         )
@@ -120,47 +149,47 @@ class LeRobotPolicyAdapter(VLAModel):
     def predict(self, scene: Scene) -> ActionResult:
         import torch
 
-        # Build the batch dict in LeRobot's format.
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"LeRobotPolicyAdapter.predict: {reason}")
+
         batch: dict = {}
-        if self._image_keys:
-            primary_img = scene.observations.images.get(self.image_camera)
-            if primary_img is None:
-                raise ValueError(
-                    f"LeRobotPolicyAdapter({self.repo_id}) requires camera "
-                    f"{self.image_camera!r} in scene.observations.images"
-                )
-            arr = np.asarray(primary_img.data).astype(np.float32) / 255.0
+        for scene_cam, lerobot_key in self._camera_mapping.items():
+            arr = np.asarray(
+                scene.observations.images[scene_cam].data,
+            ).astype(np.float32) / 255.0
             if arr.ndim == 3:
                 arr = arr.transpose(2, 0, 1)  # HWC → CHW
-            tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
-            # Populate every declared image key with the same primary image,
-            # so single-cam wrappers around multi-cam policies still work.
-            for k in self._image_keys:
-                batch[k] = tensor
+            batch[lerobot_key] = torch.from_numpy(arr).unsqueeze(0).to(self.device)
 
         if self._needs_state:
             state = scene.observations.state
-            if state is None:
-                raise ValueError(
-                    f"LeRobotPolicyAdapter({self.repo_id}) requires "
-                    f"scene.observations.state but it is None"
-                )
             batch["observation.state"] = (
                 torch.from_numpy(state.values.astype(np.float32)).unsqueeze(0).to(self.device)
             )
 
-        if self._needs_language and self._language_processor is not None:
-            instruction = scene.instruction or ""
+        if self._needs_language:
+            if self._language_processor is None:
+                raise RuntimeError(
+                    f"Policy {self.repo_id} declares it needs language but no "
+                    "tokenizer/processor was found on the policy object. "
+                    "Update _find_language_processor() to locate it."
+                )
+            instruction = scene.instruction
+            # Two known tokenizer signatures; try the more-specific one first
+            # and let unexpected errors surface (no bare except).
             try:
                 tokens = self._language_processor.tokenizer(
                     instruction, return_tensors="pt", padding="max_length",
                     truncation=True, max_length=48,
                 )
-            except Exception:
-                tokens = self._language_processor.tokenizer(instruction, return_tensors="pt")
+            except TypeError:
+                # Some tokenizers reject padding="max_length" / max_length kwargs.
+                tokens = self._language_processor.tokenizer(
+                    instruction, return_tensors="pt",
+                )
             batch["observation.language.tokens"] = tokens["input_ids"].to(self.device)
             if "attention_mask" in tokens:
-                # SmolVLA expects bool mask; tokenizers return int64.
                 batch["observation.language.attention_mask"] = (
                     tokens["attention_mask"].to(self.device).bool()
                 )

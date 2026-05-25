@@ -122,9 +122,15 @@ class MockVLA(VLAModel):
 
     # ----- inference ------------------------------------------------------
 
+    def _validated_inputs(self, scene: Scene) -> tuple:
+        """Validate scene against required_inputs; return (image, instruction)."""
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"MockVLA: {reason}")
+        return scene.observations.images["primary"].data, scene.instruction
+
     def predict(self, scene: Scene) -> ActionResult:
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
 
         rng = np.random.default_rng(self._seed_for(image, instruction))
         if self.mode == "random":
@@ -151,8 +157,7 @@ class MockVLA(VLAModel):
     # ----- attention ------------------------------------------------------
 
     def extract_attention(self, scene: Scene, query: TokenSelector) -> AttentionMaps:
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         # Fake attention whose distribution depends on the instruction so
         # JS divergence between two instructions is non-zero for grounded modes.
         rng = np.random.default_rng(self._seed_for(image, instruction) + 1)
@@ -178,8 +183,7 @@ class MockVLA(VLAModel):
     def extract_hidden_states(
         self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> HiddenStates:
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         rng = np.random.default_rng(self._seed_for(image, instruction) + 2)
         states = rng.normal(0, 1, (len(layer_indices), self._hidden_dim)).astype(np.float32)
         return HiddenStates(
@@ -192,8 +196,7 @@ class MockVLA(VLAModel):
     def extract_ffn_activations(
         self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> FFNActivations:
-        image = scene.primary_image_data
-        instruction = scene.instruction or ""
+        image, instruction = self._validated_inputs(scene)
         rng = np.random.default_rng(self._seed_for(image, instruction) + 3)
         by_layer = {
             li: rng.normal(0, 1, self._hidden_dim * 4).astype(np.float32)

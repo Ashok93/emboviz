@@ -59,9 +59,16 @@ class OpenVLAOFTAdapter(VLAModel):
         use_l1_regression: bool = True,
         use_film: bool = False,
         center_crop: bool = True,
+        wrist_camera: str = "wrist",
     ):
+        self.wrist_camera = wrist_camera
+        self.num_images = num_images
         try:
-            from experiments.robot.libero.run_libero_eval import GenerateConfig
+            # NOTE: we deliberately do NOT import from
+            # ``experiments.robot.libero.run_libero_eval`` — that module hard-imports
+            # ``libero.libero`` (the LIBERO simulator) at module load, which we
+            # don't need for pure inference. We inline a minimal config dataclass
+            # below that duck-types with what OFT's helpers actually read.
             from experiments.robot.openvla_utils import (
                 get_action_head,
                 get_processor,
@@ -78,6 +85,37 @@ class OpenVLAOFTAdapter(VLAModel):
                 "    cd openvla-oft && pip install -e .\n"
                 "Then install emboviz on top of that environment."
             ) from e
+
+        from dataclasses import dataclass as _dataclass
+        from typing import Union as _Union
+
+        @_dataclass
+        class _InferenceConfig:
+            """Minimal GenerateConfig replacement — only inference fields.
+
+            Mirrors the fields OFT's helpers read from cfg. We do NOT inherit
+            from the upstream GenerateConfig because that one carries LIBERO
+            simulator references; we want this adapter to work on any source
+            of Scenes, not just LIBERO sim rollouts.
+            """
+            model_family: str = "openvla"
+            pretrained_checkpoint: _Union[str, "Path"] = ""
+            use_l1_regression: bool = True
+            use_diffusion: bool = False
+            num_diffusion_steps_train: int = 50
+            num_diffusion_steps_inference: int = 50
+            use_film: bool = False
+            num_images_in_input: int = 2
+            use_proprio: bool = True
+            center_crop: bool = True
+            num_open_loop_steps: int = 8
+            lora_rank: int = 32
+            unnorm_key: _Union[str, "Path"] = ""
+            load_in_8bit: bool = False
+            load_in_4bit: bool = False
+            # Set by override below to avoid the LIBERO-coupled TaskSuite enum.
+            task_suite_name: str = "libero_spatial"
+        GenerateConfig = _InferenceConfig
 
         self.checkpoint = checkpoint
         self.unnorm_key = unnorm_key
@@ -121,11 +159,15 @@ class OpenVLAOFTAdapter(VLAModel):
 
     @property
     def required_inputs(self) -> RequiredInputs:
-        # OFT canonically uses one primary camera + an optional wrist camera +
-        # proprio + instruction. We declare the primary and let teams add a
-        # wrist via custom adapter subclass.
+        # OFT consumes ``num_images`` cameras: the primary camera always,
+        # plus the wrist camera when num_images >= 2. We declare BOTH so
+        # the framework's Scene validator catches a missing wrist camera
+        # at the boundary instead of silently feeding primary as wrist.
+        cams = {"primary"}
+        if self.num_images >= 2:
+            cams.add(self.wrist_camera)
         return RequiredInputs(
-            cameras=frozenset({"primary"}),
+            cameras=frozenset(cams),
             instruction=True,
             state=self.use_proprio,
         )
@@ -137,6 +179,9 @@ class OpenVLAOFTAdapter(VLAModel):
     # ----- inference -----------------------------------------------------
 
     def predict(self, scene: Scene) -> ActionResult:
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"OpenVLAOFTAdapter.predict: {reason}")
         observation = self._build_observation(scene)
         actions = self._get_vla_action(
             self._cfg, self._vla, self._processor,
@@ -161,26 +206,33 @@ class OpenVLAOFTAdapter(VLAModel):
     # ----- helpers -------------------------------------------------------
 
     def _build_observation(self, scene: Scene) -> dict:
-        """Format Scene into the dict OFT's `get_vla_action` expects."""
-        primary = np.asarray(scene.primary_image_data, dtype=np.uint8)
-        wrist_img = scene.observations.images.get("wrist")
-        wrist = (
-            np.asarray(wrist_img.data, dtype=np.uint8) if wrist_img is not None
-            else primary  # fallback: feed primary as wrist if user has no wrist cam
-        )
-        state_vals = (
-            scene.observations.state.values.astype(np.float32)
-            if scene.observations.state is not None
-            else np.zeros(self._proprio_dim, dtype=np.float32)
-        )
-        # Pad/truncate to PROPRIO_DIM as OFT expects.
-        if state_vals.size < self._proprio_dim:
-            state_vals = np.pad(state_vals, (0, self._proprio_dim - state_vals.size))
-        else:
-            state_vals = state_vals[: self._proprio_dim]
-        return {
-            "full_image": primary,
-            "wrist_image": wrist,
-            "state": state_vals,
-            "task_description": scene.instruction or "",
-        }
+        """Format Scene into the dict OFT's `get_vla_action` expects.
+
+        Strict: primary + (optionally) wrist must be present (already
+        enforced by required_inputs.validate); state must be the exact
+        ``PROPRIO_DIM`` shape OFT was trained on. No silent fallback.
+        """
+        primary = np.asarray(scene.observations.images["primary"].data, dtype=np.uint8)
+        obs: dict = {"full_image": primary}
+        if self.num_images >= 2:
+            obs["wrist_image"] = np.asarray(
+                scene.observations.images[self.wrist_camera].data, dtype=np.uint8,
+            )
+        if self.use_proprio:
+            state_vals = np.asarray(
+                scene.observations.state.values, dtype=np.float32,
+            ).reshape(-1)
+            if state_vals.size != self._proprio_dim:
+                raise ValueError(
+                    f"OpenVLA-OFT requires proprio dim {self._proprio_dim} "
+                    f"but scene provides {state_vals.size}. Fix the dataset "
+                    "adapter's state extractor — we never pad/truncate silently."
+                )
+            obs["state"] = state_vals
+        if not scene.instruction:
+            raise ValueError(
+                "OpenVLA-OFT requires a non-empty instruction but "
+                "scene.instruction is empty."
+            )
+        obs["task_description"] = scene.instruction
+        return obs

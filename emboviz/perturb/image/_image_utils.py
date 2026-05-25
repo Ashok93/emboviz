@@ -36,13 +36,11 @@ def make_perturbed_image_scene(
 ) -> PerturbedScene:
     """Build a PerturbedScene with one camera's image replaced.
 
-    Multi-cam aware: only the named `camera` is replaced; other cameras
-    in observations.images are preserved. Default is "primary".
+    Single-camera helper. For multi-camera perturbers use
+    ``make_perturbed_multi_camera_scene``. Raises KeyError if ``camera``
+    is not already in the scene — we never invent cameras silently.
     """
-    new_images = dict(scene.observations.images)
-    new_images[camera] = RGBImage(data=new_image, camera_id=camera)
-    new_obs = replace(scene.observations, images=new_images)
-    new_scene = replace(scene, observations=new_obs)
+    new_scene = scene.with_image(new_image, camera=camera)
     return PerturbedScene(
         scene=new_scene,
         perturber_name=perturber_name,
@@ -50,4 +48,34 @@ def make_perturbed_image_scene(
         variant_id=variant_id,
         parameters=parameters or {},
         description=description or f"{perturber_name}:{variant_id}",
+    )
+
+
+def make_perturbed_multi_camera_scene(
+    scene: Scene,
+    perturber_name: str,
+    axis: str,
+    variant_id: str,
+    new_images_by_camera: dict,
+    description: str = "",
+    parameters: Optional[dict] = None,
+) -> PerturbedScene:
+    """Build a PerturbedScene with multiple cameras replaced in one step.
+
+    Every key in ``new_images_by_camera`` must already exist in the scene's
+    ``observations.images`` — this never invents cameras. Use when a
+    perturbation is applied identically across all (or several) cameras,
+    e.g., uniform noise across every camera stream.
+    """
+    new_scene = scene.with_images(new_images_by_camera)
+    affected_cameras = sorted(new_images_by_camera)
+    enriched_params = dict(parameters or {})
+    enriched_params.setdefault("cameras", affected_cameras)
+    return PerturbedScene(
+        scene=new_scene,
+        perturber_name=perturber_name,
+        axis=axis,
+        variant_id=variant_id,
+        parameters=enriched_params,
+        description=description or f"{perturber_name}:{variant_id} on {affected_cameras}",
     )

@@ -9,6 +9,7 @@ from emboviz.perturb.instruction.empty import EmptyInstructionPerturber
 from emboviz.perturb.instruction.negation import NegationPerturber
 from emboviz.perturb.instruction.noun_swap import NounSwapPerturber
 from emboviz.perturb.instruction.ood_task import OODTaskPerturber
+from emboviz.perturb.instruction.paraphrase import PromptParaphrasePerturber
 from emboviz.perturb.instruction.preposition_swap import PrepositionSwapPerturber
 from emboviz.perturb.instruction.refusal import RefusalPerturber
 
@@ -19,6 +20,7 @@ __all__ = [
     "NegationPerturber",
     "NounSwapPerturber",
     "OODTaskPerturber",
+    "PromptParaphrasePerturber",
     "PrepositionSwapPerturber",
     "RefusalPerturber",
 ]

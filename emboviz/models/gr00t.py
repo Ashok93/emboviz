@@ -87,11 +87,35 @@ class Gr00tAdapter(VLAModel):
         self._state_keys: list[str] = list(self._modality_configs["state"].modality_keys)
         self._action_keys: list[str] = list(self._modality_configs["action"].modality_keys)
 
-        # Map our Scene camera names into GR00T's video keys.
-        # Default: route "primary" into the first declared video key.
-        if camera_mapping is None and self._video_keys:
-            camera_mapping = {"primary": self._video_keys[0]}
-        self._camera_mapping: dict[str, str] = camera_mapping or {}
+        # Map our Scene camera names into GR00T's video keys. The user MUST
+        # provide a mapping that covers every declared video key — otherwise
+        # we'd be silently filling missing GR00T keys with the wrong camera.
+        # Default: only auto-map when exactly ONE video key exists (no
+        # ambiguity about which camera goes where).
+        if camera_mapping is None:
+            if len(self._video_keys) == 1:
+                camera_mapping = {"primary": self._video_keys[0]}
+            elif len(self._video_keys) == 0:
+                camera_mapping = {}
+            else:
+                raise ValueError(
+                    f"GR00T embodiment '{embodiment_tag}' declares "
+                    f"{len(self._video_keys)} video keys "
+                    f"({self._video_keys}). Pass an explicit camera_mapping "
+                    "from your Scene camera names → GR00T video keys. We "
+                    "do not auto-map silently when multiple cameras are needed."
+                )
+        # Validate: every declared GR00T video key must be in the mapping's
+        # values (covered by some Scene camera).
+        mapped_keys = set(camera_mapping.values())
+        missing = set(self._video_keys) - mapped_keys
+        if missing:
+            raise ValueError(
+                f"camera_mapping does not cover GR00T video keys {sorted(missing)}. "
+                f"Mapping must route every declared video key — "
+                "we do not silently fill missing keys with another camera."
+            )
+        self._camera_mapping: dict[str, str] = camera_mapping
 
         # Action dim is sum of dims across action_keys; per first inference probe.
         self._action_dim: Optional[int] = None
@@ -108,9 +132,11 @@ class Gr00tAdapter(VLAModel):
 
     @property
     def required_inputs(self) -> RequiredInputs:
-        # GR00T needs at least one camera + state + (usually) language.
+        # Every Scene camera named in self._camera_mapping is required —
+        # missing ones raise at the framework boundary via
+        # RequiredInputs.validate(scene).
         return RequiredInputs(
-            cameras=frozenset(self._camera_mapping.keys()) or frozenset({"primary"}),
+            cameras=frozenset(self._camera_mapping.keys()),
             instruction=True,
             state=True,
         )
@@ -124,6 +150,9 @@ class Gr00tAdapter(VLAModel):
     # ----- inference -----------------------------------------------------
 
     def predict(self, scene: Scene) -> ActionResult:
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"Gr00tAdapter.predict: {reason}")
         observation = self._build_observation(scene)
         action_dict, _info = self.policy.get_action(observation)
 
@@ -165,10 +194,13 @@ class Gr00tAdapter(VLAModel):
         """Inferred dim for a GR00T state key.
 
         GR00T's normalization metadata stores per-key min/max — that's the
-        truth. We walk into the policy's processor to read it; if anything
-        in that path isn't present we fall back to name-based heuristics
-        (9d → 9, joint → 7, gripper → 1).
+        truth. We walk into the policy's processor to read it; if the
+        processor's introspection path is shaped differently (different
+        gr00t version), we warn and fall back to name-based heuristics
+        (9d → 9, joint → 7, gripper → 1) so the user knows we are
+        guessing.
         """
+        import warnings as _warnings
         try:
             proc = self.policy.processor
             sap = proc.state_action_processor
@@ -183,8 +215,14 @@ class Gr00tAdapter(VLAModel):
                     mn = getattr(p, "min", None)
                     if mn is not None and hasattr(mn, "__len__"):
                         return int(len(mn))
-        except Exception:
-            pass
+        except (AttributeError, KeyError, TypeError) as e:
+            _warnings.warn(
+                f"GR00T state-dim introspection failed for "
+                f"key='{state_key}': {type(e).__name__}: {e}. Falling back "
+                "to name-based heuristic; verify the dim matches your "
+                "embodiment's normalization spec.",
+                stacklevel=2,
+            )
         k = state_key.lower()
         if "9d" in k:
             return 9
@@ -213,49 +251,44 @@ class Gr00tAdapter(VLAModel):
             stacked = np.stack([arr_3d] * video_horizon, axis=0)
             return stacked[np.newaxis, ...]
 
-        # Fill EXPLICITLY mapped cameras first.
-        mapped_arrays: dict[str, np.ndarray] = {}
+        # Fill every mapped camera. required_inputs.validate() already
+        # confirmed each mapped Scene-camera-name is present and the
+        # camera_mapping covers every declared GR00T video key, so any
+        # KeyError here is a real bug — let it surface, don't paper over.
         for cam_name, gr00t_key in self._camera_mapping.items():
-            rgb = scene.observations.images.get(cam_name)
-            if rgb is None:
-                continue
-            arr = np.asarray(rgb.data, dtype=np.uint8)
-            if arr.ndim == 3:
-                video[gr00t_key] = _to_horizon(arr)
-                mapped_arrays[gr00t_key] = arr
-
-        # GR00T policies validate that EVERY declared video key is present.
-        # For any unmapped video key (e.g. a wrist cam the user doesn't have),
-        # we fall back to a mapped camera's image so the model has SOMETHING
-        # rather than crashing. Real teams should provide their full multi-cam
-        # mapping; the wizard generates one based on robot profile.
-        fallback = next(iter(mapped_arrays.values()), None)
-        if fallback is not None:
-            for vk in self._video_keys:
-                if vk not in video:
-                    video[vk] = _to_horizon(fallback)
+            arr = np.asarray(scene.observations.images[cam_name].data, dtype=np.uint8)
+            if arr.ndim != 3:
+                raise ValueError(
+                    f"Scene camera '{cam_name}' has shape {arr.shape}; "
+                    "expected (H, W, 3)."
+                )
+            video[gr00t_key] = _to_horizon(arr)
 
         # State: same temporal-horizon treatment as video.
         state_cfg = self._modality_configs.get("state")
         state_horizon = len(state_cfg.delta_indices) if state_cfg else 1
 
-        # State: distribute scene.observations.state.values across declared state_keys.
-        # GR00T expects per-key sub-vectors; for v1 we put the full state under
-        # the first declared state key (teams with multi-segment state should
-        # provide a custom mapping in their own adapter subclass).
-        # GR00T validates every declared state key is present. We map our
-        # Scene's typed fields (state, gripper) onto common GR00T key names
-        # and fall back to zeros for keys we can't infer.
+        # State: distribute Scene state/gripper across GR00T's declared
+        # state keys. validate() already checked state is present.
         state: dict[str, np.ndarray] = {}
-        proprio = scene.observations.state
+        import warnings as _warnings
+        proprio_vec = np.asarray(
+            scene.observations.state.values, dtype=np.float32,
+        ).reshape(-1)
         gripper = scene.observations.gripper
-        proprio_vec = (
-            proprio.values.astype(np.float32) if proprio is not None
-            else np.zeros(7, dtype=np.float32)
-        )
-        gripper_vec = np.array(
-            [gripper.value if gripper is not None else 0.0], dtype=np.float32,
-        )
+        if gripper is None:
+            # Some GR00T embodiments declare a gripper state key. If the
+            # Scene doesn't carry one, that's a real mismatch — raise.
+            for sk in self._state_keys:
+                if "gripper" in sk.lower():
+                    raise ValueError(
+                        f"GR00T embodiment requires gripper state key '{sk}' "
+                        "but scene.observations.gripper is None. Populate "
+                        "gripper in the dataset adapter."
+                    )
+            gripper_vec = None
+        else:
+            gripper_vec = np.array([gripper.value], dtype=np.float32)
 
         def _to_state_horizon(vec: np.ndarray) -> np.ndarray:
             stacked = np.stack([vec] * state_horizon, axis=0)
@@ -269,23 +302,32 @@ class Gr00tAdapter(VLAModel):
             elif "eef" in sk_lower or "pose" in sk_lower or "joint" in sk_lower:
                 vec = proprio_vec
             else:
+                # GR00T declared a state key whose name we can't classify.
+                # Warn so users know it's filled with zeros rather than
+                # discovering it silently in a diagnostic report.
+                _warnings.warn(
+                    f"GR00T state key '{sk}' is not recognised "
+                    "(no 'gripper'/'eef'/'pose'/'joint' substring); filling "
+                    f"with zeros of shape ({expected_dim},). Override via a "
+                    "custom adapter subclass if your embodiment needs it.",
+                    stacklevel=2,
+                )
                 vec = np.zeros(expected_dim, dtype=np.float32)
-            # Truncate / zero-pad to the dim this key expects.
-            if vec.size < expected_dim:
-                vec = np.pad(vec, (0, expected_dim - vec.size))
-            else:
-                vec = vec[:expected_dim]
+            if vec.size != expected_dim:
+                raise ValueError(
+                    f"GR00T state key '{sk}' expects dim {expected_dim} "
+                    f"but Scene provides {vec.size}. Fix the dataset adapter "
+                    "or the gripper extractor — no silent pad/truncate."
+                )
             state[sk] = _to_state_horizon(vec)
 
-        # Language: GR00T's language modality declares its own keys (e.g.
-        # 'annotation.language.language_instruction'). Populate them all
-        # with the instruction string.
+        # Language: GR00T's language modality declares its own keys. We
+        # populate ALL declared keys with the (validated non-empty) instruction.
         language: dict = {}
         lang_cfg = self._modality_configs.get("language")
         if lang_cfg is not None:
             for lk in lang_cfg.modality_keys:
-                language[lk] = [[scene.instruction or ""]]
-        # Always include a 'task' alias too, for embodiments that expect it.
-        language.setdefault("task", [[scene.instruction or ""]])
+                language[lk] = [[scene.instruction]]
+        language.setdefault("task", [[scene.instruction]])
 
         return {"video": video, "state": state, "language": language}

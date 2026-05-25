@@ -113,8 +113,12 @@ class ConceptDecompositionDiagnostic(Diagnostic):
         candidates.sort(key=lambda h: -h.contribution)
         top_hits = candidates[: self.top_k]
 
-        # Optional: label the very top
+        # Optional: label the very top neurons. Labelling can legitimately
+        # fail when the model's tokenizer/vocab projection doesn't cover a
+        # neuron's value vector cleanly — we warn so the user knows the
+        # label is missing rather than discovering it silently.
         if can_label and self.label_top > 0:
+            import warnings as _warnings
             for h in top_hits[: self.label_top]:
                 try:
                     vec = model.get_ffn_value_vectors(h.layer)[h.neuron]
@@ -123,8 +127,13 @@ class ConceptDecompositionDiagnostic(Diagnostic):
                         t for t, _ in tokens
                         if t and len(t) >= 3 and t.isascii() and t.isalpha()
                     ][: self.label_tokens_per_neuron] or [t for t, _ in tokens[:3]]
-                except Exception:
-                    pass
+                except (NotImplementedError, AttributeError, KeyError, IndexError) as e:
+                    _warnings.warn(
+                        f"Neuron-label projection failed for layer={h.layer} "
+                        f"neuron={h.neuron}: {type(e).__name__}: {e}. "
+                        "Hit will be reported without a vocabulary label.",
+                        stacklevel=2,
+                    )
 
         # Headline score: total contribution captured by top-K — useful as
         # a per-frame "intensity" measure for trajectory analysis.

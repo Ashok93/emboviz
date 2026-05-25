@@ -33,9 +33,13 @@ def render_verdict_card(
 def _render_header(suite_result: SuiteResult, scene: Scene, out: Path) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.5),
                              gridspec_kw={"width_ratios": [1, 1.3]})
-    axes[0].imshow(np.array(scene.primary_image_data))
+    # Visualization-only: pick the first available camera (the verdict
+    # card is a 1-image header, not a multi-cam viewer). If you want a
+    # multi-cam header build a custom card.
+    cam_name, cam_rgb = next(iter(scene.observations.images.items()))
+    axes[0].imshow(np.array(cam_rgb.data))
     axes[0].set_xticks([]); axes[0].set_yticks([])
-    axes[0].set_title("SCENE", fontsize=10, loc="left", color="#666")
+    axes[0].set_title(f"SCENE · cam={cam_name}", fontsize=10, loc="left", color="#666")
 
     ax = axes[1]
     ax.axis("off")
@@ -44,7 +48,7 @@ def _render_header(suite_result: SuiteResult, scene: Scene, out: Path) -> Path:
             verticalalignment="top")
     ax.text(0.0, 0.85, f"Model: {suite_result.model_id}", fontsize=11,
             transform=ax.transAxes, color="#444")
-    ax.text(0.0, 0.78, f'Instruction: "{scene.instruction or ""}"', fontsize=11,
+    ax.text(0.0, 0.78, f'Instruction: "{scene.instruction or "(none)"}"', fontsize=11,
             transform=ax.transAxes, color="#444")
 
     # Quick aggregate severity summary
