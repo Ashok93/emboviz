@@ -1,26 +1,41 @@
-"""Modality-dropout diagnostic.
+"""Modality dropout diagnostic — does the policy USE each input modality?
 
-Drop one input modality at a time and measure how much the predicted
-action changes. If the action is unchanged when modality X is dropped →
-the model doesn't actually use X, regardless of whether it's declared in
-``required_inputs``.
+For each declared input modality (image-per-camera, state, gripper,
+action_history, instruction), draw K samples from a marginal-distribution
+pool (built from OTHER episodes in the dataset), replace the modality with
+each sample, and measure two quantities:
 
-Multi-camera contract:
-  • Each declared camera is dropped INDIVIDUALLY (``drop_image:<camera>``)
-    so you can see "model uses the wrist camera but ignores the head
-    camera" as a separate signal per camera.
-  • Additionally an ``drop_image:ALL`` variant blanks every declared
-    camera together — the "no visual input at all" baseline.
-  • Other modalities (state, gripper, action_history, instruction) are
-    dropped once each as before.
+  • **intervention magnitude** Δ_in — distance between the substitute
+    and the original value in the modality's natural metric (L2 for
+    state / action_history, abs-diff for gripper, Jaccard for
+    instruction, pixel-L2 for image).
+  • **response magnitude** Δ_out — normalized L2 change in the model's
+    action under the substitution.
 
-Severity:
-  - PASS: every declared modality (and every declared camera) moves the
-          action above ``grounded_threshold`` when dropped.
-  - MODERATE: every modality is above noise floor, but at least one is
-              only weakly used.
-  - CRITICAL: at least one modality (including any specific camera) is
-              declared but ignored (Δaction < noise_floor).
+The verdict combines them per the causal-mediation principle:
+
+  • If mean Δ_in is below the pool's "minimum meaningful intervention"
+    threshold (25th percentile of intra-pool pairwise distances), the
+    test is UNTESTABLE — the substitutes were too similar to the
+    current value to count as a real intervention. We refuse to call
+    "ignored."
+  • Otherwise the verdict is USED / PARTIAL / IGNORED based on the
+    normalized Δ_out vs noise-floor and grounded thresholds.
+
+Implementation is faithful to the literature:
+  - SHAP / marginal sampling (Janzing-Minorics-Blöbaum 2020,
+    arXiv:1910.13413; Lundberg & Lee 2017, arXiv:1705.07874)
+  - Cross-episode sampling avoids Hooker-Mentch extrapolation
+    (arXiv:1905.03151)
+  - Per-modality natural distance metrics (state on SO(3) → L2 in joint
+    coords; instructions → Jaccard token overlap as a lightweight
+    embedding-free proxy)
+  - K=20 default per RISE convention scaled down (RISE used N=8000 for
+    binary masks; for full-modality substitution K=20 gives
+    Monte-Carlo SE ≈ 1/√20 ≈ 22 %)
+  - Intervention validity gate per Geiger et al. 2023 "Causal
+    Abstraction" (arXiv:2301.04709) — refuse verdict when intervention
+    magnitude is below the modality's natural scale.
 """
 
 from __future__ import annotations
@@ -41,58 +56,60 @@ from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Observations, Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
-from emboviz.perturb.image._image_utils import to_array, to_pil
+from emboviz.modality_pools import ModalityPool, _distance
 
 
 class ModalityDropoutDiagnostic(Diagnostic):
-    """Drop each declared input modality (per camera for images) and measure drift.
-
-    Calibration (recommended):
-        When ``calibration`` is passed, every Δaction is normalized into a
-        0-1 anchored score so thresholds mean the same thing across models.
+    """Marginal-distribution modality dropout (the proper SHAP one).
 
     Args:
-        noise_floor: normalized score below which the model is treated as
-            "ignoring" that modality (memorization-like signature on that input).
-        grounded_threshold: normalized score above which the model genuinely
-            uses the modality.
-        cameras: which cameras to test individually. None = every required
-                 camera declared by the model that is also present in the scene.
-        calibration: per-model anchors from ``emboviz.calibration.calibrate_model``.
-            Without it scores are raw L2 and thresholds become model-specific
-            magic numbers.
+        pool: ModalityPool built from OTHER episodes in the dataset.
+            Required.
+        calibration: per-model anchors (typical_action_magnitude,
+            noise_floor, n_samples). Required for normalized scoring
+            and stochastic averaging.
+        k_samples: substitutions per modality per query frame.
+            Default 20 (Monte-Carlo SE ≈ 22 %, manageable inference cost).
+        cameras: which cameras to test individually. None = every
+            declared camera.
+        noise_floor_score: normalized Δ_out below which the modality is
+            "ignored" (after intervention-validity gate passes).
+        grounded_threshold: normalized Δ_out above which the modality is
+            "genuinely used".
     """
 
     required_capabilities = Capability.INFERENCE
 
     def __init__(
         self,
-        noise_floor: float = 0.05,
-        grounded_threshold: float = 0.30,
+        pool: ModalityPool,
+        calibration: ModelCalibration,
+        k_samples: int = 20,
         cameras: Optional[list[str]] = None,
-        calibration: Optional[ModelCalibration] = None,
-        substitution_state: Optional[np.ndarray] = None,
-        substitution_action_history: Optional[np.ndarray] = None,
+        noise_floor_score: float = 0.05,
+        grounded_threshold: float = 0.30,
+        seed: int = 0,
     ):
-        """Args:
-            substitution_state: 1-D ndarray to substitute for state during
-                state dropout. If None, the diagnostic falls back to a zero
-                vector — but zeros are degenerate for structured state
-                representations (e.g. GR00T's 6D rotation in eef_9d requires
-                an orthonormal matrix; zeros fail SVD inside the model's
-                decoder). For robust evaluation pass a valid state from the
-                same distribution (e.g. the trajectory's first frame state
-                or per-dim mean). The runner computes this once per
-                trajectory and passes it in.
-            substitution_action_history: 2-D ndarray (history_len, action_dim)
-                to substitute for action_history. Same reasoning.
-        """
-        self.noise_floor = noise_floor
-        self.grounded_threshold = grounded_threshold
-        self.cameras = cameras
+        if pool is None:
+            raise ValueError(
+                "ModalityDropoutDiagnostic: pool is required. The "
+                "diagnostic refuses to invent substitutions — call "
+                "build_modality_pool(dataset, current_episode, ...) "
+                "and pass it in."
+            )
+        if calibration is None:
+            raise ValueError(
+                "ModalityDropoutDiagnostic: calibration is required. "
+                "Normalized scoring + multi-sample averaging both need "
+                "the model calibration."
+            )
+        self.pool = pool
         self.calibration = calibration
-        self.substitution_state = substitution_state
-        self.substitution_action_history = substitution_action_history
+        self.k_samples = int(k_samples)
+        self.cameras = cameras
+        self.noise_floor_score = float(noise_floor_score)
+        self.grounded_threshold = float(grounded_threshold)
+        self.seed = int(seed)
         self.name = "modality_dropout"
         self.axis = "input.modality_dropout"
 
@@ -100,163 +117,143 @@ class ModalityDropoutDiagnostic(Diagnostic):
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
-        reqs = model.required_inputs
-        n_samples = self.calibration.n_samples if self.calibration else 1
+        rng = np.random.default_rng(self.seed)
+        n_samples = self.calibration.n_samples
         baseline = averaged_predict(model, scene, n_samples)
 
-        def _norm(raw_delta: float) -> float:
-            return self.calibration.normalize(raw_delta) if self.calibration else raw_delta
+        reqs = model.required_inputs
+        per_modality: dict[str, dict] = {}
 
-        per_modality: dict[str, float] = {}
-        per_modality_raw: dict[str, float] = {}
-
-        # 1. Image dropout — one variant per camera the model requires AND
-        # the scene actually provides, plus an ALL-cameras combined drop.
+        # 1. Image per camera
         requested_cams = (
-            sorted(self.cameras) if self.cameras is not None else sorted(reqs.cameras)
+            sorted(self.cameras) if self.cameras is not None
+            else sorted(reqs.cameras)
         )
-        droppable_cams = [c for c in requested_cams if c in scene.observations.images]
-        skipped_cams = [c for c in requested_cams if c not in scene.observations.images]
-        def _record(key: str, raw: float):
-            per_modality_raw[key] = raw
-            per_modality[key] = _norm(raw)
+        for cam in requested_cams:
+            modality = f"image:{cam}"
+            if cam not in scene.observations.images:
+                per_modality[modality] = self._skip(
+                    f"camera '{cam}' not present in scene "
+                    f"(scene has {sorted(scene.observations.images)}); "
+                    "load it in the dataset adapter."
+                )
+                continue
+            if not self.pool.has(modality):
+                per_modality[modality] = self._skip(
+                    f"pool has no image samples for camera '{cam}'."
+                )
+                continue
+            current = np.asarray(scene.observations.images[cam].data)
+            per_modality[modality] = self._run_one(
+                modality, model, scene, baseline, current, n_samples, rng,
+                apply_fn=lambda s, v: s.with_image(_as_pil(v), camera=cam),
+            )
 
-        for cam in droppable_cams:
-            arr = to_array(scene.observations.images[cam].data)
-            blank = to_pil(np.full_like(arr, fill_value=int(arr.mean())))
-            blank_scene = scene.with_image(blank, camera=cam)
-            ar = averaged_predict(model, blank_scene, n_samples)
-            _record(f"drop_image:{cam}",
-                    float(np.linalg.norm(ar.action - baseline.action)))
-        if len(droppable_cams) > 1:
-            all_blank = {}
-            for cam in droppable_cams:
-                arr = to_array(scene.observations.images[cam].data)
-                all_blank[cam] = to_pil(np.full_like(arr, fill_value=int(arr.mean())))
-            ar = averaged_predict(model, scene.with_images(all_blank), n_samples)
-            _record("drop_image:ALL",
-                    float(np.linalg.norm(ar.action - baseline.action)))
-
-        # 2. State dropout — substitute with a from-distribution valid state
-        # rather than zeros. Zeros are degenerate for any structured state
-        # representation (6D rotations, quaternions, etc.) and crash models
-        # that internally validate the geometry. A real recorded state from
-        # the same trajectory is always structurally valid AND
-        # uninformative for the current frame, which is exactly the
-        # intervention semantics we want.
+        # 2. State
         if reqs.state and scene.observations.state is not None:
-            state = scene.observations.state
-            if self.substitution_state is not None:
-                sub_values = np.asarray(
-                    self.substitution_state, dtype=state.values.dtype,
-                ).reshape(state.values.shape)
+            if not self.pool.has("state"):
+                per_modality["state"] = self._skip("pool has no state samples")
             else:
-                # Fallback for callers that don't pass a substitution — keep
-                # zeros but the runner should always supply one.
-                sub_values = np.zeros_like(state.values)
-            sub_state = Proprioception(values=sub_values, convention=state.convention)
-            new_obs = replace(scene.observations, state=sub_state)
-            ar = averaged_predict(model, replace(scene, observations=new_obs), n_samples)
-            _record("state", float(np.linalg.norm(ar.action - baseline.action)))
+                current = np.asarray(scene.observations.state.values, dtype=np.float32)
+                def apply_state(s, v):
+                    new_state = Proprioception(
+                        values=np.asarray(v, dtype=current.dtype).reshape(current.shape),
+                        convention=s.observations.state.convention,
+                    )
+                    return replace(s, observations=replace(s.observations, state=new_state))
+                per_modality["state"] = self._run_one(
+                    "state", model, scene, baseline, current, n_samples, rng,
+                    apply_fn=apply_state,
+                )
 
-        # 3. Gripper dropout.
+        # 3. Gripper
         if reqs.gripper and scene.observations.gripper is not None:
-            gripper = scene.observations.gripper
-            mid = (
-                (scene.profile.gripper.range[0] + scene.profile.gripper.range[1]) / 2
-                if scene.profile is not None and scene.profile.gripper is not None
-                else 0.5
-            )
-            new_gripper = replace(gripper, value=float(mid))
-            new_obs = replace(scene.observations, gripper=new_gripper)
-            ar = averaged_predict(model, replace(scene, observations=new_obs), n_samples)
-            _record("gripper", float(np.linalg.norm(ar.action - baseline.action)))
-
-        # 4. Action-history dropout — same substitution principle as state.
-        if reqs.action_history and scene.observations.action_history is not None:
-            hist = scene.observations.action_history
-            if self.substitution_action_history is not None:
-                sub_actions = np.asarray(
-                    self.substitution_action_history, dtype=hist.actions.dtype,
-                ).reshape(hist.actions.shape)
+            if not self.pool.has("gripper"):
+                per_modality["gripper"] = self._skip("pool has no gripper samples")
             else:
-                sub_actions = np.zeros_like(hist.actions)
-            new_obs = replace(
-                scene.observations,
-                action_history=replace(hist, actions=sub_actions),
-            )
-            ar = averaged_predict(model, replace(scene, observations=new_obs), n_samples)
-            _record("action_history",
-                    float(np.linalg.norm(ar.action - baseline.action)))
+                current = float(scene.observations.gripper.value)
+                def apply_grip(s, v):
+                    new_grip = replace(s.observations.gripper, value=float(v))
+                    return replace(s, observations=replace(s.observations, gripper=new_grip))
+                per_modality["gripper"] = self._run_one(
+                    "gripper", model, scene, baseline, current, n_samples, rng,
+                    apply_fn=apply_grip,
+                )
 
-        # 5. Instruction dropout — substitute a single space (non-empty so
-        # strict instruction validation passes; semantically empty so the
-        # model sees no task content).
+        # 4. Action history
+        if reqs.action_history and scene.observations.action_history is not None:
+            if not self.pool.has("action_history"):
+                per_modality["action_history"] = self._skip("pool has no action_history samples")
+            else:
+                current = np.asarray(scene.observations.action_history.actions, dtype=np.float32)
+                def apply_hist(s, v):
+                    new_hist = replace(
+                        s.observations.action_history,
+                        actions=np.asarray(v, dtype=current.dtype).reshape(current.shape),
+                    )
+                    return replace(s, observations=replace(s.observations, action_history=new_hist))
+                per_modality["action_history"] = self._run_one(
+                    "action_history", model, scene, baseline, current, n_samples, rng,
+                    apply_fn=apply_hist,
+                )
+
+        # 5. Instruction
         if reqs.instruction and scene.instruction is not None:
-            ar = averaged_predict(model, scene.with_instruction(" "), n_samples)
-            _record("instruction",
-                    float(np.linalg.norm(ar.action - baseline.action)))
+            if not self.pool.has("instruction"):
+                per_modality["instruction"] = self._skip(
+                    "pool has no different-task instruction samples"
+                )
+            else:
+                current = str(scene.instruction)
+                def apply_instr(s, v):
+                    return s.with_instruction(str(v))
+                per_modality["instruction"] = self._run_one(
+                    "instruction", model, scene, baseline, current, n_samples, rng,
+                    apply_fn=apply_instr,
+                )
 
         if not per_modality:
             return self._not_applicable(
                 model, scene,
-                "model declares no input modalities we can drop "
-                "(check required_inputs and that the scene has those fields populated)",
+                "no testable modality found — model declares no inputs OR the scene "
+                "is missing all declared modality fields."
             )
 
-        # Per-modality severity verdict.
-        # Per-modality verdict (no UNKNOWN — proper calibration ensures the
-        # averaged noise floor is below precision_target × typical, so the
-        # normalized score either clearly says "ignored" (≈ 0) or "real
-        # response"). Categories:
-        #   normalized < noise_floor_score → "ignored" (model is robust /
-        #       memorization-like for this input)
-        #   < grounded_threshold → "partial"
-        #   >= grounded_threshold → "used"
-        per_modality_severity: dict[str, str] = {}
-        ignored: list[str] = []
-        partial: list[str] = []
-        used: list[str] = []
-        for modality in per_modality:
-            score_norm = per_modality[modality]
-            if score_norm < self.noise_floor:
-                per_modality_severity[modality] = "ignored"
-                ignored.append(modality)
-            elif score_norm < self.grounded_threshold:
-                per_modality_severity[modality] = "partial"
-                partial.append(modality)
-            else:
-                per_modality_severity[modality] = "used"
-                used.append(modality)
+        # Roll up verdicts
+        verdicts = {m: r["verdict"] for m, r in per_modality.items()}
+        n_used      = sum(1 for v in verdicts.values() if v == "USED")
+        n_ignored   = sum(1 for v in verdicts.values() if v == "IGNORED")
+        n_partial   = sum(1 for v in verdicts.values() if v == "PARTIAL")
+        n_untestable = sum(1 for v in verdicts.values() if v == "UNTESTABLE")
 
-        scalar = float(len(ignored))
-
-        if ignored:
+        # Headline severity reflects "any declared modality ignored = CRITICAL"
+        # ONLY when we could actually test it. Untestable does not count as
+        # ignored.
+        if n_ignored > 0:
             sev = Severity.CRITICAL
-            verdict = (
-                f"Declared-but-ignored modalities (normalized response < "
-                f"{self.noise_floor}): {', '.join(ignored)}."
+            verdict_str = (
+                f"{n_ignored}/{len(verdicts)} declared modalities are "
+                f"IGNORED by the model (no response to a real-magnitude "
+                f"intervention). Specifically: "
+                + ", ".join(m for m, v in verdicts.items() if v == "IGNORED")
             )
-        elif partial:
+        elif n_partial > 0:
             sev = Severity.MODERATE
-            verdict = (
-                f"All declared modalities respond, but {', '.join(partial)} "
-                f"only weakly (normalized < grounded threshold "
-                f"{self.grounded_threshold})."
+            verdict_str = (
+                f"{n_partial} modality/modalities show only PARTIAL "
+                f"response: {', '.join(m for m, v in verdicts.items() if v == 'PARTIAL')}"
             )
-        else:
+        elif n_used > 0:
             sev = Severity.PASS
-            verdict = (
-                f"All declared modalities are genuinely used "
-                f"(normalized Δaction > {self.grounded_threshold} when each is dropped)."
+            verdict_str = f"All {n_used} testable modalities are USED by the model."
+        else:
+            sev = Severity.UNKNOWN
+            verdict_str = (
+                f"No modality could be tested ({n_untestable} untestable, "
+                "0 usable verdicts)."
             )
-        if used:
-            verdict += f" Genuinely used: {', '.join(used)}."
-        if skipped_cams:
-            verdict += (
-                f" Skipped {skipped_cams} (not present in scene; the "
-                "dataset adapter did not load them — investigate)."
-            )
+
+        scalar = float(n_ignored)   # higher = worse
 
         return DiagnosticResult(
             diagnostic_name=self.name,
@@ -265,21 +262,142 @@ class ModalityDropoutDiagnostic(Diagnostic):
             scene_id=scene.scene_id,
             scalar_score=scalar,
             severity=sev,
-            direction="higher_is_worse",   # more ignored modalities = worse
-            explanation=verdict,
-            per_variant=per_modality,
+            direction="higher_is_worse",
+            explanation=verdict_str,
+            per_variant={
+                f"{m}:Δ_in":  r.get("mean_intervention_mag", float("nan"))
+                for m, r in per_modality.items()
+            } | {
+                f"{m}:Δ_out": r.get("mean_response_normalized", float("nan"))
+                for m, r in per_modality.items()
+            } | {
+                f"{m}:verdict": r["verdict"] for m, r in per_modality.items()
+            },
             raw={
-                "per_modality_score":    per_modality,          # normalized (or raw if no calib)
-                "per_modality_raw_delta": per_modality_raw,     # always raw L2
-                "per_modality_verdict":  per_modality_severity,
-                "calibration_used":      self.calibration.to_summary() if self.calibration else None,
-                "noise_floor":           self.noise_floor,
-                "grounded_threshold":    self.grounded_threshold,
-                "ignored":               ignored,
-                "partial":               partial,
-                "used":                  used,
-                "tested_cameras": droppable_cams,
-                "skipped_cameras_absent_from_scene": skipped_cams,
-                "baseline_action": baseline.action.tolist(),
+                "per_modality":           per_modality,
+                "n_used":                 n_used,
+                "n_ignored":              n_ignored,
+                "n_partial":              n_partial,
+                "n_untestable":           n_untestable,
+                "k_samples":              self.k_samples,
+                "pool_size":              {
+                    "state":           len(self.pool.state_samples),
+                    "gripper":         len(self.pool.gripper_samples),
+                    "action_history":  len(self.pool.action_history_samples),
+                    "instruction":     len(self.pool.instruction_samples),
+                    "image":           {c: len(s) for c, s in self.pool.image_samples.items()},
+                },
+                "pool_ref_distance":      self.pool.ref_distance,
+                "pool_sampled_episodes":  self.pool.metadata.get("sampled_episodes"),
+                "calibration_used":       self.calibration.to_summary(),
+                "noise_floor_score":      self.noise_floor_score,
+                "grounded_threshold":     self.grounded_threshold,
             },
         )
+
+    # ----------------------------------------------------------------
+    def _skip(self, reason: str) -> dict:
+        return {"verdict": "UNTESTABLE", "skip_reason": reason}
+
+    def _run_one(
+        self, modality: str, model, scene, baseline, current_value,
+        n_samples: int, rng: np.random.Generator,
+        *, apply_fn,
+    ) -> dict:
+        """Run K-sample marginal-dropout for one modality on one scene."""
+        samples = self.pool.sample(
+            modality, self.k_samples, rng, current_value=current_value,
+        )
+        if not samples:
+            return self._skip(
+                f"pool returned 0 samples for {modality} after filtering "
+                "duplicates of current value."
+            )
+
+        intervention_mags = []
+        response_norms    = []
+        response_raws     = []
+        for sub in samples:
+            try:
+                perturbed_scene = apply_fn(scene, sub)
+            except Exception as e:
+                return self._skip(
+                    f"apply_fn raised on {modality}: {type(e).__name__}: {e}"
+                )
+            try:
+                pred = averaged_predict(model, perturbed_scene, n_samples).action
+            except Exception as e:
+                return self._skip(
+                    f"model.predict raised on {modality} substitute: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+            d_in = _distance(modality, sub, current_value)
+            d_out_raw = float(np.linalg.norm(pred - baseline.action))
+            d_out_norm = self.calibration.normalize(d_out_raw)
+
+            intervention_mags.append(d_in)
+            response_norms.append(d_out_norm)
+            response_raws.append(d_out_raw)
+
+        mean_in       = float(np.mean(intervention_mags))
+        median_in     = float(np.median(intervention_mags))
+        mean_out_norm = float(np.mean(response_norms))
+        mean_out_raw  = float(np.mean(response_raws))
+        std_out_norm  = float(np.std(response_norms))
+        ratio = (mean_out_norm / mean_in) if mean_in > 1e-12 else float("inf")
+
+        # Intervention-validity gate.
+        ref = self.pool.ref_distance.get(modality, 0.0)
+        if mean_in < ref:
+            return {
+                "verdict":                       "UNTESTABLE",
+                "skip_reason":                   (
+                    f"mean intervention magnitude {mean_in:.4f} is below "
+                    f"the pool's 25th-percentile pairwise distance "
+                    f"({ref:.4f}). The substitutions are too similar to "
+                    "the current value to count as a real intervention. "
+                    "More variety in the dataset would help."
+                ),
+                "n_samples_used":                int(len(samples)),
+                "mean_intervention_mag":         mean_in,
+                "median_intervention_mag":       median_in,
+                "ref_min_intervention":          float(ref),
+                "mean_response_normalized":      mean_out_norm,
+                "mean_response_raw":             mean_out_raw,
+                "std_response_normalized":       std_out_norm,
+                "sensitivity_ratio":             ratio,
+                "intervention_magnitudes":       intervention_mags,
+                "response_normalized_per_sample": response_norms,
+            }
+
+        # Real intervention happened — issue real verdict.
+        if mean_out_norm < self.noise_floor_score:
+            verdict = "IGNORED"
+        elif mean_out_norm < self.grounded_threshold:
+            verdict = "PARTIAL"
+        else:
+            verdict = "USED"
+
+        return {
+            "verdict":                       verdict,
+            "n_samples_used":                int(len(samples)),
+            "mean_intervention_mag":         mean_in,
+            "median_intervention_mag":       median_in,
+            "ref_min_intervention":          float(ref),
+            "mean_response_normalized":      mean_out_norm,
+            "mean_response_raw":             mean_out_raw,
+            "std_response_normalized":       std_out_norm,
+            "sensitivity_ratio":             ratio,
+            "intervention_magnitudes":       intervention_mags,
+            "response_normalized_per_sample": response_norms,
+        }
+
+
+def _as_pil(v):
+    """Tolerant: accept PIL.Image, ndarray, or whatever and return PIL."""
+    from PIL import Image
+    if isinstance(v, Image.Image):
+        return v
+    arr = np.asarray(v, dtype=np.uint8)
+    return Image.fromarray(arr)

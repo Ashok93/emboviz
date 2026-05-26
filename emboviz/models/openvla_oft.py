@@ -29,12 +29,13 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, Scene
+from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
 from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
 from emboviz.models.registry import register_model
 
 
 _DEFAULT_REPO = "moojink/openvla-7b-oft-finetuned-libero-spatial"
+_SPACE_TOKEN_ID = 29871   # Llama tokenizer's leading-space token
 
 
 @register_model("openvla-oft")
@@ -48,7 +49,7 @@ class OpenVLAOFTAdapter(VLAModel):
                           num_images=2, use_proprio=True)
     """
 
-    _CAPS = Capability.INFERENCE
+    _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
     def __init__(
         self,
@@ -205,6 +206,210 @@ class OpenVLAOFTAdapter(VLAModel):
 
     def find_token_positions(self, instruction: str, word: str) -> list[int]:
         return []
+
+    # ----- attention extraction -----------------------------------------
+
+    def extract_attention(
+        self, scene: Scene, query: TokenSelector,
+    ) -> AttentionMaps:
+        """Extract per-camera attention from OFT's language-model forward.
+
+        Strategy: replicate the input-prep pipeline of ``predict_action``
+        (vision encoder + proprio + multimodal-embedding stacking) and
+        run the underlying ``language_model`` with ``output_attentions=True``
+        instead of ``False``. We skip the action head entirely — attention
+        comes out of the LM forward pass; we don't need to generate
+        actions to inspect attention.
+
+        Multimodal sequence layout when num_images=2 and use_proprio=True:
+            [primary patches (P) | wrist patches (P) | proprio (1) |
+             prompt tokens (NUM_PROMPT_TOKENS) |
+             action tokens (NUM_ACTIONS_CHUNK * ACTION_DIM) |
+             stop token]
+
+        Returns one AttentionMaps with per-camera image-token slices so
+        callers can compute per-camera heatmaps without re-running.
+
+        Args:
+            query: ``TokenSelector(relative="before_action")`` reads
+                attention from the first action-token position (the
+                conventional "what is the model looking at when deciding
+                the first action" probe). ``"last"`` reads from the
+                final position; ``"first"`` from BOS-equivalent.
+        """
+        import torch
+
+        from prismatic.vla.constants import IGNORE_INDEX
+        from experiments.robot.openvla_utils import normalize_proprio
+
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"OpenVLAOFTAdapter.extract_attention: {reason}")
+        observation = self._build_observation(scene)
+
+        # Build prompt EXACTLY as get_vla_action does.
+        prompt = (
+            f"In: What action should the robot take to "
+            f"{observation['task_description'].lower()}?\nOut:"
+        )
+
+        # Process primary image.
+        from PIL import Image as _Image
+        primary_pil = _Image.fromarray(observation["full_image"])
+        device = next(self._vla.parameters()).device
+        inputs = self._processor(prompt, primary_pil).to(device, dtype=torch.bfloat16)
+
+        # If multi-image: process wrist + concat pixel_values along the
+        # image-stream axis (same dim that get_vla_action concatenates).
+        if self.num_images >= 2:
+            wrist_pil = _Image.fromarray(observation["wrist_image"])
+            wrist_inputs = self._processor(prompt, wrist_pil).to(device, dtype=torch.bfloat16)
+            inputs["pixel_values"] = torch.cat(
+                [inputs["pixel_values"], wrist_inputs["pixel_values"]], dim=1,
+            )
+
+        # Normalize proprio (predict_action does this via the helper).
+        proprio = None
+        if self.use_proprio:
+            proprio_norm_stats = self._vla.norm_stats[self.unnorm_key]["proprio"]
+            proprio = normalize_proprio(observation["state"], proprio_norm_stats)
+
+        # ---- replicate the predict_action prep pipeline ----
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        pixel_values = inputs["pixel_values"]
+
+        if not torch.all(input_ids[:, -1] == _SPACE_TOKEN_ID):
+            input_ids = torch.cat(
+                (input_ids, torch.tensor([[_SPACE_TOKEN_ID]],
+                                          device=input_ids.device,
+                                          dtype=input_ids.dtype)),
+                dim=1,
+            )
+
+        labels = input_ids.clone()
+        labels[:] = IGNORE_INDEX
+        NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1
+
+        with torch.inference_mode():
+            input_ids, attention_mask = self._vla._prepare_input_for_action_prediction(
+                input_ids, attention_mask,
+            )
+            labels = self._vla._prepare_labels_for_action_prediction(labels, input_ids)
+
+            input_embeddings = self._vla.get_input_embeddings()(input_ids)
+            all_actions_mask = self._vla._process_action_masks(labels)
+
+            language_embeddings = input_embeddings[~all_actions_mask].reshape(
+                input_embeddings.shape[0], -1, input_embeddings.shape[2],
+            )
+            projected_patch_embeddings = self._vla._process_vision_features(
+                pixel_values, language_embeddings, use_film=False,
+            )
+
+            use_proprio = self.use_proprio and proprio is not None
+            if use_proprio:
+                proprio_tensor = torch.as_tensor(
+                    proprio,
+                    device=projected_patch_embeddings.device,
+                    dtype=projected_patch_embeddings.dtype,
+                )
+                projected_patch_embeddings = self._vla._process_proprio_features(
+                    projected_patch_embeddings, proprio_tensor, self._proprio_projector,
+                )
+
+            patches_per_image = self._vla.vision_backbone.get_num_patches()
+            num_images_used = self._vla.vision_backbone.get_num_images_in_input()
+            NUM_PATCHES = patches_per_image * num_images_used
+            if use_proprio:
+                NUM_PATCHES += 1
+
+            # Zero out action-token embeddings (regression-path convention).
+            all_actions_mask_3d = all_actions_mask.unsqueeze(-1)
+            input_embeddings = input_embeddings * ~all_actions_mask_3d
+
+            multimodal_embeddings, multimodal_attention_mask = (
+                self._vla._build_multimodal_attention(
+                    input_embeddings, projected_patch_embeddings, attention_mask,
+                )
+            )
+
+            # ---- the one knob we change vs predict_action: attention ON ----
+            outputs = self._vla.language_model(
+                inputs_embeds=multimodal_embeddings,
+                attention_mask=multimodal_attention_mask,
+                output_attentions=True,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+
+        full_seq = int(multimodal_embeddings.shape[1])
+        first_action_pos = NUM_PATCHES + NUM_PROMPT_TOKENS
+
+        # Resolve query position. "before_action" maps to the position
+        # of the first action token — that's where the model decides
+        # action[0], analogous to OpenVLA's "next-token" semantics.
+        if query.position is not None:
+            query_pos = int(query.position)
+        elif query.relative == "last":
+            query_pos = full_seq - 1
+        elif query.relative == "first":
+            query_pos = 0
+        elif query.relative == "before_action":
+            query_pos = first_action_pos
+        elif query.word is not None:
+            raise NotImplementedError(
+                "OFT does not support word-anchored attention extraction "
+                "yet (would need tokenizer-aware position search through "
+                "the prompt span)."
+            )
+        else:
+            query_pos = first_action_pos
+
+        per_layer = []
+        for layer_attn in outputs.attentions:
+            # (B, n_heads, seq, seq) → row at query_pos
+            per_layer.append(layer_attn[0, :, query_pos, :].float().cpu().numpy())
+        weights = np.stack(per_layer, axis=0)
+
+        # Per-camera image-token ranges. SigLIP+DINOv2 backbone is square.
+        grid_side = int(np.sqrt(patches_per_image))
+        if grid_side * grid_side != patches_per_image:
+            raise RuntimeError(
+                f"OFT vision_backbone produced {patches_per_image} patches; "
+                f"expected a square grid (side² = patches). Refusing to "
+                "fabricate a non-square grid_side."
+            )
+
+        # OFT cameras are single-tile per camera. The multimodal sequence
+        # is laid out as: [BOS at position 0 | vision patches at
+        # positions 1..1+P | proprio? | prompt tokens | action tokens |
+        # stop]. Vision starts AFTER BOS at position 1. See
+        # prismatic/extern/hf/modeling_prismatic.py::_build_multimodal_attention
+        # ("insert embeddings after <BOS> token (1:)") in the openvla-oft
+        # repo for proof.
+        image_token_ranges: dict = {"primary": [(1, 1 + patches_per_image)]}
+        image_grid_sides: dict = {"primary": grid_side}
+        if self.num_images >= 2:
+            image_token_ranges[self.wrist_camera] = [(
+                1 + patches_per_image, 1 + 2 * patches_per_image,
+            )]
+            image_grid_sides[self.wrist_camera] = grid_side
+
+        return AttentionMaps(
+            weights=weights,
+            query_position=query_pos,
+            n_keys=full_seq,
+            image_token_ranges=image_token_ranges,
+            image_grid_sides=image_grid_sides,
+            metadata={
+                "num_images":     num_images_used,
+                "num_patches":    NUM_PATCHES,
+                "num_prompt":     NUM_PROMPT_TOKENS,
+                "first_action":   first_action_pos,
+                "use_proprio":    use_proprio,
+            },
+        )
 
     # ----- helpers -------------------------------------------------------
 

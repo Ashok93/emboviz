@@ -30,6 +30,7 @@ import time
 import traceback
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -115,8 +116,28 @@ def run_story(args) -> None:
 
     # --- 3b. per-frame diagnostics with calibration ----------------------
     print(f"[3b/7] per-frame diagnostics across the window...", flush=True)
-    gd_sam = GroundingDINOSAMDetector(device="cuda")
+    # Memorization needs the user to tell us what to mask — only they
+    # know what their policy is supposed to manipulate. If they didn't
+    # pass --target-text we SKIP memorization entirely (rather than
+    # invent a target). The skip surfaces in the summary's
+    # `not_applicable` block with a clear reason.
     per_axis: dict = {}
+    gd_sam = None
+    memorization_skip_reason: Optional[str] = None
+    if args.target_text and args.target_text.strip():
+        gd_sam = GroundingDINOSAMDetector(
+            target_text=args.target_text.strip(), device="cuda",
+        )
+        print(f"      memorization target_text = {args.target_text.strip()!r}", flush=True)
+    else:
+        memorization_skip_reason = (
+            "no --target-text supplied. Memorization tests whether the "
+            "policy is using vision for a specific object; only the user "
+            "knows which object their model is supposed to manipulate "
+            "(\"the mug\", \"the lid\", \"the welding torch\", ...). "
+            "Re-run with --target-text \"<your object>\" to enable."
+        )
+        print(f"      memorization SKIPPED — {memorization_skip_reason}", flush=True)
 
     # Track diagnostics that SKIP for architectural reasons (model doesn't
     # support what the axis measures). These don't appear in per_axis at all
@@ -160,38 +181,66 @@ def run_story(args) -> None:
               f"(normalized mean_delta={chunk.scalar_score:.3f}, "
               f"raw={chunk.raw['raw_mean_delta']:.3f})", flush=True)
 
-    print(f"      memorization (GD+SAM per camera, calibrated) ...", flush=True)
-    memo = TrajectoryDiagnostic(
-        MemorizationDiagnostic(target_detector=gd_sam, calibration=calibration),
-        progress=True,
-    )
-    per_axis["vision.memorization"] = memo.run(model, trajectory)
+    if gd_sam is not None:
+        print(f"      memorization (GD+SAM per camera, calibrated) ...", flush=True)
+        memo = TrajectoryDiagnostic(
+            MemorizationDiagnostic(target_detector=gd_sam, calibration=calibration),
+            progress=True,
+        )
+        per_axis["vision.memorization"] = memo.run(model, trajectory)
+    else:
+        # User didn't pass --target-text. We do NOT invent one.
+        not_applicable["vision.memorization"] = memorization_skip_reason
 
-    # Compute trajectory-level substitution values for state + action_history
-    # so ModalityDropoutDiagnostic can substitute with a from-distribution
-    # valid sample instead of zeros (zeros break structured representations
-    # like GR00T's 6D rotation in eef_9d). Use the LAST frame's state as the
-    # substitution for every frame — it's a real recorded state, guaranteed
-    # valid, and uninformative for any non-last frame.
-    last_scene = trajectory.frames[-1]
-    sub_state = (
-        np.asarray(last_scene.observations.state.values, dtype=np.float32)
-        if last_scene.observations.state is not None else None
-    )
-    sub_hist = (
-        np.asarray(last_scene.observations.action_history.actions, dtype=np.float32)
-        if last_scene.observations.action_history is not None else None
-    )
-    print(f"      modality dropout (per camera + per modality, calibrated) ...", flush=True)
-    md = TrajectoryDiagnostic(
-        ModalityDropoutDiagnostic(
-            calibration=calibration,
-            substitution_state=sub_state,
-            substitution_action_history=sub_hist,
-        ),
-        progress=True,
-    )
-    per_axis["input.modality_dropout"] = md.run(model, trajectory)
+    # Build a marginal-distribution ModalityPool from OTHER episodes
+    # in the dataset. ModalityDropoutDiagnostic samples K substitutions
+    # per modality per frame from this pool, providing the
+    # causally-interpretable (per Pearl's do-operator) substitution
+    # semantics that SHAP / Janzing 2020 / Hooker-Mentch 2019 prescribe.
+    # See emboviz/modality_pools.py for the full literature & rationale.
+    print(f"      building modality dropout pool from other episodes ...", flush=True)
+    from emboviz.modality_pools import build_modality_pool
+    declared_mods = {
+        "state":          model.required_inputs.state,
+        "gripper":        model.required_inputs.gripper,
+        "action_history": model.required_inputs.action_history,
+        "instruction":    model.required_inputs.instruction,
+        "images":         sorted(model.required_inputs.cameras),
+    }
+    try:
+        pool = build_modality_pool(
+            dataset, current_episode=int(args.episode_idx),
+            declared_modalities=declared_mods,
+            n_samples=int(args.modality_pool_size),
+            seed=int(args.episode_idx) + 1,
+            instruction_must_differ_from_task=trajectory.frames[0].instruction,
+        )
+        print(f"      pool: episodes={pool.metadata.get('sampled_episodes')}", flush=True)
+        for mod, ref in pool.ref_distance.items():
+            print(f"        ref_distance[{mod}] = {ref:.4f}", flush=True)
+    except Exception as e:
+        print(f"      modality pool BUILD FAILED ({type(e).__name__}: {e}) — "
+              "modality dropout SKIPPED.", flush=True)
+        not_applicable["input.modality_dropout"] = (
+            f"could not build a marginal-distribution pool from the "
+            f"dataset ({type(e).__name__}: {e}). The diagnostic refuses "
+            "to fabricate substitutes."
+        )
+        pool = None
+
+    if pool is not None:
+        print(f"      modality dropout (K={args.modality_k_samples} per modality, "
+              "marginal sampling) ...", flush=True)
+        md = TrajectoryDiagnostic(
+            ModalityDropoutDiagnostic(
+                pool=pool,
+                calibration=calibration,
+                k_samples=int(args.modality_k_samples),
+                seed=int(args.episode_idx) + 2,
+            ),
+            progress=True,
+        )
+        per_axis["input.modality_dropout"] = md.run(model, trajectory)
 
     print(f"      [3c] sensitivity map ({args.sensitivity_grid_side}x{args.sensitivity_grid_side}, per camera) ...", flush=True)
     sm = TrajectoryDiagnostic(
@@ -203,13 +252,19 @@ def run_story(args) -> None:
     per_axis["vision.scene_sensitivity"] = sm.run(model, trajectory)
 
     # --- 4. prompt paraphrase on frame 0 ---------------------------------
+    # Paraphrase uses averaged_predict so the delta isn't contaminated by
+    # single-sample decoding noise on stochastic policies (π0, GR00T,
+    # diffusion). The same n_samples derived from calibration applies.
     print(f"[4/7] prompt paraphrase on frame 0...", flush=True)
+    from emboviz.calibration import averaged_predict as _avg_predict
     pp = PromptParaphrasePerturber()
     paraphrase_deltas = {}
-    baseline_action = model.predict(trajectory.frames[0]).action
+    baseline_action = _avg_predict(
+        model, trajectory.frames[0], calibration.n_samples,
+    ).action
     for variant in pp.variants(trajectory.frames[0]):
         try:
-            pred = model.predict(variant.scene).action
+            pred = _avg_predict(model, variant.scene, calibration.n_samples).action
         except Exception as e:
             print(f"      paraphrase {variant.variant_id} failed: {type(e).__name__}: {e}", flush=True)
             continue
@@ -227,9 +282,15 @@ def run_story(args) -> None:
         for i, scene in enumerate(trajectory.frames):
             try:
                 am = model.extract_attention(scene, TokenSelector(relative="before_action"))
-                img_attn = am.image_weights().mean(axis=(0, 1))
-                # Attention is over a single image stream — log under "primary".
-                attention_per_frame[trajectory.frame_indices[i]] = {"primary": img_attn}
+                # Use the CLEAN (mid-layer-filtered + sink-masked) heatmap
+                # so the Rerun overlay shows real visual grounding, not
+                # softmax routing artifacts. Power users who want raw
+                # attention can use am.image_weights() directly.
+                per_cam: dict[str, np.ndarray] = {}
+                for cam in am.cameras:
+                    clean, _ = am.image_weights_clean(cam)
+                    per_cam[cam] = clean
+                attention_per_frame[trajectory.frame_indices[i]] = per_cam
             except Exception as e:
                 print(f"      attn frame {i} failed: {type(e).__name__}: {e}", flush=True)
                 break
@@ -242,22 +303,23 @@ def run_story(args) -> None:
             cam: np.asarray(g, dtype=np.float32) for cam, g in grids.items()
         }
 
-    for i, r in enumerate(per_axis["vision.memorization"].per_frame):
-        raw = r.raw or {}
-        detected = raw.get("detected_cameras") or []
-        if not detected:
-            continue
-        scene = trajectory.frames[i]
-        cam_masks = {}
-        for cam in detected:
-            probe = scene.with_image(scene.observations.images[cam].data, camera="primary") \
-                    if cam != "primary" and "primary" in scene.observations.images \
-                    else scene.with_image(scene.observations.images[cam].data, camera=cam)
-            det = gd_sam(probe)
-            if det is not None and det.mask is not None:
-                cam_masks[cam] = det.mask
-        if cam_masks:
-            target_mask_per_frame[trajectory.frame_indices[i]] = cam_masks
+    if gd_sam is not None and "vision.memorization" in per_axis:
+        for i, r in enumerate(per_axis["vision.memorization"].per_frame):
+            raw = r.raw or {}
+            detected = raw.get("detected_cameras") or []
+            if not detected:
+                continue
+            scene = trajectory.frames[i]
+            cam_masks = {}
+            for cam in detected:
+                probe = scene.with_image(scene.observations.images[cam].data, camera="primary") \
+                        if cam != "primary" and "primary" in scene.observations.images \
+                        else scene.with_image(scene.observations.images[cam].data, camera=cam)
+                det = gd_sam(probe)
+                if det is not None and det.mask is not None:
+                    cam_masks[cam] = det.mask
+            if cam_masks:
+                target_mask_per_frame[trajectory.frame_indices[i]] = cam_masks
 
     print(f"      attention frames: {len(attention_per_frame)}", flush=True)
     print(f"      sensitivity frames: {len(sensitivity_per_frame)}", flush=True)
@@ -310,9 +372,20 @@ def run_story(args) -> None:
                 # Mixed case: this frame lacks expert; skip cleanly
                 continue
             expert_arr = np.asarray(expert, dtype=np.float32)
-            n = min(len(pred), len(expert_arr))
+            if len(pred) != len(expert_arr):
+                raise ValueError(
+                    f"imitation_accuracy: model produced "
+                    f"{len(pred)}-dim action but dataset's recorded "
+                    f"expert action is {len(expert_arr)}-dim for scene "
+                    f"'{scene.scene_id}'. This is a real shape mismatch "
+                    "between the model's action space and the dataset's "
+                    "action layout — the (model, dataset) pairing is "
+                    "wrong. We never silently truncate; the user needs "
+                    "to know they've paired incompatible action spaces."
+                )
+            n = len(pred)
             n_compared_dims = n
-            per_dim = (pred[:n] - expert_arr[:n]).tolist()
+            per_dim = (pred - expert_arr).tolist()
             expert_delta_per_frame_per_dim.append(per_dim)
             expert_delta_per_frame.append(float(np.linalg.norm(per_dim)))
         if expert_delta_per_frame:
@@ -427,6 +500,32 @@ def main():
     p.add_argument("--n-frames", type=int, default=8)
     p.add_argument("--sensitivity-grid-side", type=int, default=4)
     p.add_argument("--out-dir", required=True)
+    p.add_argument(
+        "--modality-pool-size", type=int, default=20,
+        help=(
+            "Number of OTHER episodes to draw substitution samples from "
+            "for the modality dropout marginal pool. Larger = lower "
+            "variance in verdict but slower (one trajectory load per "
+            "sample). Default 20."
+        ),
+    )
+    p.add_argument(
+        "--modality-k-samples", type=int, default=10,
+        help=(
+            "Number of substitution samples drawn from the pool per "
+            "modality per frame. Default 10 (Monte-Carlo SE ~ 32%%)."
+        ),
+    )
+    p.add_argument(
+        "--target-text", default="",
+        help=(
+            "Override the memorization-diagnostic target phrase passed "
+            "to GroundingDINO. When empty, scene.instruction is used "
+            "directly (works for any task). Use when the instruction "
+            "mentions multiple objects and you want to scope memorization "
+            "to one specific referent (e.g. --target-text \"the mug\")."
+        ),
+    )
     args = p.parse_args()
     try:
         run_story(args)

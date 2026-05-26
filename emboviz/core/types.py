@@ -245,38 +245,223 @@ class AttentionMaps:
 
     All attention is in a single tensor of shape (n_layers, n_heads, n_keys)
     — already projected so the query is fixed. Image-token positions are
-    indicated by `image_token_range` so callers can slice and reshape.
+    indicated per-camera so callers can slice and reshape one camera at a
+    time. Multi-camera adapters (OpenVLA-OFT primary+wrist, GR00T per
+    embodiment cameras, π0 ALOHA's 4-cam stack) populate one entry per
+    camera; single-camera adapters (OpenVLA) populate just ``"primary"``.
+
+    **Multi-tile / temporal cameras.** A single user-facing camera can
+    contribute MULTIPLE contiguous runs of image tokens in the key
+    sequence — e.g. GR00T's Qwen3-VL receives each camera as T temporal
+    tiles when ``video_horizon > 1``. We model this honestly: each
+    camera's ``image_token_ranges`` entry is a *list* of (start, end)
+    runs, one per tile. ``image_weights(camera)`` then sums the per-tile
+    reshapes into the per-camera attention map.
+
+    Strict:
+      • Every camera in ``image_token_ranges`` must also be in
+        ``image_grid_sides`` (and vice versa).
+      • Each tile's slice size must equal ``side * side`` (the side
+        applies *per tile*; total tokens per camera = N_tiles * side²).
+      • No silent padding.
     """
 
-    weights: np.ndarray                          # (n_layers, n_heads, n_keys)
+    weights: np.ndarray                                                # (n_layers, n_heads, n_keys)
     query_position: int
     n_keys: int
-    image_token_range: tuple[int, int]           # (start, end) exclusive
-    image_grid_side: int                         # n_image_tokens = side*side
-    layer_indices: Optional[list[int]] = None    # which layers (None = all)
+    image_token_ranges: dict[str, list[tuple[int, int]]]              # camera_id → list of tile (start, end) pairs (exclusive end)
+    image_grid_sides: dict[str, int]                                  # camera_id → grid side PER TILE (tile tokens = side*side)
+    layer_indices: Optional[list[int]] = None                         # which layers (None = all)
     metadata: dict = field(default_factory=dict)
 
-    def image_weights(self) -> np.ndarray:
-        """Slice and reshape the attention to (n_layers, n_heads, side, side).
-
-        Raises ValueError if the image-token slice does not match the
-        declared ``image_grid_side``. Previously this silently zero-padded
-        or truncated, which produced meaningless heatmaps on fake tokens.
-        Adapters must report an accurate ``image_grid_side``.
-        """
-        s, e = self.image_token_range
-        img = self.weights[..., s:e]
-        side = self.image_grid_side
-        n_image = side * side
-        if img.shape[-1] != n_image:
+    def __post_init__(self):
+        cams_a, cams_b = set(self.image_token_ranges), set(self.image_grid_sides)
+        if cams_a != cams_b:
             raise ValueError(
-                f"AttentionMaps.image_weights: image_token_range {(s, e)} "
-                f"yields {img.shape[-1]} tokens but image_grid_side={side} "
-                f"requires {n_image}. The adapter producing this AttentionMaps "
-                f"has the wrong image_grid_side or image_token_range. Fix the "
-                f"adapter — do not silently pad."
+                "AttentionMaps: image_token_ranges and image_grid_sides "
+                f"must cover the same cameras; got ranges={sorted(cams_a)} "
+                f"vs grids={sorted(cams_b)}."
             )
-        return img.reshape(*img.shape[:-1], side, side)
+        for cam in cams_a:
+            ranges = self.image_token_ranges[cam]
+            side = self.image_grid_sides[cam]
+            if not isinstance(ranges, list) or not ranges:
+                raise ValueError(
+                    f"AttentionMaps camera '{cam}': image_token_ranges["
+                    f"'{cam}'] must be a non-empty list of (start, end) "
+                    f"tile pairs; got {ranges!r}."
+                )
+            for s, e in ranges:
+                if (e - s) != side * side:
+                    raise ValueError(
+                        f"AttentionMaps camera '{cam}': tile range {(s, e)} "
+                        f"yields {e - s} tokens but grid_side={side} requires "
+                        f"{side * side}. Adapter has the wrong range or grid."
+                    )
+
+    @property
+    def cameras(self) -> list[str]:
+        """Sorted list of camera ids with attention available."""
+        return sorted(self.image_token_ranges)
+
+    def image_weights(self, camera: Optional[str] = None) -> np.ndarray:
+        """Raw per-camera attention tensor (n_layers, n_heads, side, side).
+
+        For multi-tile cameras (the same camera duplicated across a
+        temporal stack), per-tile maps are SUMMED.
+
+        This returns the unfiltered model output. For the user-facing
+        "where is the model looking?" question, use
+        :meth:`image_weights_clean` which applies the literature-backed
+        defaults (mid-layer head filter + sink masking) so the heatmap
+        isn't dominated by softmax routing artifacts.
+
+        Raises:
+            KeyError: if the camera was not declared.
+            ValueError: if multiple cameras are declared and camera is None.
+        """
+        if camera is None:
+            if len(self.image_token_ranges) > 1:
+                raise ValueError(
+                    "AttentionMaps.image_weights: this AttentionMaps has "
+                    f"{len(self.image_token_ranges)} cameras "
+                    f"({sorted(self.image_token_ranges)}); pass "
+                    "``camera=<id>`` to pick one. We never silently "
+                    "default to the first."
+                )
+            camera = next(iter(self.image_token_ranges))
+        if camera not in self.image_token_ranges:
+            raise KeyError(
+                f"AttentionMaps has no attention for camera '{camera}'. "
+                f"Available cameras: {sorted(self.image_token_ranges)}."
+            )
+        ranges = self.image_token_ranges[camera]
+        side = self.image_grid_sides[camera]
+        tile_maps = []
+        for s, e in ranges:
+            img = self.weights[..., s:e]
+            tile_maps.append(img.reshape(*img.shape[:-1], side, side))
+        if len(tile_maps) == 1:
+            return tile_maps[0]
+        return np.sum(tile_maps, axis=0)
+
+    def image_weights_clean(
+        self,
+        camera: Optional[str] = None,
+        *,
+        layer_range: Optional[tuple[int, int]] = None,
+        sink_z_threshold: float = 3.0,
+    ) -> tuple[np.ndarray, dict]:
+        """Sink-filtered, mid-layer-restricted per-camera attention heatmap.
+
+        Returns a (side, side) array — the user-facing "where is the model
+        looking?" map after applying the two filters the literature
+        recommends as universal for transformer VLMs:
+
+          1. **Mid-layer filter**: drop the first and last quarter of
+             layers. Early layers do token-grouping (sinks dominate);
+             late layers do prediction summarization (sinks resurge). The
+             middle half holds the visual-grounding heads. See
+             *How Multimodal LLMs Solve Image Tasks*
+             (arXiv:2508.20279) for the LLaVA stage analysis that
+             generalizes across Gemma/LLaMA/Qwen-VL backbones.
+
+          2. **Sink masking** (post-average): per-position attention
+             value > (median + ``sink_z_threshold`` × MAD) gets zeroed.
+             This catches RoPE-induced corner/edge sinks
+             (arXiv:2508.17807 "Attention Debiasing", OpenReview "To
+             Sink or Not to Sink" arXiv:2510.08510) without needing a
+             per-model hardcoded sink position.
+
+        Args:
+            camera: which camera (same semantics as ``image_weights``).
+            layer_range: ``(start, end)`` exclusive layer indices to
+                average over. ``None`` uses the middle half (default,
+                literature-backed).
+            sink_z_threshold: positions with attention above
+                ``median + z × MAD`` are treated as sinks and zeroed.
+                Set ``inf`` to disable sink masking entirely.
+
+        Returns:
+            ``(heatmap, debug)`` where ``heatmap`` is the (side, side)
+            cleaned attention map (suitable for visualization) and
+            ``debug`` is a dict with the layer range used, number of
+            sink positions removed, raw vs clean mass, and the sink
+            position list for transparency.
+        """
+        raw = self.image_weights(camera)   # (L, H, side, side)
+        L = raw.shape[0]
+        if layer_range is None:
+            # Drop first and last quarter; keep the middle half. For
+            # L=32: layers [8, 24). For L=18: layers [4, 14). For L=16:
+            # layers [4, 12).
+            start = L // 4
+            end = L - L // 4
+        else:
+            start, end = layer_range
+            if start < 0 or end > L or start >= end:
+                raise ValueError(
+                    f"image_weights_clean: layer_range {layer_range} "
+                    f"invalid for {L} layers."
+                )
+
+        # Average across selected layers + all heads.
+        mid = raw[start:end].mean(axis=(0, 1))   # (side, side)
+        raw_mass = float(raw.mean(axis=(0, 1)).sum())
+        mid_mass = float(mid.sum())
+
+        # Adaptive sink-position detection.
+        #
+        # Sinks are a model-dependent phenomenon — Qwen3-VL / Gemma have
+        # strong sinks (max-cell ≫ median), while LLaMA-based models
+        # (OpenVLA, OFT) have near-uniform image attention with no
+        # disproportionate "dump" position. A fixed threshold either:
+        #   (a) misses sinks on Qwen/Gemma if too loose, or
+        #   (b) destroys real near-uniform signal on LLaMA if too strict.
+        #
+        # We use the literature's definition: a sink is a position whose
+        # attention is *disproportionately* high vs the rest. Concretely:
+        #   peak_ratio = max(mid) / median(mid)
+        # If peak_ratio < 8 → attention is roughly balanced; NO sink
+        # masking (raw → clean is identity).
+        # If peak_ratio >= 8 → there ARE outliers; mask the top
+        # ``min(n*0.05, n_above_threshold)`` positions where threshold =
+        # median + ``sink_z_threshold`` × 1.4826 × MAD.
+        med = float(np.median(mid))
+        mad = float(np.median(np.abs(mid - med)) + 1e-12)
+        max_v = float(mid.max())
+        peak_ratio = max_v / max(med, 1e-12)
+        adaptive_threshold = med + sink_z_threshold * 1.4826 * mad
+
+        if peak_ratio < 8.0:
+            sink_mask = np.zeros_like(mid, dtype=bool)
+        else:
+            sink_mask = mid > adaptive_threshold
+
+        clean = mid.copy()
+        clean[sink_mask] = 0.0
+        clean_mass = float(clean.sum())
+
+        # Find sink (row, col) for transparency
+        sink_positions = [tuple(int(x) for x in p) for p in np.argwhere(sink_mask)]
+
+        debug = {
+            "layer_range":       (int(start), int(end)),
+            "n_layers_total":    int(L),
+            "raw_mass":          raw_mass,
+            "mid_mass":          mid_mass,
+            "clean_mass":        clean_mass,
+            "sink_threshold":    float(adaptive_threshold),
+            "median":            med,
+            "mad":               mad,
+            "max_value":         max_v,
+            "peak_ratio":        float(peak_ratio),
+            "sink_masking_applied": bool(peak_ratio >= 8.0),
+            "n_sink_positions":  int(sink_mask.sum()),
+            "sink_positions":    sink_positions,
+            "removed_fraction":  float((mid_mass - clean_mass) / max(mid_mass, 1e-12)),
+        }
+        return clean, debug
 
 
 @dataclass

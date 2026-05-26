@@ -192,19 +192,22 @@ class OpenVLAAdapter(VLAModel):
         n_image = full_seq - text_seq
         grid_side = int(np.sqrt(n_image))
 
-        # Pull attention from the chosen query position to all keys; mean over heads kept separately.
+        # Pull attention from the chosen query position to all keys; mean
+        # over heads kept separately.
         per_layer_per_head = []
         for layer_attn in outputs.attentions:
             # layer_attn: (1, n_heads, seq, seq)
             row = layer_attn[0, :, query_pos, :].float().cpu().numpy()
             per_layer_per_head.append(row)
         weights = np.stack(per_layer_per_head, axis=0)  # (L, H, n_keys)
+        # OpenVLA is single-camera (the "primary" alias), single-tile. The
+        # image-token slice is one contiguous run starting at position 1.
         return AttentionMaps(
             weights=weights,
             query_position=int(query_pos),
             n_keys=full_seq,
-            image_token_range=(1, 1 + n_image),
-            image_grid_side=grid_side,
+            image_token_ranges={"primary": [(1, 1 + n_image)]},
+            image_grid_sides={"primary": grid_side},
         )
 
     # ---- hidden states + FFN activations -------------------------------
@@ -518,18 +521,38 @@ class OpenVLAAdapter(VLAModel):
             text_positions = self.find_token_positions(
                 self._extract_instruction_from_ids(ids), q.word,
             )
-            if text_positions:
-                return text_to_mm(text_positions[0])
-            return full_seq_len - 1
+            if not text_positions:
+                raise ValueError(
+                    f"_resolve_query_position: word={q.word!r} did not "
+                    "match any token position in the prompt. We refuse to "
+                    "silently fall back to the last position — a "
+                    "word-anchored diagnostic that gets last-position "
+                    "attention silently looks like 'model attended to the "
+                    "word' when actually we never found the word. Caller "
+                    "must verify the word appears in the instruction."
+                )
+            return text_to_mm(text_positions[0])
         return full_seq_len - 1
 
     def _extract_instruction_from_ids(self, ids) -> str:
         """Recover the original instruction by decoding ids and unwrapping the
-        prompt template. If the template structure is missing we return the
-        raw decoded text — the caller is expected to handle both cases.
+        prompt template.
+
+        Strict: the OpenVLA prompt template has two well-known anchors
+        ('take to ' and '?\\nOut'). If either is missing the prompt
+        template has been changed, and silently returning the raw decoded
+        text would give downstream tokenization-based diagnostics a
+        polluted instruction that includes the template wrapping. We
+        raise so the caller knows the adapter is misconfigured.
         """
         decoded = self.processor.tokenizer.decode(ids[0], skip_special_tokens=True)
         if "take to " in decoded and "?\nOut" in decoded:
-            # Both anchors present — the split below is guaranteed to work.
             return decoded.split("take to ")[1].split("?\nOut")[0]
-        return decoded
+        raise ValueError(
+            "OpenVLAAdapter._extract_instruction_from_ids: decoded prompt "
+            "does not contain the expected anchors 'take to ' and "
+            "'?\\nOut'. This means PROMPT_TEMPLATE was changed or the "
+            "tokenizer decoded special tokens differently from what we "
+            "expect. Fix the template anchors before running "
+            "word-anchored diagnostics on this model."
+        )

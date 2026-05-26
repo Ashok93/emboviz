@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, Scene
+from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
 from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
 from emboviz.models.registry import register_model
 
@@ -48,7 +48,7 @@ class Gr00tAdapter(VLAModel):
     into the first declared video key of the selected embodiment.
     """
 
-    _CAPS = Capability.INFERENCE
+    _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
     def __init__(
         self,
@@ -203,6 +203,262 @@ class Gr00tAdapter(VLAModel):
         # token-position queries fall through (diagnostics that need them
         # will fail their capability check anyway).
         return []
+
+    # ----- attention extraction -----------------------------------------
+
+    def extract_attention(
+        self, scene: Scene, query: TokenSelector,
+    ) -> AttentionMaps:
+        """Extract per-camera attention from GR00T's Qwen3-VL backbone.
+
+        Strategy: monkey-patch the Qwen3-VL ``forward`` to inject
+        ``output_attentions=True`` while running the normal
+        ``policy.get_action`` pipeline (we discard the action output;
+        only attention is wanted). Capture attention + the input_ids +
+        image_grid_thw needed to map image tokens back to per-camera
+        spatial grids.
+
+        Multi-camera handling:
+          • Image tokens are INLINE in input_ids (marked by
+            ``image_token_id``). Multiple cameras appear as multiple
+            contiguous runs of image tokens.
+          • ``image_grid_thw`` is shape ``(N_images, 3)`` with per-image
+            ``(T, H, W)``. After Qwen3-VL's spatial merge of size
+            ``merge_size`` (default 2), each image consumes
+            ``T * (H // merge_size) * (W // merge_size)`` tokens.
+          • The order images are emitted into the prompt is determined
+            by the modality config's ``video.modality_keys`` order. We
+            reverse-map those to user-facing camera names via
+            ``self._camera_mapping`` (which maps Scene-camera → GR00T-key).
+        """
+        import torch
+
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"Gr00tAdapter.extract_attention: {reason}")
+
+        observation = self._build_observation(scene)
+
+        qwen_model = self.policy.model.backbone.model
+        original_forward = qwen_model.forward
+
+        # SDPA / flash-attention attention implementations silently return
+        # ``None`` for ``output_attentions=True`` (they fuse the softmax
+        # into the kernel and never materialize the attention matrix).
+        # We MUST switch to the "eager" implementation while extracting
+        # attention, then restore. Without this our patched_forward would
+        # capture ``None`` and raise the "forward was not invoked" error.
+        original_attn_impl = None
+        if hasattr(qwen_model, "set_attn_implementation"):
+            try:
+                # Best-effort read of current impl (varies by version).
+                original_attn_impl = getattr(qwen_model.config, "_attn_implementation", None)
+                qwen_model.set_attn_implementation("eager")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Gr00tAdapter.extract_attention: could not switch Qwen3-VL "
+                    f"to 'eager' attention via set_attn_implementation: {e}. "
+                    "Required for attention capture — SDPA / flash-attention "
+                    "kernels never materialize the attention matrix."
+                ) from e
+        else:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: Qwen3-VL model does not "
+                "expose set_attn_implementation(). transformers version too "
+                "old (need >=4.43 or so). Pin a newer transformers in the "
+                "gr00t venv."
+            )
+
+        captured: dict = {
+            "attentions":     None,
+            "input_ids":      None,
+            "image_grid_thw": None,
+        }
+
+        def patched_forward(*args, **kwargs):
+            kwargs["output_attentions"] = True
+            result = original_forward(*args, **kwargs)
+            captured["attentions"]     = result.attentions
+            captured["input_ids"]      = kwargs.get("input_ids", args[0] if args else None)
+            captured["image_grid_thw"] = kwargs.get("image_grid_thw")
+            return result
+
+        qwen_model.forward = patched_forward
+        try:
+            with torch.inference_mode():
+                _ = self.policy.get_action(observation)
+        finally:
+            qwen_model.forward = original_forward
+            if original_attn_impl is not None:
+                try:
+                    qwen_model.set_attn_implementation(original_attn_impl)
+                except Exception:
+                    pass  # best-effort restore
+
+        if captured["attentions"] is None:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: Qwen3-VL forward was "
+                "not invoked during policy.get_action — the patched "
+                "forward never ran. This indicates a GR00T-policy code "
+                "path change; review gr00t/model/gr00t_n1d7."
+            )
+
+        # Build (n_layers, n_heads, n_keys) attention tensor at query_pos.
+        attns = captured["attentions"]
+        input_ids = captured["input_ids"]
+        image_grid_thw = captured["image_grid_thw"]
+
+        full_seq = int(attns[0].shape[-1])
+
+        # Resolve query position.
+        if query.position is not None:
+            query_pos = int(query.position)
+        elif query.relative == "last" or query.relative == "before_action":
+            # GR00T predicts actions via a separate diffusion head conditioned
+            # on the LM hidden states; "before_action" is the LAST LM position
+            # whose hidden state feeds the action head.
+            query_pos = full_seq - 1
+        elif query.relative == "first":
+            query_pos = 0
+        else:
+            query_pos = full_seq - 1
+
+        per_layer = [
+            layer_attn[0, :, query_pos, :].float().cpu().numpy() for layer_attn in attns
+        ]
+        weights = np.stack(per_layer, axis=0)   # (L, H, n_keys)
+
+        # ---- Map image tokens to per-camera ranges ----
+        image_token_id = qwen_model.config.image_token_id
+        ids_row = input_ids[0].cpu().numpy()
+        image_positions = np.where(ids_row == image_token_id)[0]
+        if image_positions.size == 0:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: no image tokens found "
+                f"in input_ids (looked for token id {image_token_id}). "
+                "The processor produced a prompt without image placeholders."
+            )
+
+        # spatial_merge_size — default 2 for Qwen3-VL but read from config
+        # rather than hardcoding.
+        try:
+            merge_size = int(qwen_model.config.vision_config.spatial_merge_size)
+        except AttributeError:
+            merge_size = 2
+
+        if image_grid_thw is None:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: processor did not produce "
+                "image_grid_thw, can't split per-camera image tokens."
+            )
+        thw_np = image_grid_thw.cpu().numpy().astype(int)
+
+        # GR00T video keys in declaration order — same order the processor
+        # emits images into the prompt. Each user camera contributes T
+        # temporal-tile entries to image_grid_thw, where T is the video
+        # delta_indices count (we replicate the current frame T times in
+        # ``_build_observation`` when only one Scene is available).
+        video_keys = list(self._modality_configs["video"].modality_keys)
+        video_horizon = len(self._modality_configs["video"].delta_indices)
+        n_images_processed = thw_np.shape[0]
+        expected = len(video_keys) * video_horizon
+        if n_images_processed != expected:
+            raise RuntimeError(
+                f"Gr00tAdapter.extract_attention: image_grid_thw has "
+                f"{n_images_processed} tile entries but expected "
+                f"{expected} (len(video_keys)={len(video_keys)} × "
+                f"temporal_horizon={video_horizon}). Cannot map tiles "
+                "back to cameras unambiguously."
+            )
+
+        # Reverse the camera_mapping: {user_cam → gr00t_key} →
+        # {gr00t_key → user_cam}.
+        gr00t_key_to_user = {v: k for k, v in self._camera_mapping.items()}
+
+        # Walk image_positions tile by tile, grouping tiles by camera.
+        #
+        # Tile ordering per Gr00tN1d7Processor.process_observation
+        # (gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py ~L410):
+        #
+        #     images = torch.stack(
+        #         [images_dict[view] for view in image_keys], dim=2
+        #     )  # shape (B, T, V, H, W, C)
+        #     ...
+        #     images_perm = images.permute(0, 1, 2, 5, 3, 4).reshape(
+        #         B, T * V, C, H, W
+        #     )
+        #
+        # PyTorch reshape is row-major, so the (T, V) flatten places T as
+        # the OUTER index and V as the INNER index:
+        #     tile 0 = (t=0, view=video_keys[0])
+        #     tile 1 = (t=0, view=video_keys[1])
+        #     tile 2 = (t=1, view=video_keys[0])
+        #     tile 3 = (t=1, view=video_keys[1])
+        #
+        # → camera_idx = tile_i % num_cameras   (NOT tile_i // T).
+        #
+        # Within-tile reshape: Qwen2/3-VL's image_processing flattens
+        # patches in (grid_t, grid_h//m, grid_w//m) order after a 9-d
+        # reshape + transpose(0, 3, 6, 4, 7, 2, 1, 5, 8) (see
+        # transformers/models/qwen2_vl/image_processing_qwen2_vl.py
+        # L281-296). The first three transposed dims (t, block_row,
+        # block_col) flatten row-major, so the per-tile tokens come out
+        # in row-major BLOCK order — our (side, side) reshape is correct.
+        cursor = 0
+        image_token_ranges: dict[str, list[tuple[int, int]]] = {}
+        image_grid_sides: dict[str, int] = {}
+        per_tile_side: Optional[int] = None
+        num_cameras = len(video_keys)
+        for tile_i, (t, h, w) in enumerate(thw_np):
+            tokens_per_tile = int(t * (h // merge_size) * (w // merge_size))
+            run_start = int(image_positions[cursor])
+            run_end = int(image_positions[cursor + tokens_per_tile - 1]) + 1
+            cursor += tokens_per_tile
+
+            h_eff = int(h // merge_size)
+            w_eff = int(w // merge_size)
+            if int(t) != 1:
+                raise RuntimeError(
+                    f"Gr00tAdapter.extract_attention: image_grid_thw "
+                    f"entry {tile_i} has T={t} > 1. Per-tile T>1 means "
+                    "a single embedding contains multiple time steps; "
+                    "extraction would need to split further. Not "
+                    "supported for this embodiment yet."
+                )
+            if h_eff != w_eff:
+                raise RuntimeError(
+                    f"Gr00tAdapter tile {tile_i}: non-square grid after "
+                    f"spatial merge ({h_eff}, {w_eff}). AttentionMaps "
+                    "currently assumes square per-tile grids."
+                )
+            if per_tile_side is None:
+                per_tile_side = h_eff
+            elif per_tile_side != h_eff:
+                raise RuntimeError(
+                    f"Gr00tAdapter: per-tile grid_side changed across "
+                    f"tiles ({per_tile_side} → {h_eff}). Mixed grid "
+                    "sides not yet supported."
+                )
+
+            camera_idx = tile_i % num_cameras
+            gr00t_key = video_keys[camera_idx]
+            user_cam = gr00t_key_to_user.get(gr00t_key, gr00t_key)
+            image_token_ranges.setdefault(user_cam, []).append((run_start, run_end))
+            image_grid_sides[user_cam] = h_eff
+
+        return AttentionMaps(
+            weights=weights,
+            query_position=query_pos,
+            n_keys=full_seq,
+            image_token_ranges=image_token_ranges,
+            image_grid_sides=image_grid_sides,
+            metadata={
+                "select_layer": len(attns),
+                "image_grid_thw": thw_np.tolist(),
+                "merge_size": merge_size,
+                "n_image_tokens_total": int(image_positions.size),
+            },
+        )
 
     def _state_key_dim(self, state_key: str) -> int:
         """Inferred dim for a GR00T state key.
@@ -360,12 +616,26 @@ class Gr00tAdapter(VLAModel):
             state[sk] = _to_state_horizon(vec)
 
         # Language: GR00T's language modality declares its own keys. We
-        # populate ALL declared keys with the (validated non-empty) instruction.
+        # populate ONLY the declared keys with the (validated non-empty)
+        # instruction. We do NOT setdefault('task', ...) — silently
+        # injecting a key the embodiment did not declare risks feeding the
+        # model an unexpected shape on future embodiments whose language
+        # modality has different keys.
         language: dict = {}
         lang_cfg = self._modality_configs.get("language")
-        if lang_cfg is not None:
-            for lk in lang_cfg.modality_keys:
-                language[lk] = [[scene.instruction]]
-        language.setdefault("task", [[scene.instruction]])
+        if lang_cfg is None:
+            raise ValueError(
+                f"GR00T embodiment '{self._embodiment_name}' declares no "
+                "language modality config. We never inject a default "
+                "language key — fix the embodiment or subclass the adapter."
+            )
+        if not scene.instruction:
+            raise ValueError(
+                "Gr00tAdapter requires a non-empty instruction but "
+                "scene.instruction is empty / None. The dataset adapter "
+                "must produce a task string for every frame."
+            )
+        for lk in lang_cfg.modality_keys:
+            language[lk] = [[scene.instruction]]
 
         return {"video": video, "state": state, "language": language}

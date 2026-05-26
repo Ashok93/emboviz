@@ -84,9 +84,24 @@ class ModelCalibration:
     single_sample_noise_floor: Optional[float] = None
 
     def normalize(self, raw_delta: float) -> float:
-        """Convert a raw L2 Δaction into an anchored 0-1 score."""
+        """Convert a raw L2 Δaction into an anchored 0-1 score.
+
+        Strict: a calibration with near-zero ``typical_action_magnitude``
+        cannot produce meaningful normalized scores (every intervention
+        would collapse to 0.0 regardless of magnitude). We raise rather
+        than silently return 0 — the caller needs to know calibration is
+        degenerate so they can refuse a verdict.
+        """
         if self.typical_action_magnitude < 1e-9:
-            return 0.0
+            raise ValueError(
+                f"ModelCalibration.normalize: typical_action_magnitude "
+                f"is {self.typical_action_magnitude} (effectively zero). "
+                "The model produced near-zero actions on every baseline "
+                "frame, so there is no scale to normalize against. The "
+                "trajectory probably has no real motion, or the model "
+                "is misconfigured. Diagnostic must refuse to emit a "
+                "verdict — do not silently return 0."
+            )
         return max(0.0, raw_delta - self.noise_floor) / self.typical_action_magnitude
 
     def to_summary(self) -> dict:
@@ -130,13 +145,23 @@ def averaged_predict(
     mean_action = np.mean(np.stack(actions, axis=0), axis=0).astype(np.float32)
     mean_chunk: Optional[np.ndarray] = None
     if chunks:
-        # Align all chunks to the shortest one (defensive — they should
-        # all have the same shape, but flow-matching models occasionally
-        # emit truncated chunks under numerical edge cases).
-        min_t = min(c.shape[0] for c in chunks)
-        mean_chunk = np.mean(
-            np.stack([c[:min_t] for c in chunks], axis=0), axis=0,
-        ).astype(np.float32)
+        # Strict shape check: every sampled chunk must have the same
+        # shape. A model that emits different chunk shapes across
+        # samples for the same scene has a real bug (flow-matching
+        # numerical edge cases, truncated decoding, etc.) and we want
+        # that surfaced loudly rather than papered over with silent
+        # truncation.
+        shapes = {c.shape for c in chunks}
+        if len(shapes) != 1:
+            raise ValueError(
+                f"averaged_predict: model emitted action chunks with "
+                f"inconsistent shapes across {len(chunks)} samples: "
+                f"{sorted(shapes)}. This indicates a model bug — same "
+                "input produces different-shaped chunks. Fix the model "
+                "adapter (likely truncated decoding under noise) before "
+                "trusting any chunk-based diagnostic on this model."
+            )
+        mean_chunk = np.mean(np.stack(chunks, axis=0), axis=0).astype(np.float32)
 
     return ActionResult(
         action=mean_action,
@@ -186,6 +211,14 @@ def calibrate_model(
         raise ValueError("calibrate_model: trajectory has no frames")
 
     # Step 1: characterise the model — single-sample noise + typical magnitude.
+    #
+    # We measure BOTH magnitude probes (single-sample for the n_samples math,
+    # and averaged-equivalent for the final typical scale) on the SAME first
+    # frames, with a frame-count linked to ``n_noise_probes``. That way the
+    # n_samples estimate is computed in the same scale we will later use in
+    # ``normalize()`` — preventing the bias where single-sample magnitude
+    # over-estimates the averaged magnitude (Jensen's inequality:
+    # ``E[||a||] >= ||E[a]||``).
     first = trajectory.frames[0]
     deltas_1 = []
     for _ in range(min(3, n_noise_probes)):
@@ -194,9 +227,25 @@ def calibrate_model(
         deltas_1.append(float(np.linalg.norm(a1 - a2)))
     single_sample_noise = float(np.mean(deltas_1)) if deltas_1 else 0.0
 
+    # ``mag_probe`` is the magnitude of SINGLE-SAMPLE predictions on the
+    # first few frames. This is the right reference for the n_samples
+    # formula derivation: the formula relates SINGLE-sample noise to
+    # SINGLE-sample magnitude. The downstream ``typical`` scale used in
+    # ``normalize()`` is intentionally computed on AVERAGED predictions
+    # (Step 3) — that's the right denominator for averaged-Δaction
+    # comparisons by the diagnostics. The math derivation:
+    #     averaged_noise ≈ single_sample_noise / sqrt(N)
+    # and we want averaged_noise ≤ precision_target * single_mag
+    # ⟹ N >= (single_noise / (precision_target * single_mag))².
+    # The factor ``E[||avg||] / E[||single||]`` (Jensen's inequality) is
+    # absorbed into the precision_target slack: in practice the averaged
+    # magnitude is at most ~1.2× smaller for typical action distributions,
+    # so the achieved precision is at most 1.2× the target. We document
+    # this; we don't try to predict the Jensen factor exactly.
+    n_baseline_probe = min(max(3, n_noise_probes), len(trajectory.frames))
     mag_probe = float(np.mean([
         float(np.linalg.norm(model.predict(s).action))
-        for s in trajectory.frames[:min(3, len(trajectory.frames))]
+        for s in trajectory.frames[:n_baseline_probe]
     ]))
 
     # Step 2: solve for n_samples — exactly enough to bound averaged

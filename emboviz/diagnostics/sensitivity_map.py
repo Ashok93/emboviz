@@ -65,6 +65,24 @@ class SensitivityMapDiagnostic(Diagnostic):
         per_camera_consumed: dict[str, bool] = {}
         per_camera_image_shape: dict[str, tuple[int, int]] = {}
 
+        # Calibration-aware "consumed" threshold. A camera is considered
+        # consumed only when the per-cell Δaction sits ABOVE the model's
+        # measured noise floor — comparing against ``1e-9`` is a bug
+        # because real noise floors are ~1e-4 to 1e-2 in action units, so
+        # noise-only grids always cleared the old threshold. We subtract
+        # the noise floor from each cell (the same "max(0, raw - noise)"
+        # operation ``ModelCalibration.normalize`` performs), and only
+        # mark a camera consumed when the maximum signal-above-noise per
+        # cell exceeds a meaningful fraction of the typical action.
+        if self.calibration is not None:
+            cell_noise_floor = self.calibration.noise_floor
+            cell_signal_threshold = (
+                self.calibration.typical_action_magnitude * 0.05
+            )
+        else:
+            cell_noise_floor = 0.0
+            cell_signal_threshold = 1e-6
+
         for cam in cameras:
             arr = to_array(scene.observations.images[cam].data)
             H, W = arr.shape[:2]
@@ -80,19 +98,24 @@ class SensitivityMapDiagnostic(Diagnostic):
                     pert_scene = scene.with_image(to_pil(masked), camera=cam)
                     pert = averaged_predict(model, pert_scene, n_samples)
                     drops[gi, gj] = metric.compute(baseline, pert)
-            per_camera_grid[cam] = drops
+            # Subtract noise floor — what's left is real signal above noise.
+            signal = np.maximum(drops - cell_noise_floor, 0.0)
+            per_camera_grid[cam] = signal
             per_camera_image_shape[cam] = (H, W)
-            flat = drops.flatten()
+            flat = signal.flatten()
             total = float(flat.sum())
-            # "Consumed" = some intervention on this camera moved the action.
-            # Cameras the model doesn't read produce flat-zero grids — we
-            # mark those explicitly rather than reporting a misleading
-            # concentration of 0/0.
-            if total < 1e-9:
+            max_cell = float(flat.max()) if flat.size else 0.0
+            # A camera is "consumed" iff the strongest single-cell signal
+            # above noise exceeds ``cell_signal_threshold`` (default: 5% of
+            # typical action magnitude). Otherwise the entire grid is at
+            # or below noise — model is not responding to spatial masking.
+            if max_cell < cell_signal_threshold or total < cell_noise_floor:
                 per_camera_top_k[cam] = 0.0
                 per_camera_consumed[cam] = False
             else:
-                per_camera_top_k[cam] = float(np.sort(flat)[-self.grid_side:].sum() / total)
+                per_camera_top_k[cam] = float(
+                    np.sort(flat)[-self.grid_side:].sum() / total
+                )
                 per_camera_consumed[cam] = True
 
         consumed_cams = [c for c in cameras if per_camera_consumed[c]]
@@ -148,7 +171,11 @@ class SensitivityMapDiagnostic(Diagnostic):
             scene_id=scene.scene_id,
             scalar_score=scalar,
             severity=sev,
-            direction="higher_is_worse",   # diffuse sensitivity = worse
+            # scalar = top-K concentration. HIGHER concentration = MORE
+            # focused = BETTER (model uses focused regions). LOWER
+            # concentration = MORE diffuse = WORSE (model relies on
+            # background cues). So lower_is_worse.
+            direction="lower_is_worse",
             explanation=verdict,
             per_variant={
                 **{f"cam:{cam}:concentration": v for cam, v in per_camera_top_k.items()},

@@ -188,10 +188,20 @@ class LeRobotEpisodeSource(EpisodeSource):
             pil = self._tensor_to_pil(sample[key])
             images[cam_name] = RGBImage(data=pil, camera_id=cam_name)
 
+        # Strict: every dataset adapter MUST declare which camera is "primary"
+        # explicitly via image_keys. We do not silently alias the first
+        # declared camera as primary — that pattern routinely puts the wrong
+        # viewpoint into single-cam diagnostics. If you want a camera named
+        # "primary", add it to image_keys: {"primary": "observation.images.X"}.
         if "primary" not in images and images:
-            # Promote the first declared camera to primary by convention.
-            first_cam = next(iter(self.image_keys))
-            images["primary"] = images.get(first_cam, next(iter(images.values())))
+            raise KeyError(
+                f"Dataset adapter for repo_id={self.repo_id!r} loaded "
+                f"cameras {sorted(images)} but none of them are named "
+                "'primary'. Add an explicit \"primary\" entry to "
+                "image_keys so the framework knows which view is the "
+                "main exterior camera. We never auto-alias because the "
+                "first declared key is not always the semantically-primary one."
+            )
 
         proprio: Optional[Proprioception] = None
         gripper: Optional[GripperState] = None
@@ -235,11 +245,31 @@ class LeRobotEpisodeSource(EpisodeSource):
         )
 
     def _tensor_to_pil(self, t) -> Image.Image:
-        a = t.detach().cpu().float().numpy() if hasattr(t, "detach") else np.asarray(t)
-        if a.ndim == 3 and a.shape[0] in (1, 3):
-            a = a.transpose(1, 2, 0)
-        if a.max() <= 1.5:
-            a = a * 255.0
+        """Convert a lerobot image tensor → PIL.Image.
+
+        Strict dtype handling: floating tensors are assumed [0, 1] normalized
+        and rescaled to [0, 255] uint8; integer tensors are assumed already
+        in [0, 255] and only clipped. We never use a "if max ≤ 1.5 multiply"
+        heuristic — a genuinely-dark uint8 frame can have max < 2 and the
+        heuristic would overflow that frame silently.
+        """
+        if hasattr(t, "detach"):
+            raw = t.detach().cpu().numpy()
+        else:
+            raw = np.asarray(t)
+        if raw.ndim == 3 and raw.shape[0] in (1, 3):
+            raw = raw.transpose(1, 2, 0)
+        if np.issubdtype(raw.dtype, np.floating):
+            a = (raw * 255.0).astype(np.float32)
+        elif np.issubdtype(raw.dtype, np.integer):
+            a = raw.astype(np.float32)
+        else:
+            raise TypeError(
+                f"LeRobotEpisodeSource._tensor_to_pil: unsupported dtype "
+                f"{raw.dtype}. Expected floating ([0,1] normalized) or "
+                "integer ([0,255]) image tensor — the dataset adapter must "
+                "produce one of these. No silent conversion."
+            )
         a = np.clip(a, 0, 255).astype(np.uint8)
         return Image.fromarray(a)
 

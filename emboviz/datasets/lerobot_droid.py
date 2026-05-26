@@ -179,7 +179,7 @@ class GR00TDroidSampleSource:
     reads parquet + decodes mp4 frames locally.
     """
 
-    def __init__(self, local_dir: str = "/root/Isaac-GR00T/demo_data/droid_sample"):
+    def __init__(self, local_dir: str = "/root/repos/Isaac-GR00T/demo_data/droid_sample"):
         self.local_dir = local_dir
         self.profile = GR00T_DROID_PROFILE
         self.name = "gr00t_droid_sample"
@@ -293,16 +293,31 @@ class GR00TDroidSampleSource:
                     if act_parts else None
                 )
 
-                # Instruction: "language.<key>" column
+                # Instruction: "language.<key>" column. No fallback — if the
+                # dataset row genuinely lacks a recorded instruction we refuse
+                # to fabricate one. Downstream diagnostics that depend on the
+                # instruction (memorization target, paraphrase, model input)
+                # would otherwise silently evaluate the wrong task.
                 instruction = None
+                lang_cols_tried: list[str] = []
                 for col in row.index:
                     if col.startswith("language."):
+                        lang_cols_tried.append(col)
                         instruction = row[col]
                         if isinstance(instruction, list):
-                            instruction = instruction[0]
-                        break
+                            instruction = instruction[0] if instruction else None
+                        if instruction:
+                            break
                 if not instruction:
-                    instruction = "pick up the object"
+                    raise ValueError(
+                        f"GR00TDroidSampleSource: episode {ep_i} frame "
+                        f"{frame_i} has no recorded instruction. Tried "
+                        f"language columns {lang_cols_tried}; row columns "
+                        f"are {list(row.index)[:20]}. Provide the correct "
+                        "language key in modality.json or extend the loader "
+                        "to read the instruction from the dataset's tasks "
+                        "metadata — we never fabricate an instruction."
+                    )
 
                 scene = Scene(
                     observations=Observations(

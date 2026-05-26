@@ -46,16 +46,20 @@ No prose synthesis, no "we think your model is broken because…" — just evide
 
 ### Model adapters (one file per model)
 
-| Family | Status | Install |
-|---|---|---|
-| OpenVLA-7B | ✅ shipped, verified on Bridge | `uv add emboviz[openvla]` |
-| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ shipped via `LeRobotPolicyAdapter` | base install |
-| Mock (no GPU) | ✅ shipped — for diagnostic-side dev | base install |
-| **GR00T-N1 / N1.7** | 🟡 adapter code shipped; **separate venv** | `uv add emboviz[gr00t]` + `git+https://github.com/NVIDIA/Isaac-GR00T.git` |
-| **π0 / π0.5** | 🟡 adapter code shipped via LeRobot wrapper; **separate venv** | `uv add emboviz[pi0]` |
-| **OpenVLA-OFT** | 🟡 adapter code shipped; **separate venv** (needs the moojink/transformers fork) | see [openvla-oft](https://github.com/moojink/openvla-oft) |
-| RDT-1B | 📅 planned (flash-attn build complexity) | |
-| Octo | 📅 planned (JAX backend) | |
+Each adapter declares which interpretability surfaces it exposes — inference, attention, hidden states, FFN activations, residual patching, neuron ablation. The diagnostic suite checks the capabilities and runs every applicable test.
+
+| Family | Inference | **Attention extraction** | Hidden states / patching | Install |
+|---|---|---|---|---|
+| OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv add emboviz[openvla]` |
+| **OpenVLA-OFT** | ✅ | 🚧 in progress — same LLaMA backbone, copy-paste from OpenVLA | — | needs the moojink/transformers fork; separate venv |
+| **π0 / π0.5** | ✅ | 🚧 in progress — extracting from PaliGemma VLM inside openpi | — | `uv add emboviz[pi0]`; separate venv |
+| **GR00T-N1 / N1.7** | ✅ | 🚧 in progress — extracting from Eagle-2 VLM inside Gr00tPolicy | — | `uv add emboviz[gr00t]` + `git+https://github.com/NVIDIA/Isaac-GR00T.git` |
+| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ via `LeRobotPolicyAdapter` | 🚧 case-by-case (depends on backbone) | — | base install |
+| Mock (no GPU) | ✅ — for diagnostic-side dev | N/A | N/A | base install |
+| RDT-1B | 📅 planned (flash-attn build complexity) | | | |
+| Octo | 📅 planned (JAX backend) | | | |
+
+**Attention is core, not a nice-to-have.** Modern policies are transformers; their visual attention IS the interpretability surface most teams want. We extract it for every VLA we support — even when the upstream inference helper wraps it away. Per-adapter extraction work is non-trivial, but it's the work the product exists to do.
 
 > **Why separate venvs?** Several upstream VLA/robotics packages pin
 > different (and incompatible) versions of `transformers` and `torch`. We
@@ -89,17 +93,60 @@ Custom robots: write a ~30-line `RobotProfile` and drop it in `emboviz/profiles/
 
 ---
 
-## The diagnostic catalog (18 axes)
+## What each metric actually is
 
-| Axis | What it tests |
-|---|---|
-| **Language** | noun swap, preposition swap, color swap, count swap, negation, refusal on absent, empty instruction, OOD task |
-| **Vision** | occlusion sweep, viewpoint jitter, lighting shift, distractor injection, sensor noise, target-removal (memorization probe), per-region sensitivity map, **object recolor via GroundingDINO + SAM** (the color-binding test) |
-| **State / proprio** | gripper flip (the "dropped item" test), state jitter, action-history ablate, action-history scramble |
-| **Mechanism** | cross-modal attention divergence, FFN concept decomposition (Berkeley logit-lens), **activation patching** (causal mediation), neuron ablation |
-| **Probing** | linear probes for "model sees but doesn't act," SAFE-style per-frame P(failure) probe |
-| **Trajectory** | wraps any single-frame diagnostic into per-frame curves + auto-detected failure moments |
-| **Coverage** | text-based dataset gap analysis → concrete data-collection recommendations |
+Plain-English: what each diagnostic answers, what we do, what you get back.
+
+### 1. Memorization — *"Is my policy actually looking at the object, or playing back a memorized motor pattern?"*
+
+You tell us what object to mask (`"the mug"`, `"the lid"`, `"the welding torch"`). For every frame, we find that object in the image with GroundingDINO + SAM, mask it (channel-mean fill **and** Gaussian-blur fill — we require both to agree before calling memorization), and measure how much the predicted action changes.
+
+**Output per frame:** action delta (normalized to % of typical action) under each fill, plus the masked image so you can eyeball that the mask actually covered the right thing.
+**Skips with reason when:** GroundingDINO can't confidently find the object, or the mask is too low-contrast to count as a real intervention. **No fabricated verdicts.**
+
+### 2. Modality dropout — *"Which inputs is my policy actually using?"*
+
+Your model declares it consumes [primary camera, wrist camera, state, gripper, action history, instruction]. For each declared input we swap it with a real value sampled from a *different episode in the same dataset* (a real state from another rollout, an instruction from another task, etc.) and measure how much the predicted action changes. If swapping the instruction barely moves the action → your model isn't using language.
+
+**Output per modality per frame:** intervention magnitude (how different the swapped value was from the original) and response magnitude (how much the action changed). The ratio is the headline.
+**Skips with reason when:** the substitute pool is too uniform to give a meaningfully different sample (e.g. instruction dropout on a 3-task dataset).
+
+### 3. Scene sensitivity — *"Where in the image does my policy look?"*
+
+A sliding occluder sweeps each camera, region by region. We measure how much the action changes per region and aggregate into a per-pixel heatmap. The shape of that heatmap tells you whether the model is focused (good — uses specific regions) or diffuse (bad — relies on background cues).
+
+**Output per camera per frame:** heatmap PNG + Hoyer-sparsity scalar (calibration-aware — z-scored against a null distribution of shuffled cells, so the threshold doesn't lie about pure noise).
+
+### 4. Attention map / attention drift — *"What is the model paying attention to inside its own forward pass?"*
+
+We hook into the model's attention layers, extract the per-frame visual-attention distribution, and report:
+- **Attention heatmap** overlaid on each camera (where the model is looking)
+- **Pointing accuracy** — fraction of attention mass inside your target's bounding box (is it anchored on the right thing?)
+- **Drift** between consecutive frames (Wasserstein-2 + top-K IoU) — does focus stay coherent or wander?
+
+This is the load-bearing interpretability surface for modern transformer-based policies. **We extract this for every model we support** (OpenVLA, OpenVLA-OFT, π0, GR00T) — not a fundamental limitation of the model, just per-adapter extraction work.
+
+### 5. Chunk consistency — *"Can I trust the model's multi-step plan, or do I need to replan every step?"*
+
+For policies that predict an action *chunk* (OpenVLA-OFT, π0, GR00T, ACT, Diffusion Policy): at frame *t* the model predicts `[a_t, a_{t+1}, ...]`. At frame *t+1* it predicts `[a'_{t+1}, ...]`. We compare what it said for *t+1* at time *t* vs what it says for *t+1* at time *t+1*. If they agree, your lookahead is stable and you can commit multiple steps open-loop. If they disagree past step 0, you need to replan every step.
+
+**Output:** "safely-committable horizon" — how many steps from the chunk you can actually trust — plus the per-step delta curve.
+
+---
+
+## Research foundations
+
+Every diagnostic above is derived from published methodology. We do not invent algorithms; we implement the literature standard, faithfully, and refuse verdicts when our setup violates the methodology's assumptions.
+
+| Metric | Direct prior art (2024-2026) | Foundational (theoretical bedrock) |
+|---|---|---|
+| **Memorization** | BYOVLA (Hancock et al. 2024, [arXiv:2410.01971](https://arxiv.org/abs/2410.01971)) — direct precedent. LIBERO-PRO (Geng et al. 2025, [arXiv:2510.03827](https://arxiv.org/abs/2510.03827)) — memorization signature framing. GroundingDINO (Liu et al. ECCV 2024, [arXiv:2303.05499](https://arxiv.org/abs/2303.05499)) — phrase grounding. SAM 2 (Ravi et al. 2024). | Causal mediation (Vig et al. NeurIPS 2020, [arXiv:2004.12265](https://arxiv.org/abs/2004.12265)). Baseline blindness (Sturmfels, Lundberg & Lee, Distill 2020). Sanity checks for saliency (Adebayo et al. NeurIPS 2018, [arXiv:1810.03292](https://arxiv.org/abs/1810.03292)). |
+| **Modality dropout** | "Do You Need Proprioceptive States?" (Lin et al. 2025, [arXiv:2509.18644](https://arxiv.org/abs/2509.18644)) — direct precedent for state ablation in VLAs. CAST counterfactual labels (2025, [arXiv:2508.13446](https://arxiv.org/abs/2508.13446)). "When Vision Overrides Language" ([arXiv:2602.17659](https://arxiv.org/abs/2602.17659)). | SHAP (Lundberg & Lee NeurIPS 2017, [arXiv:1705.07874](https://arxiv.org/abs/1705.07874)) — marginal-distribution attribution. Janzing, Minorics & Blöbaum AISTATS 2020 ([arXiv:1910.13413](https://arxiv.org/abs/1910.13413)) — marginal vs conditional. Hooker & Mentch 2019 ([arXiv:1905.03151](https://arxiv.org/abs/1905.03151)) — permutation pitfalls. Zhou et al. CVPR 2019 ([arXiv:1812.07035](https://arxiv.org/abs/1812.07035)) — why zeros break structured representations. |
+| **Scene sensitivity** | BYOVLA (Hancock et al. 2024). "Shortcut Learning in Generalist Robot Policies" (CoRL 2025, [arXiv:2508.06426](https://arxiv.org/abs/2508.06426)). Policy Contrastive Decoding (2025, [arXiv:2505.13255](https://arxiv.org/abs/2505.13255)). | Occlusion sensitivity (Zeiler & Fergus ECCV 2014, [arXiv:1311.2901](https://arxiv.org/abs/1311.2901)) — still the Captum default. Hoyer sparsity axioms (Hurley & Rickard 2009, IEEE TIT). RISE smooth-mask refinement (Petsiuk et al. BMVC 2018, [arXiv:1806.07421](https://arxiv.org/abs/1806.07421)). Adebayo et al. 2018 sanity-checks methodology. |
+| **Attention** | AVA-VLA (2025, [arXiv:2511.18960](https://arxiv.org/abs/2511.18960)) — visual attention failure modes in VLAs. Head Pursuit (2025, [arXiv:2510.21518](https://arxiv.org/abs/2510.21518)) — head specialization. "Functional Roles of Attention Heads in VLMs" (2025, [arXiv:2512.10300](https://arxiv.org/abs/2512.10300)). "How Multimodal LLMs Solve Image Tasks" (2025, [arXiv:2508.20279](https://arxiv.org/abs/2508.20279)) — layer-wise visual-grounding stages. "Understanding Sink Tokens in MLLMs" (OpenReview 2024). | Attention-is/isn't-Explanation debate (Jain & Wallace NAACL 2019; Wiegreffe & Pinter 2019, [arXiv:1908.04626](https://arxiv.org/abs/1908.04626)). Attention rollout (Abnar & Zuidema ACL 2020, [arXiv:2005.00928](https://arxiv.org/abs/2005.00928)). Wasserstein for saliency (Liu et al. PLOS ONE 2017). |
+| **Chunk consistency** | Bidirectional Decoding (Liu et al. ICLR 2025, [arXiv:2408.17355](https://arxiv.org/abs/2408.17355)) — direct precedent, defines our metric. Mixture of Horizons (2025, [arXiv:2511.19433](https://arxiv.org/abs/2511.19433)) — safely-committable horizon. Adaptive Action Chunking ([arXiv:2604.04161](https://arxiv.org/abs/2604.04161)). | ACT (Zhao et al. RSS 2023, [arXiv:2304.13705](https://arxiv.org/abs/2304.13705)). Diffusion Policy (Chi et al. 2023, [arXiv:2303.04137](https://arxiv.org/abs/2303.04137)). π0 (Black et al. 2024). OpenVLA-OFT (Kim et al. 2025, [arXiv:2502.19645](https://arxiv.org/abs/2502.19645)). GR00T N1 (NVIDIA 2025, [arXiv:2503.14734](https://arxiv.org/abs/2503.14734)). |
+
+**Full literature reference, with citations and per-model methodology notes:** see [`LITERATURE.md`](./LITERATURE.md). Every algorithm in this repo is justified there or it doesn't ship.
 
 Each diagnostic is one file in `emboviz/diagnostics/`. Adding a new technique from next month's paper is a single-file change.
 

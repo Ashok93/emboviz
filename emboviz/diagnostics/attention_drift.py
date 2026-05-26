@@ -87,13 +87,26 @@ class AttentionDriftDiagnostic(Diagnostic):
                 return self._not_applicable(
                     model, scene, f"attention extraction failed: {e}",
                 )
-            # Average across layers + heads → (side, side) heatmap
-            img_attn = attn.image_weights().mean(axis=(0, 1))   # (side, side)
+            # Clean per-camera attention heatmap: mid-layer head filter
+            # + sink masking. The literature is unambiguous that raw
+            # all-layers-all-heads averaging is dominated by softmax
+            # routing artifacts (RoPE sinks, BOS sinks, early-layer
+            # token-grouping). See LITERATURE.md §4. For
+            # power-users wanting raw, call ``attn.image_weights(cam)``
+            # directly. The diagnostic always uses ``_clean``.
+            img_attn, _debug = attn.image_weights_clean(self.camera)   # (side, side)
             side = img_attn.shape[0]
             total = img_attn.sum()
             if total <= 0:
-                centroids.append((0.5, 0.5))
-                continue
+                raise RuntimeError(
+                    f"AttentionDriftDiagnostic: image-attention sums to "
+                    f"{total:.3e} on scene '{scene.scene_id}'. Attention "
+                    "from softmax should be strictly positive; zero / "
+                    "negative attention indicates a model-adapter bug "
+                    "(wrong image_token_range slice, attention extracted "
+                    "from a layer with masked heads, etc.). Refusing to "
+                    "fabricate a (0.5, 0.5) centroid — fix the adapter."
+                )
             img_norm = img_attn / total
             yy, xx = np.meshgrid(np.arange(side), np.arange(side), indexing="ij")
             cy = float((img_norm * yy).sum()) / max(side - 1, 1)
