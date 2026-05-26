@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Emboviz aggregate — {{ model_id }}</title>
+  <style>
+    :root { --bg:#0f1115;--panel:#171a21;--text:#e5e7eb;--muted:#9aa3b2;--border:#262b35;--accent:#4dabf7;--red:#ff6b6b;--orange:#ffb86b;--green:#51cf66;--blue:#74c0fc;--gray:#9aa3b2; }
+    html, body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin: 0; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    h2 { font-size: 16px; margin: 32px 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    h3 { font-size: 17px; margin: 0 0 8px; }
+    .sub { color: var(--muted); margin-bottom: 24px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 8px; }
+    .field { margin: 4px 0 12px; }
+    .badge { display: inline-block; width: 12px; height: 12px; border-radius: 6px; margin-right: 8px; vertical-align: middle; }
+    .b-crit{background:var(--red);} .b-mod{background:var(--orange);} .b-pass{background:var(--green);} .b-info{background:var(--blue);} .b-unk{background:var(--gray);}
+    code { background: #1f242e; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+    .ep-list { list-style: none; padding: 0; columns: 2; }
+    .ep-list li { padding: 4px 0; }
+    a { color: var(--accent); text-decoration: none; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-top: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+    .warning { background: #2a1f1f; border: 1px solid #6e3a3a; color: #ffd8c0; padding: 10px 14px; border-radius: 8px; margin: 12px 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h1>Aggregate report — <code>{{ model_id }}</code></h1>
+<div class="sub">
+  {{ n_episodes }} episode(s) analyzed
+  {% if dataset_sources %}· source: <code>{{ dataset_sources|join(", ") }}</code>{% endif %}
+</div>
+
+{% for msg in messages %}
+<div class="warning">{{ msg }}</div>
+{% endfor %}
+
+<h2>Findings (per axis, across episodes)</h2>
+{% for axis, agg in axes.items() %}
+<div class="card">
+  <h3><code>{{ axis }}</code></h3>
+  <div class="label">Observed</div>
+  <div class="field">{{ agg.observed }}</div>
+  {% if agg.meaning %}
+  <div class="label">Meaning</div>
+  <div class="field">{{ agg.meaning }}</div>
+  {% endif %}
+  {% if agg.next_step %}
+  <div class="label">Next step</div>
+  <div class="field">{{ agg.next_step }}</div>
+  {% endif %}
+  <div class="label">Per-episode dominant severity</div>
+  <div class="field">
+    {% for sev in ["critical","moderate","info","pass","unknown"] %}
+      {% set c = agg.episode_dominant_severity_counts.get(sev, 0) %}
+      {% if c %}
+        <span class="badge b-{{ sev[:4] }}"></span>{{ sev }}: <code>{{ c }}</code> &nbsp;
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% if agg.mean_score_across_episodes is not none %}
+  <div class="label">Mean score across episodes</div>
+  <div class="field"><code>{{ "%.4f" | format(agg.mean_score_across_episodes) }}</code></div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<h2>Per-episode artifacts</h2>
+<div class="card">
+  <ul class="ep-list">
+    {% for ep in episode_links %}
+    <li>
+      <a href="{{ ep.html_rel }}">episode {{ ep.idx }}</a>
+      <span style="color: var(--muted)">·
+        <a href="{{ ep.summary_rel }}">summary.json</a>
+        {% if ep.rrd_rel %}· <a href="{{ ep.rrd_rel }}">rollout.rrd</a>{% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+
+</div>
+</body>
+</html>

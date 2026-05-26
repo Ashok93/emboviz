@@ -274,3 +274,41 @@ def write_aggregate_markdown(aggregate: dict, model_id: str, out_path: Path) -> 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines))
     return out_path
+
+
+def write_aggregate_html(
+    aggregate: dict, model_id: str, episodes: list[EpisodeReport], out_path: Path,
+) -> Optional[Path]:
+    """Render the aggregate as HTML if Jinja2 is installed (viz extra).
+
+    Returns the written path, or None if viz extra isn't available.
+    """
+    from emboviz._internal.report import render_aggregate_html
+
+    out_dir = out_path.parent
+    episode_links: list[dict] = []
+    for ep in episodes:
+        ep_html = ep.out_dir / "report.html"
+        episode_links.append({
+            "idx":         ep.episode_idx,
+            "html_rel":    _relpath_or_str(ep_html, out_dir),
+            "summary_rel": _relpath_or_str(ep.summary_path, out_dir),
+            "rrd_rel":     _relpath_or_str(ep.rollout_rrd_path, out_dir) if ep.rollout_rrd_path else None,
+        })
+    try:
+        html = render_aggregate_html(
+            aggregate, model_id=model_id, episode_links=episode_links,
+        )
+    except ImportError:
+        return None
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html)
+    return out_path
+
+
+def _relpath_or_str(p: Path, base: Path) -> str:
+    """Render p as a path relative to base when possible, else absolute."""
+    try:
+        return str(p.relative_to(base))
+    except ValueError:
+        return str(p)

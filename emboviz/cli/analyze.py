@@ -163,8 +163,10 @@ def analyze_cmd(
         EpisodeReport,
         aggregate_episodes,
         parse_episode_spec,
+        write_aggregate_html,
         write_aggregate_markdown,
     )
+    from emboviz._internal.report import write_episode_reports
 
     model_spec = _resolve_model_spec(model)
     dataset_spec = _resolve_dataset_spec(dataset)
@@ -232,12 +234,27 @@ def analyze_cmd(
         summary_path = ep_dir / "summary.json"
         rrd_path = ep_dir / "rollout.rrd"
         if summary_path.exists():
-            episode_reports.append(EpisodeReport(
+            ep_report = EpisodeReport(
                 episode_idx=ep_idx,
                 out_dir=ep_dir,
                 summary_path=summary_path,
                 rollout_rrd_path=rrd_path if rrd_path.exists() else None,
-            ))
+            )
+            episode_reports.append(ep_report)
+
+            # Per-episode human-readable reports (md + html). HTML only
+            # when the `viz` extra is installed; markdown always.
+            try:
+                summary_dict = json.loads(summary_path.read_text())
+                paths = write_episode_reports(
+                    summary_dict, ep_dir,
+                    rrd_path=str(rrd_path) if rrd_path.exists() else None,
+                )
+                click.echo(f"[analyze] wrote {paths['md']}"
+                           + (f" + {paths['html']}" if paths.get("html") else ""))
+            except Exception as e:
+                click.echo(f"[analyze] episode {ep_idx} report rendering FAILED: "
+                           f"{type(e).__name__}: {e}", err=True)
 
     # Aggregate cross-episode patterns.
     if not episode_reports:
@@ -247,6 +264,14 @@ def analyze_cmd(
     aggregate = aggregate_episodes(episode_reports)
     (out / "aggregate.json").write_text(json.dumps(aggregate, indent=2, default=str))
     md = write_aggregate_markdown(aggregate, model_id=model, out_path=out / "aggregate.md")
+    html = write_aggregate_html(
+        aggregate, model_id=model, episodes=episode_reports,
+        out_path=out / "aggregate.html",
+    )
     click.echo(f"[analyze] wrote {out / 'aggregate.json'}")
     click.echo(f"[analyze] wrote {md}")
+    if html is not None:
+        click.echo(f"[analyze] wrote {html}")
+    else:
+        click.echo("[analyze] (skipped aggregate.html — install 'emboviz[viz]' for HTML reports)")
     click.echo(f"[analyze] per-episode reports in {out}/episode_*/")
