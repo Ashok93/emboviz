@@ -96,31 +96,28 @@ def export_rerun(
         import rerun as rr
     except ImportError as e:
         raise ImportError(
-            "Rerun export requires the `rerun-sdk` package. "
-            "Install with: uv add rerun-sdk"
+            "Rerun export requires the `rerun-sdk` package (>=0.23). "
+            "Install with: uv pip install 'rerun-sdk>=0.23'"
         ) from e
 
-    # rerun-sdk 0.22 calls it Scalar, newer versions call it Scalars.
-    _Scalar = getattr(rr, "Scalars", None) or getattr(rr, "Scalar", None)
-    if _Scalar is None:
-        raise RuntimeError("rerun-sdk has neither Scalar nor Scalars — unsupported version")
+    # ── rerun >= 0.23 API ─────────────────────────────────────────────
+    # 0.23 unified the time-setter functions and renamed Scalar →
+    # Scalars; 0.23 also replaced ``new_recording(...)`` with the
+    # public ``RecordingStream(...)`` constructor. We target 0.23+ only.
+    if not hasattr(rr, "RecordingStream") or not hasattr(rr, "set_time"):
+        raise RuntimeError(
+            "rerun-sdk too old. Install >=0.23: "
+            "uv pip install 'rerun-sdk>=0.23'"
+        )
+    Scalars = rr.Scalars  # archetype rename was 0.23
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     recording_id = trajectory.source or trajectory.episode_id or "rollout"
-    # rerun-sdk 0.22 exposed ``new_recording(application_id, recording_id)``;
-    # 0.32+ removed that constructor in favour of ``RecordingStream(...)``.
-    # Support both — we hand the resulting handle to ``rr.log(...,
-    # recording=rec)`` in either case.
-    if hasattr(rr, "new_recording"):
-        rec = rr.new_recording(
-            application_id=application_id, recording_id=recording_id,
-        )
-    else:
-        rec = rr.RecordingStream(
-            application_id=application_id, recording_id=recording_id,
-        )
+    rec = rr.RecordingStream(
+        application_id=application_id, recording_id=recording_id,
+    )
     fps = trajectory.fps if trajectory.fps > 0 else 5.0
 
     attention_per_frame          = attention_per_frame          or {}
@@ -143,8 +140,8 @@ def export_rerun(
     # 1. Camera streams + visual overlays per frame.
     for i, scene in enumerate(trajectory.frames):
         frame_idx = trajectory.frame_indices[i]
-        rr.set_time_seconds("frame_time", i / fps, recording=rec)
-        rr.set_time_sequence("frame_index", frame_idx, recording=rec)
+        rr.set_time("frame_time", duration=i / fps, recording=rec)
+        rr.set_time("frame_index", sequence=frame_idx, recording=rec)
         scene_cameras = set(scene.observations.images.keys())
         for cam_name, rgb in scene.observations.images.items():
             arr = np.asarray(rgb.data)
@@ -254,7 +251,7 @@ def export_rerun(
             safe = modality.replace(":", "_").replace("/", "_")
             rr.log(
                 f"modality/{safe}/response_normalized",
-                _Scalar(float(value)),
+                Scalars(float(value)),
                 recording=rec,
             )
 
@@ -270,40 +267,40 @@ def export_rerun(
             if prev_baseline is not None and len(prev_baseline) == len(baseline_action):
                 shift = float(np.linalg.norm(baseline_action - prev_baseline))
                 rr.log("predictions/frame_to_frame_shift",
-                       _Scalar(shift), recording=rec)
+                       Scalars(shift), recording=rec)
         expert = scene.metadata.get("expert_action")
         if baseline_action is not None:
             dim_names = _action_dim_names(scene, len(baseline_action))
             for d, name in enumerate(dim_names):
                 rr.log(f"predictions/action/{name}",
-                       _Scalar(float(baseline_action[d])), recording=rec)
+                       Scalars(float(baseline_action[d])), recording=rec)
         if expert is not None:
             expert_arr = np.asarray(expert, dtype=np.float32)
             dim_names = _action_dim_names(scene, len(expert_arr))
             for d, name in enumerate(dim_names):
                 rr.log(f"predictions/expert/{name}",
-                       _Scalar(float(expert_arr[d])), recording=rec)
+                       Scalars(float(expert_arr[d])), recording=rec)
             if baseline_action is not None:
                 n = min(len(baseline_action), len(expert_arr))
                 delta = baseline_action[:n] - expert_arr[:n]
                 rr.log("predictions/delta_to_expert",
-                       _Scalar(float(np.linalg.norm(delta))), recording=rec)
+                       Scalars(float(np.linalg.norm(delta))), recording=rec)
                 per_dim_names = _action_dim_names(scene, n)
                 for d, name in enumerate(per_dim_names):
                     rr.log(f"predictions/delta_per_dim/{name}",
-                           _Scalar(float(delta[d])), recording=rec)
+                           Scalars(float(delta[d])), recording=rec)
 
     # 2. Diagnostic tracks — one set of channels per axis.
     for axis, traj_result in per_axis_results.items():
         for i, r in enumerate(traj_result.per_frame):
-            rr.set_time_seconds("frame_time", i / fps, recording=rec)
-            rr.set_time_sequence(
-                "frame_index", traj_result.frame_indices[i], recording=rec,
+            rr.set_time("frame_time", duration=i / fps, recording=rec)
+            rr.set_time(
+                "frame_index", sequence=traj_result.frame_indices[i], recording=rec,
             )
             score = r.scalar_score
             if score == score:  # not NaN
                 rr.log(f"diagnostics/{axis}/score",
-                       _Scalar(float(score)), recording=rec)
+                       Scalars(float(score)), recording=rec)
             # Severity is conveyed only by colour. We never log the
             # severity word as text — the Finding below carries the
             # plain-English verdict.

@@ -44,10 +44,10 @@ dependencies = [
     # tabular / scientific dataset readers
     "h5py>=3.10",
     # interactive Rerun export (always-on; .rrd is the headline artifact).
-    # Upper-pin <0.30 — rerun 0.30+ renamed several APIs we depend on
-    # (e.g. ``new_recording`` → ``RecordingStream`` + ``set_time_seconds``
-    # → ``set_time(duration=)``). When we upgrade we audit + bump.
-    "rerun-sdk>=0.22,<0.30",
+    # We target the latest stable API (0.23 unified set_time + renamed
+    # Scalar → Scalars; 0.23 also exposed RecordingStream as the public
+    # constructor). emboviz/exporters/rerun.py uses that API.
+    "rerun-sdk>=0.23",
     # video / image media
     "imageio>=2.34",
     "imageio-ffmpeg>=0.4.9",
