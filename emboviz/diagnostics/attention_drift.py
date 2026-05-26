@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Scene, TokenSelector, Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, NotSupported, VLAModel
@@ -126,8 +126,38 @@ class AttentionDriftDiagnostic(Diagnostic):
         mean_drift = float(np.mean(displacements)) if displacements else 0.0
         max_drift = float(np.max(displacements)) if displacements else 0.0
 
+        raw_numbers = {
+            "mean_drift_px":     mean_drift,
+            "max_drift_px":      max_drift,
+            "warn_threshold_px": self.drift_warn_px,
+            "critical_threshold_px": self.drift_critical_px,
+            "image_size_hw":     [h, w],
+            "camera":            self.camera,
+            "n_frame_pairs":     len(displacements),
+        }
         if mean_drift >= self.drift_critical_px:
             sev = Severity.CRITICAL
+            finding = Finding(
+                observed=(
+                    f"On camera '{self.camera}', the model's attention "
+                    f"centroid moves an average of {mean_drift:.1f} "
+                    f"pixels between consecutive frames (image is "
+                    f"{w}×{h} px). Largest jump was {max_drift:.1f} px."
+                ),
+                meaning=(
+                    "Attention is wandering frame-to-frame instead of "
+                    "tracking the manipulated region. In deployment "
+                    "recordings, this often appears in the few frames "
+                    "before a failure — the policy lost its visual anchor."
+                ),
+                next_step=(
+                    "Open the Rerun rollout, scrub to the frames with "
+                    "the largest drifts (raw_numbers['n_frame_pairs']), "
+                    "and check what the attention overlay is pointing "
+                    "at versus what the gripper is doing."
+                ),
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Attention centroid drifts an average of {mean_drift:.1f} px "
                 f"frame-to-frame (≥ critical {self.drift_critical_px} px). "
@@ -135,12 +165,47 @@ class AttentionDriftDiagnostic(Diagnostic):
             )
         elif mean_drift >= self.drift_warn_px:
             sev = Severity.MODERATE
+            finding = Finding(
+                observed=(
+                    f"On camera '{self.camera}', the model's attention "
+                    f"centroid moves {mean_drift:.1f} pixels per frame "
+                    f"(image is {w}×{h} px). Some movement, but not "
+                    f"severe."
+                ),
+                meaning=(
+                    "The policy's visual focus shifts noticeably "
+                    "frame-to-frame. May indicate it's tracking the "
+                    "gripper or following a moving target — normal in "
+                    "active manipulation; concerning in static phases."
+                ),
+                next_step=(
+                    "Use the Rerun overlay to confirm the centroid is "
+                    "following something task-relevant (the target, the "
+                    "gripper). If it's jumping to background regions, "
+                    "the model is losing focus."
+                ),
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Attention centroid drifts {mean_drift:.1f} px frame-to-frame "
                 f"(≥ warning {self.drift_warn_px} px). Some focus instability."
             )
         else:
             sev = Severity.PASS
+            finding = Finding(
+                observed=(
+                    f"On camera '{self.camera}', the model's attention "
+                    f"centroid is stable: only {mean_drift:.1f} px of "
+                    f"drift per frame on a {w}×{h} px image."
+                ),
+                meaning=(
+                    "The model holds a consistent visual focus across "
+                    "the window — healthy for a policy that's actively "
+                    "tracking a task-relevant region."
+                ),
+                next_step="No action needed.",
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Attention centroid is stable (drift {mean_drift:.1f} px < "
                 f"warning {self.drift_warn_px} px). Model is visually anchored."
@@ -155,6 +220,7 @@ class AttentionDriftDiagnostic(Diagnostic):
             severity=sev,
             direction="higher_is_worse",
             explanation=verdict,
+            finding=finding,
             per_variant={f"drift_{i}_to_{i+1}": d for i, d in enumerate(displacements)},
             raw={
                 "centroids_normalized": centroids,

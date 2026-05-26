@@ -197,13 +197,28 @@ def export_rerun(
             if score == score:  # not NaN
                 rr.log(f"diagnostics/{axis}/score",
                        _Scalar(float(score)), recording=rec)
+            # Severity is conveyed only by colour. We never log the
+            # severity word as text — the Finding below carries the
+            # plain-English verdict.
             color = _SEVERITY_RGB.get(r.severity, (128, 128, 128))
-            rr.log(
-                f"diagnostics/{axis}/severity",
-                rr.TextLog(r.severity.value, color=color),
-                recording=rec,
-            )
-            if r.explanation:
+            if r.finding is not None:
+                f = r.finding
+                text = (
+                    f"OBSERVED:\n{f.observed}\n\n"
+                    f"MEANING:\n{f.meaning}\n\n"
+                    f"NEXT STEP:\n{f.next_step}"
+                )
+                rr.log(
+                    f"diagnostics/{axis}/finding",
+                    rr.TextDocument(text),
+                    recording=rec,
+                )
+                rr.log(
+                    f"diagnostics/{axis}/headline",
+                    rr.TextLog(f.observed[:120], color=color),
+                    recording=rec,
+                )
+            elif r.explanation:
                 rr.log(
                     f"diagnostics/{axis}/explanation",
                     rr.TextDocument(r.explanation),

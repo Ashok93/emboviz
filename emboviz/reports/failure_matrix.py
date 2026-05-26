@@ -45,8 +45,11 @@ def render_failure_matrix(suite_result: SuiteResult, out_path: Path,
         ax.barh(y, scores, color=colors)
         ax.set_yticks(y); ax.set_yticklabels(names, fontsize=10)
         ax.set_xlabel("scalar score (interpretation depends on diagnostic)", fontsize=9)
+        # Render the scalar score as a label next to each bar; severity
+        # is conveyed only by colour (see _SEV_COLOR), not by a text label
+        # — we keep severity words out of user-facing rendered output.
         for i, r in enumerate(runnable):
-            ax.text(r.scalar_score, y[i], f" {r.severity.value.upper()}",
+            ax.text(r.scalar_score, y[i], f"  {r.scalar_score:.3f}",
                     va="center", fontsize=9, color=_SEV_COLOR[r.severity], fontweight="bold")
         ax.grid(axis="x", alpha=0.3)
         ax.spines["top"].set_visible(False)

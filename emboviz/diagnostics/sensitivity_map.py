@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.metrics.action_divergence import ActionDivergenceMetric
@@ -129,40 +129,115 @@ class SensitivityMapDiagnostic(Diagnostic):
         else:
             scalar = 0.0
 
+        raw_numbers = {
+            "concentration":           scalar,
+            "consumed_cameras":        consumed_cams,
+            "ignored_cameras":         ignored_cams,
+            "per_camera_concentration": per_camera_top_k,
+            "grid_side":               self.grid_side,
+            "n_grid_cells_per_camera": self.grid_side * self.grid_side,
+        }
+
         if not consumed_cams:
             sev = Severity.UNKNOWN
-            verdict = (
-                f"Model did not respond to per-cell masking on ANY of "
-                f"{cameras}. Either the model genuinely ignores all "
-                "visual input on this scene, or the perturbation magnitudes "
-                "are below the model's noise floor."
+            finding = Finding(
+                observed=(
+                    f"We covered a {self.grid_side}×{self.grid_side} grid "
+                    f"of patches across {cameras} and the model's action "
+                    f"barely changed for any patch — every cell's "
+                    f"response was below the model's per-call sampling "
+                    f"noise floor."
+                ),
+                meaning=(
+                    "We cannot tell on this frame whether the model is "
+                    "ignoring all visual input, or whether the response "
+                    "is just lost in its sampling jitter. This is common "
+                    "on quiescent frames where the action is "
+                    "well-determined regardless of the image."
+                ),
+                next_step=(
+                    "Pick a more dynamic mid-trajectory frame, or "
+                    "increase averaging (model n_samples) to tighten "
+                    "the noise floor."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif scalar > 0.5:
             sev = Severity.PASS
-            verdict = (
-                f"Mean concentration across consumed cameras {consumed_cams} "
-                f"is {scalar:.1%} (top {self.grid_side} cells per cam capture "
-                f">50% of sensitivity). Model uses focused regions."
+            finding = Finding(
+                observed=(
+                    f"Across cameras {consumed_cams}, the top "
+                    f"{self.grid_side} of {self.grid_side*self.grid_side} "
+                    f"image patches capture {scalar:.0%} of the model's "
+                    f"sensitivity. Each camera has a clear handful of "
+                    f"hot regions."
+                ),
+                meaning=(
+                    "Vision is focused on specific regions — the kind "
+                    "of behaviour you want from a grounded policy."
+                ),
+                next_step=(
+                    "Check the Rerun sensitivity heatmap overlay to "
+                    "confirm those hot regions sit on task-relevant "
+                    "objects (target, gripper, distractors)."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif scalar > 0.25:
             sev = Severity.INFO
-            verdict = (
-                f"Mean concentration across consumed cameras {consumed_cams} "
-                f"is {scalar:.1%}. Sensitivity moderately distributed; "
-                f"model uses several regions per camera."
+            finding = Finding(
+                observed=(
+                    f"Across cameras {consumed_cams}, the top "
+                    f"{self.grid_side} patches per camera capture "
+                    f"{scalar:.0%} of sensitivity — visible regions of "
+                    f"focus but with a long tail of weakly-influential "
+                    f"patches."
+                ),
+                meaning=(
+                    "The policy uses several distinct regions per "
+                    "camera. Not a problem by itself, just diffuse."
+                ),
+                next_step=(
+                    "Confirm via Rerun overlay that the top regions are "
+                    "the task-relevant ones."
+                ),
+                raw_numbers=raw_numbers,
             )
         else:
             sev = Severity.MODERATE
-            verdict = (
-                f"Mean concentration across consumed cameras {consumed_cams} "
-                f"is {scalar:.1%}. Sensitivity diffuse — model may be relying "
-                f"on background cues."
+            finding = Finding(
+                observed=(
+                    f"Sensitivity across cameras {consumed_cams} is "
+                    f"diffuse — top {self.grid_side} patches capture "
+                    f"only {scalar:.0%} of the response. Many small "
+                    f"patches contribute roughly equally."
+                ),
+                meaning=(
+                    "The model may be relying on background statistics "
+                    "(global colour, scene gist) rather than on the "
+                    "task-relevant object. This often correlates with "
+                    "out-of-distribution failures."
+                ),
+                next_step=(
+                    "Use the Rerun heatmap overlay to see WHERE the "
+                    "sensitivity is going. If it's spread over irrelevant "
+                    "regions, your policy's vision is not well grounded."
+                ),
+                raw_numbers=raw_numbers,
             )
         if ignored_cams:
-            verdict += (
-                f" Cameras with zero sensitivity (model does not consume): "
-                f"{ignored_cams}."
+            finding = Finding(
+                observed=finding.observed + (
+                    f" Cameras with no measurable response: {ignored_cams}."
+                ),
+                meaning=finding.meaning + (
+                    f" The unresponsive cameras {ignored_cams} are not "
+                    f"being consumed at all on this frame."
+                ),
+                next_step=finding.next_step,
+                raw_numbers=finding.raw_numbers,
             )
+        verdict = f"{finding.observed} {finding.meaning} {finding.next_step}"
 
         return DiagnosticResult(
             diagnostic_name=self.name,
@@ -177,6 +252,7 @@ class SensitivityMapDiagnostic(Diagnostic):
             # background cues). So lower_is_worse.
             direction="lower_is_worse",
             explanation=verdict,
+            finding=finding,
             per_variant={
                 **{f"cam:{cam}:concentration": v for cam, v in per_camera_top_k.items()},
                 **{f"cam:{cam}:consumed": float(per_camera_consumed[cam]) for cam in cameras},

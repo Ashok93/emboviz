@@ -52,7 +52,7 @@ from emboviz.core.observations import (
     Proprioception,
     RGBImage,
 )
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Observations, Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
@@ -227,58 +227,165 @@ class ModalityDropoutDiagnostic(Diagnostic):
         n_below_noise = sum(1 for v in verdicts.values() if v == "BELOW_NOISE")
         n_untestable  = sum(1 for v in verdicts.values() if v == "UNTESTABLE")
 
-        # Severity priority (worst → best):
-        #   IGNORED      → CRITICAL  (model demonstrably ignores a real input)
-        #   PARTIAL      → MODERATE  (real response, but weak)
+        # Severity priority (worst → best). Severity is internal sort
+        # only — the user-facing Finding below explains in plain English.
+        #   IGNORED      → CRITICAL   (demonstrably unused real input)
+        #   PARTIAL      → MODERATE   (real response, but weak)
         #   USED only    → PASS
-        #   BELOW_NOISE  → UNKNOWN   (response is within the model's own
-        #                 sampling noise; we cannot distinguish "ignored"
-        #                 from "noise-floor-bound jitter." A more dynamic
-        #                 frame or larger K should resolve this.)
-        #   UNTESTABLE   → UNKNOWN   (intervention magnitude was below the
-        #                 dataset's intra-pool variance — substitutions
-        #                 too similar to the current value to test)
+        #   BELOW_NOISE  → UNKNOWN    (response within sampling noise —
+        #                 cannot distinguish ignored from jitter; try
+        #                 a more dynamic frame or larger K)
+        #   UNTESTABLE   → UNKNOWN    (intervention too similar to
+        #                 current value — dataset lacks variety)
+
+        def _list(group: str) -> list[str]:
+            return [m for m, v in verdicts.items() if v == group]
+
+        ignored      = _list("IGNORED")
+        partial      = _list("PARTIAL")
+        used         = _list("USED")
+        below_noise  = _list("BELOW_NOISE")
+        untestable   = _list("UNTESTABLE")
+
+        raw_numbers = {
+            "n_used":        n_used,
+            "n_ignored":     n_ignored,
+            "n_partial":     n_partial,
+            "n_below_noise": n_below_noise,
+            "n_untestable":  n_untestable,
+            "k_samples":     self.k_samples,
+            "per_modality_verdict":          verdicts,
+            "per_modality_intervention_mag": {
+                m: r.get("mean_intervention_mag", float("nan"))
+                for m, r in per_modality.items()
+            },
+            "per_modality_response_norm":    {
+                m: r.get("mean_response_normalized", float("nan"))
+                for m, r in per_modality.items()
+            },
+        }
+
         if n_ignored > 0:
             sev = Severity.CRITICAL
-            verdict_str = (
-                f"{n_ignored}/{len(verdicts)} declared modalities are "
-                f"IGNORED by the model (real response below "
-                f"{self.noise_floor_score:.0%} of typical action magnitude, "
-                f"but statistically above its own sampling noise). "
-                f"Specifically: "
-                + ", ".join(m for m, v in verdicts.items() if v == "IGNORED")
+            finding = Finding(
+                observed=(
+                    f"When we replaced {', '.join(ignored)} with samples "
+                    f"drawn from other episodes, the model's predicted "
+                    f"action barely moved — under "
+                    f"{self.noise_floor_score:.0%} of typical action "
+                    f"magnitude (but above the model's per-call sampling "
+                    f"noise, so this is a real signal, just small). "
+                    f"K={self.k_samples} substitutions per modality."
+                ),
+                meaning=(
+                    f"The policy is largely not using "
+                    f"{', '.join(ignored)} to decide what action to take "
+                    f"on this frame. If your task requires that input "
+                    f"(e.g. instruction for a language-conditioned task), "
+                    f"that's a problem."
+                ),
+                next_step=(
+                    "Check the same modality across more frames. If it "
+                    "stays ignored on every frame, your fine-tune may "
+                    "have collapsed that modality. If it varies, the "
+                    "input only matters at certain phases."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif n_partial > 0:
             sev = Severity.MODERATE
-            verdict_str = (
-                f"{n_partial} modality/modalities show only PARTIAL "
-                f"response: {', '.join(m for m, v in verdicts.items() if v == 'PARTIAL')}"
+            finding = Finding(
+                observed=(
+                    f"The model responds to {', '.join(partial)} but "
+                    f"only weakly — between sampling noise and "
+                    f"{self.grounded_threshold:.0%} of typical action "
+                    f"magnitude. "
+                    + (f"{', '.join(used)} produced a strong response. "
+                       if used else "")
+                ),
+                meaning=(
+                    "The policy reads these inputs but they're not the "
+                    "primary driver of its actions on this frame."
+                ),
+                next_step=(
+                    "Compare strong vs weak modalities across the "
+                    "trajectory. If a modality you EXPECT to matter "
+                    "(instruction, target camera) is consistently weak, "
+                    "the model is leaning on other inputs more than "
+                    "intended."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif n_used > 0 and n_below_noise == 0 and n_untestable == 0:
             sev = Severity.PASS
-            verdict_str = f"All {n_used} testable modalities are USED by the model."
+            finding = Finding(
+                observed=(
+                    f"All {n_used} testable modality(ies) "
+                    f"({', '.join(used)}) produced strong responses "
+                    f"when intervened on — the model's action shifted "
+                    f"substantially when each was replaced."
+                ),
+                meaning=(
+                    "The policy is consuming every declared input on "
+                    "this frame. Healthy modality usage."
+                ),
+                next_step="No action needed for this frame.",
+                raw_numbers=raw_numbers,
+            )
         elif n_used > 0:
-            # Some USED, others BELOW_NOISE / UNTESTABLE — partial information.
             sev = Severity.PASS
-            verdict_str = (
-                f"{n_used} modalities USED. "
-                f"{n_below_noise} BELOW_NOISE (response within model's sampling "
-                f"noise — try a more dynamic frame), "
-                f"{n_untestable} UNTESTABLE (intervention too similar to current value)."
+            finding = Finding(
+                observed=(
+                    f"Strong response on {', '.join(used)}. "
+                    + (f"{', '.join(below_noise)} response was within the "
+                       f"model's per-call sampling noise. " if below_noise else "")
+                    + (f"{', '.join(untestable)} substitutions were too "
+                       f"similar to the current frame to test." if untestable else "")
+                ),
+                meaning=(
+                    "The modalities we could test are being used. The "
+                    "others are inconclusive — not necessarily ignored, "
+                    "just not testable on this frame."
+                ),
+                next_step=(
+                    "Re-run on a more dynamic mid-episode frame, or "
+                    "supply a more varied dataset, to test the "
+                    "inconclusive modalities."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif n_below_noise > 0 or n_untestable > 0:
             sev = Severity.UNKNOWN
-            verdict_str = (
-                f"No conclusive verdict on this frame: "
-                f"{n_below_noise} BELOW_NOISE (mean response within "
-                f"model's per-call sampling noise — pick a more dynamic "
-                f"frame or increase K samples), "
-                f"{n_untestable} UNTESTABLE (substitutions too similar to "
-                f"current value — dataset lacks intra-pool variety)."
+            finding = Finding(
+                observed=(
+                    (f"{n_below_noise} modality(ies) ({', '.join(below_noise)}) "
+                     f"produced responses within the model's per-call "
+                     f"sampling noise. " if below_noise else "")
+                    + (f"{n_untestable} ({', '.join(untestable)}) had "
+                       f"substitutions too similar to the current frame "
+                       f"to count as a real intervention." if untestable else "")
+                ),
+                meaning=(
+                    "We cannot tell on this frame whether these inputs "
+                    "are used or ignored — the diagnostic refuses to "
+                    "guess."
+                ),
+                next_step=(
+                    "Use a more dynamic frame (mid-trajectory during "
+                    "active manipulation) or a more varied dataset; "
+                    "increase K samples for tighter statistics."
+                ),
+                raw_numbers=raw_numbers,
             )
         else:
             sev = Severity.UNKNOWN
-            verdict_str = "No modality produced a usable verdict."
+            finding = Finding(
+                observed="No modality produced a usable verdict on this frame.",
+                meaning="The diagnostic could not test any input.",
+                next_step="Check that the model's required_inputs match what the scene actually carries.",
+                raw_numbers=raw_numbers,
+            )
+        verdict_str = f"{finding.observed} {finding.meaning} {finding.next_step}"
 
         scalar = float(n_ignored)   # higher = worse
 
@@ -291,6 +398,7 @@ class ModalityDropoutDiagnostic(Diagnostic):
             severity=sev,
             direction="higher_is_worse",
             explanation=verdict_str,
+            finding=finding,
             per_variant={
                 f"{m}:Δ_in":  r.get("mean_intervention_mag", float("nan"))
                 for m, r in per_modality.items()

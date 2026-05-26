@@ -30,8 +30,11 @@ class Diagnostic(ABC):
     def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult: ...
 
     # Helper for diagnostics to produce a consistent NotApplicable result.
-    def _not_applicable(self, model: VLAModel, scene: Scene, reason: str) -> DiagnosticResult:
-        from emboviz.core.results import Severity
+    def _not_applicable(
+        self, model: VLAModel, scene: Scene, reason: str,
+        next_step: Optional[str] = None,
+    ) -> DiagnosticResult:
+        from emboviz.core.results import Finding, Severity
         return DiagnosticResult(
             diagnostic_name=self.name,
             axis=self.axis,
@@ -41,4 +44,13 @@ class Diagnostic(ABC):
             severity=Severity.UNKNOWN,
             direction="lower_is_worse",
             explanation=f"Diagnostic skipped: {reason}",
+            finding=Finding(
+                observed=f"This diagnostic did not run on this scene: {reason}",
+                meaning="No verdict — the inputs the diagnostic needs were not available.",
+                next_step=next_step or (
+                    "Check the diagnostic's prerequisites and re-run on a scene "
+                    "that supplies them."
+                ),
+                raw_numbers={},
+            ),
         )

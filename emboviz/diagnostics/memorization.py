@@ -49,7 +49,7 @@ from typing import Optional
 import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Scene
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
@@ -326,56 +326,143 @@ class MemorizationDiagnostic(Diagnostic):
             if self.calibration is not None
             else self.noise_floor_score
         )
+        target_label = labels[0] if labels else "the target"
+        cam_phrase = (
+            f"camera '{detected_cams[0]}'" if len(detected_cams) == 1
+            else f"cameras {detected_cams}"
+        )
+        raw_numbers = {
+            "min_delta_normalized":   min_delta,
+            "max_delta_normalized":   max_delta,
+            "mean_delta_normalized":  mean_delta,
+            "max_mask_contrast":      max_contrast,
+            "signal_threshold":       signal_threshold,
+            "ignored_threshold":      self.noise_floor_score,
+            "grounded_threshold":     self.grounded_threshold,
+            "fills":                  list(per_fill_results),
+            "detected_cameras":       detected_cams,
+            "detection_confidences":  confs,
+        }
+
         if max_delta < signal_threshold:
             sev = Severity.UNKNOWN
-            verdict = (
-                f"Max Δ across fills ({max_delta:.4f}) is below the model's "
-                f"signal threshold ({signal_threshold:.4f}, derived from "
-                f"calibrated noise floor / sqrt(K=fills)). We cannot "
-                f"distinguish 'model ignores target' from 'response is "
-                f"within per-call sampling noise.' Try a more dynamic "
-                f"frame (mid-episode), a larger pool/K, or a higher-"
-                f"contrast fill. Cameras tested: {detected_cams}, "
-                f"intervention contrast {max_contrast:.3f}."
+            finding = Finding(
+                observed=(
+                    f"We masked '{target_label}' on {cam_phrase} with two "
+                    f"fills (channel-mean + Gaussian blur). The model's "
+                    f"action moved by at most {max_delta:.4f} of typical "
+                    f"action magnitude — smaller than its own per-call "
+                    f"sampling noise threshold ({signal_threshold:.4f})."
+                ),
+                meaning=(
+                    "We can't tell from this single frame whether the "
+                    "model is ignoring the target or whether the response "
+                    "is just lost in its sampling jitter. This is common "
+                    "on quiescent / low-action frames where the policy "
+                    "would output a similar action no matter what."
+                ),
+                next_step=(
+                    "Pick a more dynamic frame (mid-episode, during "
+                    "active manipulation), increase K samples per "
+                    "intervention, or use a higher-contrast fill mode."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif max_delta < self.noise_floor_score:
             sev = Severity.CRITICAL
-            verdict = (
-                f"All fills ({list(per_fill_results)}) produce normalized "
-                f"Δaction < {self.noise_floor_score} when target masked on "
-                f"{detected_cams} (labels={labels}, confs={confs}). Real "
-                f"signal above sampling noise but below {self.noise_floor_score:.0%} "
-                f"of typical action magnitude — strong memorization signature: "
-                f"model isn't using the target visually. max Δ={max_delta:.4f}, "
-                f"intervention contrast={max_contrast:.3f}."
+            finding = Finding(
+                observed=(
+                    f"We masked '{target_label}' on {cam_phrase} with two "
+                    f"independent fills. The model's action barely moved "
+                    f"(at most {max_delta:.3f} of typical action magnitude; "
+                    f"both fills agree). Mask actually changed the image "
+                    f"(contrast {max_contrast:.2f})."
+                ),
+                meaning=(
+                    "Strong memorized-trajectory signature: the policy "
+                    "is predicting from state + instruction + history "
+                    "without visually consuming the target. Common when "
+                    "running on training-distribution data."
+                ),
+                next_step=(
+                    "Run on an UNSEEN episode (or a held-out task). If "
+                    "Δaction grows substantially, your model IS visually "
+                    "grounded when forced outside its training "
+                    "distribution — this frame just happened to be one "
+                    "the policy had memorized."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif min_delta > self.grounded_threshold:
             sev = Severity.PASS
-            verdict = (
-                f"All fills produce normalized Δaction > "
-                f"{self.grounded_threshold} when target masked. Model is "
-                f"reading visual feedback: min Δ={min_delta:.3f}, "
-                f"max Δ={max_delta:.3f} across fills."
+            finding = Finding(
+                observed=(
+                    f"Masking '{target_label}' shifted the model's action "
+                    f"by at least {min_delta:.2f} of typical magnitude "
+                    f"across both fill modes ({cam_phrase})."
+                ),
+                meaning=(
+                    "The model is actively reading the target from the "
+                    "image — it does not have a memorized backup for "
+                    "this scene."
+                ),
+                next_step=(
+                    "Visually grounded on this frame; no action needed."
+                ),
+                raw_numbers=raw_numbers,
             )
         elif max_delta < self.grounded_threshold:
             sev = Severity.MODERATE
-            verdict = (
-                f"Mixed response: max Δ={max_delta:.3f} sits between "
-                f"noise floor ({self.noise_floor_score}) and grounded "
-                f"threshold ({self.grounded_threshold}). Partial visual "
-                f"grounding — model uses some target cues but not "
-                f"decisively."
+            finding = Finding(
+                observed=(
+                    f"Masking '{target_label}' on {cam_phrase} shifted "
+                    f"the action by {min_delta:.2f}–{max_delta:.2f} of "
+                    f"typical magnitude across fills — between our "
+                    f"'memorized' (<{self.noise_floor_score:.0%}) and "
+                    f"'grounded' (>{self.grounded_threshold:.0%}) bands."
+                ),
+                meaning=(
+                    "The model uses some visual cues from the target "
+                    "but not decisively. Mixed grounding."
+                ),
+                next_step=(
+                    "Check more frames in the same episode. If the "
+                    "verdict stays in this middle band, the policy is "
+                    "partially grounding; if some frames flip to "
+                    "'grounded' and others to 'memorized', the response "
+                    "depends on the phase of the trajectory."
+                ),
+                raw_numbers=raw_numbers,
             )
         else:
-            # Fills disagree (some pass, some critical-ish). Treat as mixed.
             sev = Severity.MODERATE
-            verdict = (
-                f"Fills disagree: min Δ={min_delta:.3f}, max Δ={max_delta:.3f}. "
-                f"At least one fill ({max(per_fill_results, key=lambda k: per_fill_results[k]['normalized_delta'])}) "
-                f"shows real visual sensitivity, another doesn't. Likely "
-                "fill-specific artifacts; recommend manual review of the "
-                "per-fill raw output."
+            strongest = max(
+                per_fill_results,
+                key=lambda k: per_fill_results[k]["normalized_delta"],
             )
+            finding = Finding(
+                observed=(
+                    f"The two fill modes disagree: "
+                    f"Δaction ranges {min_delta:.2f}–{max_delta:.2f} of "
+                    f"typical magnitude. '{strongest}' produced the "
+                    f"larger response."
+                ),
+                meaning=(
+                    "Suggests fill-specific artifacts rather than a "
+                    "clean visual-grounding signal. The model may be "
+                    "responding to colour statistics rather than to "
+                    "object shape."
+                ),
+                next_step=(
+                    "Look at the per-fill masked images in the Rerun "
+                    "export — confirm both fills look like the same "
+                    "intervention (similar contrast, similar coverage)."
+                ),
+                raw_numbers=raw_numbers,
+            )
+        # Legacy single-string explanation for backward compat with code
+        # paths that still read DiagnosticResult.explanation.
+        verdict = f"{finding.observed} {finding.meaning} {finding.next_step}"
 
         return DiagnosticResult(
             diagnostic_name=self.name,
@@ -386,6 +473,7 @@ class MemorizationDiagnostic(Diagnostic):
             severity=sev,
             direction="lower_is_worse",
             explanation=verdict,
+            finding=finding,
             per_variant={
                 "mean_delta_across_fills": mean_delta,
                 "min_delta_across_fills":  min_delta,

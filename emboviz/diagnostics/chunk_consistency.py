@@ -38,7 +38,7 @@ from typing import Optional
 import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Scene, Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
@@ -151,8 +151,38 @@ class ChunkConsistencyDiagnostic(Diagnostic):
         mean_score = float(normalized.mean())
         max_score = float(normalized.max())
 
+        raw_numbers = {
+            "lookahead_k":          k,
+            "mean_disagreement_normalized": mean_score,
+            "max_disagreement_normalized":  max_score,
+            "mean_disagreement_raw":        raw_mean,
+            "max_disagreement_raw":         raw_max,
+            "noise_floor":          self.noise_floor,
+            "grounded_threshold":   self.grounded_threshold,
+            "n_frame_pairs":        len(raw_arr),
+        }
+
         if mean_score < self.noise_floor:
             sev = Severity.PASS
+            finding = Finding(
+                observed=(
+                    f"For each frame t, we compared the action the model "
+                    f"predicted for step {k} of its action chunk (made "
+                    f"at frame t) against the action it actually emitted "
+                    f"at frame t+{k}. The two agree closely — "
+                    f"disagreement {mean_score:.3f} is below noise floor."
+                ),
+                meaning=(
+                    "The model's multi-step planning is internally "
+                    "consistent. You can trust the chunk it emits beyond "
+                    "step 0."
+                ),
+                next_step=(
+                    "No action needed — consistent chunks let you "
+                    "lower the policy re-query rate at deployment time."
+                ),
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Chunk lookahead is consistent: chunk[t][{k}] vs chunk[t+{k}][0] "
                 f"agree within noise floor ({self.noise_floor}). Normalized "
@@ -161,6 +191,27 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             )
         elif mean_score < self.grounded_threshold:
             sev = Severity.MODERATE
+            finding = Finding(
+                observed=(
+                    f"The model's chunk-step-{k} prediction made at "
+                    f"frame t disagrees with its actual action at frame "
+                    f"t+{k} by {mean_score:.3f} of typical action "
+                    f"magnitude on average — above noise but below the "
+                    f"strong-disagreement threshold "
+                    f"({self.grounded_threshold:.3f})."
+                ),
+                meaning=(
+                    "Multi-step rollouts will drift — re-querying every "
+                    "few steps is needed for accuracy. The first chunk "
+                    "step is reliable; the tail isn't."
+                ),
+                next_step=(
+                    "If you're running the model open-loop with long "
+                    "chunks, consider shortening the horizon or "
+                    "re-querying more often."
+                ),
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Chunk lookahead is partially consistent: normalized mean "
                 f"disagreement {mean_score:.3f} between noise floor "
@@ -170,6 +221,29 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             )
         else:
             sev = Severity.CRITICAL
+            finding = Finding(
+                observed=(
+                    f"The model's chunk-step-{k} prediction at frame t "
+                    f"disagrees with its actual emission at frame t+{k} "
+                    f"by {mean_score:.3f} of typical magnitude on average "
+                    f"(max {max_score:.3f}). That's above the "
+                    f"strong-disagreement threshold "
+                    f"({self.grounded_threshold:.3f})."
+                ),
+                meaning=(
+                    "Running this model's action chunks beyond the very "
+                    "first step is unsafe. The downstream steps are "
+                    "best-guess and do not match what the model later "
+                    "decides to do."
+                ),
+                next_step=(
+                    "Re-plan every step at deployment time (don't trust "
+                    "chunk[1:]). If your deployment recording shows "
+                    "failures that started with a chunk-rollout phase, "
+                    "this may be why."
+                ),
+                raw_numbers=raw_numbers,
+            )
             verdict = (
                 f"Chunk lookahead is INCONSISTENT: normalized mean "
                 f"disagreement {mean_score:.3f} ≥ grounded threshold "
@@ -189,6 +263,7 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             severity=sev,
             direction="higher_is_worse",
             explanation=verdict,
+            finding=finding,
             per_variant={
                 f"frame_{t}_to_{t+k}": float(d)
                 for t, d in enumerate(normalized)

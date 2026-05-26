@@ -1,27 +1,36 @@
-"""Per-diagnostic detail pages — Markdown emission, no prose synthesis.
+"""Per-diagnostic detail pages — Markdown emission, no severity-word leak.
 
 Each diagnostic gets its own page with:
   • axis + diagnostic name
-  • severity + scalar score
-  • the diagnostic's own factual explanation (already in DiagnosticResult)
+  • the Finding (observed / meaning / next-step) in plain English
   • per-variant scores in a table
   • compact summary of `raw` payload (depends on diagnostic)
 
-The pages are deliberately *data-dense and prose-light*. No "here's what
-to do about it" — that's a Cloud feature, context-aware and interactive.
+Severity is internal — it never appears as a word in these pages. We use
+a single emoji badge for visual priority and let the Finding text carry
+the actual meaning.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.suites.base import SuiteResult
 
 
+# Badges intentionally do NOT spell out severity words.
+_BADGE = {
+    Severity.CRITICAL: "🔴",
+    Severity.MODERATE: "🟠",
+    Severity.INFO:     "🔵",
+    Severity.PASS:     "🟢",
+    Severity.UNKNOWN:  "⚪",
+}
+
+
 def render_detail_pages(suite_result: SuiteResult, out_dir: Path) -> list[Path]:
-    """Emit one Markdown file per diagnostic into `out_dir`. Returns the paths."""
+    """Emit one Markdown file per diagnostic into ``out_dir``."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -33,28 +42,34 @@ def render_detail_pages(suite_result: SuiteResult, out_dir: Path) -> list[Path]:
 
 
 def _format_markdown(r: DiagnosticResult, diag_name: str) -> str:
-    sev_badge = {
-        Severity.CRITICAL: "🟥 CRITICAL",
-        Severity.MODERATE: "🟧 MODERATE",
-        Severity.INFO:     "🟦 INFO",
-        Severity.PASS:     "🟩 PASS",
-        Severity.UNKNOWN:  "⬜ N/A",
-    }[r.severity]
+    badge = _BADGE[r.severity]
 
     lines: list[str] = [
-        f"# {r.axis}",
+        f"# {badge} {r.axis}",
         "",
-        f"**diagnostic**: `{diag_name}`  ",
-        f"**severity**: {sev_badge}  ",
-        f"**scalar score**: `{r.scalar_score:.4f}` ({r.direction.replace('_', ' ')})  ",
-        f"**model**: `{r.model_id}`  ",
-        f"**scene**: `{r.scene_id}`",
+        f"- **diagnostic**: `{diag_name}`",
+        f"- **scalar score**: `{r.scalar_score:.4f}` ({r.direction.replace('_', ' ')})",
+        f"- **model**: `{r.model_id}`",
+        f"- **scene**: `{r.scene_id}`",
         "",
         "## Finding",
         "",
-        r.explanation,
-        "",
     ]
+    if r.finding is not None:
+        f = r.finding
+        lines += [
+            f"- **Observed**: {f.observed}",
+            f"- **Meaning**: {f.meaning}",
+            f"- **Next step**: {f.next_step}",
+        ]
+        if f.raw_numbers:
+            lines += ["", "**Raw numbers**:", ""]
+            for k, v in f.raw_numbers.items():
+                lines.append(f"- `{k}`: {v}")
+    else:
+        # Legacy: pre-Finding diagnostic. Render explanation as-is.
+        lines.append(r.explanation or "_(no verdict text)_")
+    lines.append("")
 
     if r.per_variant:
         lines += ["## Per-variant scores", "", "| variant | score |", "|---|---|"]

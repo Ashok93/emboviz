@@ -8,7 +8,7 @@ from emboviz.core.types import (
     TokenSelector,
     Trajectory,
 )
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.seeding import deterministic_seed
 
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     "TokenSelector",
     "Trajectory",
     "DiagnosticResult",
+    "Finding",
     "Severity",
     "deterministic_seed",
 ]
