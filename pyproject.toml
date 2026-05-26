@@ -1,84 +1,189 @@
 [project]
 name = "emboviz"
-version = "0.1.0"
-description = "Emboviz — diagnostic and interpretability framework for embodied-AI policies (VLAs, diffusion policies, world models, humanoids). Apache 2.0."
+version = "0.2.0"
+description = "Emboviz — the X-ray for deployed VLA policies. Plain-English diagnostics on failing real-robot episodes."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<3.13"
 
-# Base install is intentionally model-free: torch + viz + general infra only.
-# Every model adapter is an optional group below; users install the one
-# matching their setup (often in its own virtualenv due to upstream pins).
+# ──────────────────────────────────────────────────────────────────────
+# Core install is intentionally ML-free. Users only ever install
+# `emboviz` directly when they need the core types/diagnostic interfaces
+# without any model — e.g. when integrating into a larger pipeline.
+#
+# For actual use you always combine core with at least one model extra
+# (emboviz[openvla], emboviz[gr00t], …) AND at least one data-source
+# extra (emboviz[lerobot], emboviz[mcap], …). The CLI gates on what's
+# installed and errors with a clean "pip install emboviz[<extra>]"
+# message if you ask it to do something the extra didn't ship.
+# ──────────────────────────────────────────────────────────────────────
 dependencies = [
-    # Core ML
-    "torch>=2.2.0",
-    "torchvision>=0.17.0",
     "numpy>=1.26",
-    "scipy>=1.11",
-    "scikit-learn>=1.3",
-    # Visualization + media
-    "matplotlib>=3.8",
-    "imageio>=2.34",
-    "imageio-ffmpeg>=0.4.9",
     "Pillow>=10.0",
-    # Utilities
     "tqdm>=4.66",
-    "huggingface_hub>=0.24",
-    # Playback / export targets — small deps, always useful
-    "rerun-sdk>=0.22.1",
-    "mcap>=1.3.1",
+    "click>=8.1",                  # CLI
+    "pydantic>=2.7",               # typed config + Finding serialization
+    "huggingface_hub>=0.24",       # repo id resolution; very lightweight
 ]
 
 [project.optional-dependencies]
-# Each model adapter has its own group. Most adapters require their own
-# virtualenv because upstream packages pin incompatible transformers/torch.
-# `emboviz init` walks new users through picking + installing one.
-openvla = [
-    "lerobot>=0.3,<0.4",
-    "transformers>=4.40,<4.50",
-    "huggingface_hub>=0.26,<1.0",  # transformers<4.50 requires this
-    "accelerate>=0.30",
-    "timm>=0.9.10,<1.0",          # OpenVLA's modeling code hard-checks this
-    "tokenizers>=0.19",
-    "sentencepiece>=0.2",
-    "captum>=0.7.0",              # for OpenVLA attribution diagnostics
-]
-# smolvla has NO extras here — lerobot>=0.5 pins Python>=3.12 which
-# conflicts with GR00T/OFT's Python 3.10 requirement. Install in its own
-# venv following models/lerobot_policy.py docstring.
-# pi0 has NO extras here — it runs in openpi's own venv (their pyproject
-# pins everything correctly). See models/pi0.py docstring for the
-# `openpi clone + uv sync` flow. Including pi0 in extras would force
-# lerobot>=0.5 (which needs Python>=3.12) into the global resolver and
-# conflict with openvla's lerobot<0.4.
-gr00t = [
-    # NVIDIA Isaac-GR00T needs transformers>=4.57 (incompatible with openvla).
-    # Also install the gr00t package itself:
-    #   uv pip install --no-deps git+https://github.com/NVIDIA/Isaac-GR00T.git
-    "transformers>=4.57",
-    "accelerate>=0.30",
-    "diffusers",
-    "dm-tree",
-    "tyro",
-    "lmdb",
-    "msgpack",
-    "msgpack-numpy",
-    "peft",
-    "termcolor",
-    "omegaconf",
-    "jsonlines",
-    "gymnasium",
-    "einops",
-    "albumentations",
-    "opencv-python-headless",
-    "kornia",
-]
-# openvla-oft requires the moojink/transformers-openvla-oft fork (custom);
-# no PyPI install. See models/openvla_oft.py for instructions.
 
-[project.scripts]
-emboviz-run = "emboviz.cli:main"
-emboviz-init = "emboviz.cli.init:main"
+# ────────── Model adapters ──────────
+# Each model lives in its own virtualenv because upstream packages pin
+# incompatible transformers / lerobot versions. uv's conflict declaration
+# below enforces this at install time. Direct VCS URLs are NOT placed in
+# optional-dependencies (PyPI rejects them); when an adapter requires a
+# fork or git-only package (OFT, openpi, Isaac-GR00T), the adapter
+# docstring + `scripts/setup/<NN>_install_<model>_venv.sh` give the
+# exact `pip install -e git+...` command.
+
+# OpenVLA-7B — fully on HF Hub, loads via transformers AutoModel
+# with trust_remote_code=True. Self-contained.
+openvla = [
+    "torch>=2.2,<2.13",
+    "torchvision>=0.17",
+    "transformers>=4.40,<4.50",   # OpenVLA modeling code targets <4.50
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "timm>=0.9.10,<1.0",          # OpenVLA hard-checks this range
+    "tokenizers>=0.19,<0.22",
+    "sentencepiece>=0.2",
+    "einops>=0.8",
+    "safetensors>=0.4",
+]
+
+# OpenVLA-OFT — needs the moojink fork of openvla-oft repo + its
+# vendored transformers. Install with:
+#   git clone https://github.com/moojink/openvla-oft && cd openvla-oft
+#   uv pip install -e .
+# Then add this extra for our adapter's runtime deps:
+oft = [
+    "torch>=2.2,<2.10",
+    "torchvision>=0.17",
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "timm>=0.9.10,<1.0",
+    "einops>=0.8",
+    "safetensors>=0.4",
+    "diffusers>=0.30,<0.40",
+]
+
+# π0 / pi0_libero — runs inside Physical-Intelligence's openpi repo
+# (their pyproject pins JAX + PyTorch). Install with:
+#   git clone https://github.com/Physical-Intelligence/openpi && cd openpi
+#   uv pip install -e .
+# Then add this extra for the few extras our adapter touches:
+pi0 = [
+    "torch>=2.2,<2.10",
+    "transformers>=4.50,<4.55",   # openpi's gemma wrapper targets 4.53.x
+    "einops>=0.8",
+    "safetensors>=0.5",
+]
+
+# GR00T-N1.7 — NVIDIA's Isaac-GR00T repo, with the Qwen3-VL VLM
+# (transformers 4.57+). Install with:
+#   git clone https://github.com/NVIDIA/Isaac-GR00T && cd Isaac-GR00T
+#   uv pip install -e .
+# Then add this extra:
+gr00t = [
+    "torch>=2.2,<2.13",
+    "transformers>=4.57,<4.60",   # Qwen3-VL needs >=4.57
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "diffusers>=0.30,<0.40",
+    "einops>=0.8",
+    "albumentations>=2.0",
+    "av>=14",
+    "decord>=0.6",
+    "torchcodec>=0.5",
+    "pandas>=2.0",
+]
+
+# ────────── Dataset adapters (training / eval data) ──────────
+
+# LeRobot v2/v3 — the de-facto open-source standard. Bridge, LIBERO,
+# DROID, π0-libero, OFT fine-tunes all live here.
+lerobot = [
+    "lerobot>=0.3,<0.5",
+    "torch>=2.2,<2.13",            # lerobot depends on torch
+    "torchcodec>=0.5",
+    "av>=14",
+    "pandas>=2.0",
+]
+
+# RLDS / TFDS — Open-X-Embodiment, RT-X, Octo, anything Google-style.
+rlds = [
+    "tensorflow-datasets>=4.9",
+    "tensorflow-cpu>=2.15",        # CPU-only; we only read, never train
+    "rlds>=0.1.8",
+]
+
+# HDF5 — Robomimic / ALOHA / NVIDIA Isaac Lab + MimicGen format.
+hdf5 = [
+    "h5py>=3.10",
+]
+
+# ────────── Deployment recording adapters ──────────
+
+# MCAP — default for ROS 2 Iron+ and NVIDIA Isaac SIM. Anything
+# recorded on a real robot in 2026 is almost certainly MCAP.
+mcap = [
+    "mcap>=1.2",
+    "mcap-ros2-support>=0.5",
+    "mcap-protobuf-support>=0.5",
+]
+
+# Rerun .rrd — code-first logging from the user's inference loop.
+rerun = [
+    "rerun-sdk>=0.22",
+]
+
+# ────────── Report generation ──────────
+viz = [
+    "matplotlib>=3.8",
+    "jinja2>=3.1",                 # HTML reports
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4.9",       # for video export when we add it
+]
+
+# ────────── Convenience meta-extras ──────────
+# `all` deliberately picks ONE model adapter (openvla) — installing
+# openvla + gr00t together is impossible due to transformers conflict.
+# Users who want multiple models install one per venv.
+all = [
+    "emboviz[openvla,lerobot,mcap,rerun,viz]",
+]
+
+# ────────── Dev / test ──────────
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# Tell uv that model adapter groups are mutually exclusive — they pin
+# incompatible transformers/lerobot versions and must live in separate
+# virtualenvs. Without this, `uv sync --all-extras` would try to satisfy
+# them all at once and fail to resolve.
+# ──────────────────────────────────────────────────────────────────────
+[tool.uv]
+conflicts = [
+    [
+        { extra = "openvla" },
+        { extra = "oft" },
+        { extra = "pi0" },
+        { extra = "gr00t" },
+    ],
+]
+
+# The `emboviz` console script is wired in Phase 4 (single-CLI consolidation).
+# Until then, drive the framework via the dev scripts in scripts/ or the
+# Python API directly. We intentionally do not ship a half-working entry
+# point — that would teach users a CLI that's about to change.
+# [project.scripts]
+# emboviz = "emboviz.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -87,11 +192,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["emboviz"]
 
-# Tell uv that adapter optional groups are mutually exclusive — they pin
-# incompatible transformers/lerobot versions and must live in separate
-# virtualenvs. Without this, `uv sync` tries to satisfy all extras at once
-# and fails.
-[tool.uv]
-conflicts = [
-    [{ extra = "openvla" }, { extra = "gr00t" }],
-]
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]   # line length is handled by formatter

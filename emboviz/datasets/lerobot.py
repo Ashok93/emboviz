@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
-import torch
 from PIL import Image
 
 from emboviz.core.observations import (
@@ -25,6 +24,14 @@ from emboviz.core.observations import (
 from emboviz.core.profile import RobotProfile
 from emboviz.core.types import Observations, Scene, Trajectory
 from emboviz.datasets.base import EpisodeSource
+
+# ``torch`` and ``lerobot`` are intentionally NOT imported at module level.
+# Both are heavy ML dependencies and live behind the ``lerobot`` extra
+# (``pip install emboviz[lerobot]``). They are imported inside the methods
+# that need them so ``import emboviz.datasets.lerobot`` itself is cheap
+# and works in a core-only install — the import only fails when you
+# actually try to load data, at which point pip's missing-dep error is
+# the right user feedback.
 
 
 # Function that, given a raw state ndarray from the dataset, returns
@@ -112,9 +119,16 @@ class LeRobotEpisodeSource(EpisodeSource):
         """
         import os
         try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError:
-            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+            try:
+                from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            except ImportError:
+                from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as e:
+            raise ImportError(
+                "LeRobotEpisodeSource.load_episodes needs the `lerobot` "
+                "package. Install with: pip install 'emboviz[lerobot]'. "
+                f"Underlying error: {e}"
+            ) from e
 
         indices = sorted(set(episode_indices))
         cache_key = tuple(indices)
@@ -164,9 +178,16 @@ class LeRobotEpisodeSource(EpisodeSource):
 
     def all_instructions(self) -> list[str]:
         try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError:
-            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+            try:
+                from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            except ImportError:
+                from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+        except ImportError as e:
+            raise ImportError(
+                "LeRobotEpisodeSource.all_instructions needs the `lerobot` "
+                "package. Install with: pip install 'emboviz[lerobot]'. "
+                f"Underlying error: {e}"
+            ) from e
         if self._meta_dataset is None:
             self._meta_dataset = LeRobotDataset(self.repo_id, episodes=[0])
         tasks = getattr(self._meta_dataset.meta, "tasks", None)
@@ -213,6 +234,11 @@ class LeRobotEpisodeSource(EpisodeSource):
                 "first declared key is not always the semantically-primary one."
             )
 
+        # torch is needed for tensor → ndarray conversion; imported here
+        # so the module imports without it in a core-only install. The
+        # ``lerobot`` extra brings torch automatically.
+        import torch
+
         proprio: Optional[Proprioception] = None
         gripper: Optional[GripperState] = None
         raw_state = None
@@ -244,7 +270,7 @@ class LeRobotEpisodeSource(EpisodeSource):
         if self.action_key and self.action_key in sample:
             metadata["expert_action"] = (
                 sample[self.action_key].to(torch.float32).reshape(-1).tolist()
-            )
+            )  # ``torch`` is in scope from the import above
 
         return Scene(
             observations=obs,

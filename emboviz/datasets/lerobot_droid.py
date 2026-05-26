@@ -193,8 +193,17 @@ class GR00TDroidSampleSource:
         from pathlib import Path
         import json
 
-        from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
-        from gr00t.data.types import ModalityConfig
+        try:
+            from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
+            from gr00t.data.types import ModalityConfig
+        except ImportError as e:
+            raise ImportError(
+                "GR00TDroidSampleSource needs NVIDIA's Isaac-GR00T installed. "
+                "Install with: pip install 'emboviz[gr00t]' AND clone the repo: "
+                "  git clone https://github.com/NVIDIA/Isaac-GR00T && cd Isaac-GR00T "
+                "&& uv pip install -e .  "
+                f"Underlying error: {e}"
+            ) from e
 
         from emboviz.core.observations import (
             GripperState, Proprioception, RGBImage,
