@@ -51,6 +51,10 @@ __all__ = [
     "GR00TDroidSampleSource",
     "PI_LIBERO_PROFILE",
     "PhysicalIntelligenceLiberoSource",
+    # ── RLDS / TFDS family (extra: rlds) ──────────────────────────────
+    "RLDSEpisodeSource",
+    # ── HDF5 family (extra: hdf5) ─────────────────────────────────────
+    "HDF5EpisodeSource",
     # ── deployment recording adapters (extras: rerun, mcap) ───────────
     "RerunEpisodeSource",
     "FoxgloveEpisodeSource",
@@ -83,6 +87,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str, str]] = {
     "GR00TDroidSampleSource":      ("emboviz.datasets.lerobot_droid",  "GR00TDroidSampleSource",      "lerobot"),
     "PI_LIBERO_PROFILE":           ("emboviz.datasets.lerobot_libero", "PI_LIBERO_PROFILE",           "lerobot"),
     "PhysicalIntelligenceLiberoSource": ("emboviz.datasets.lerobot_libero", "PhysicalIntelligenceLiberoSource", "lerobot"),
+    # RLDS / TFDS adapter (Open-X-Embodiment, RT-X, Octo, ...)
+    "RLDSEpisodeSource":      ("emboviz.datasets.rlds",     "RLDSEpisodeSource",     "rlds"),
+    # HDF5 adapter (Robomimic, ALOHA, Isaac Lab Mimic, ...)
+    "HDF5EpisodeSource":      ("emboviz.datasets.hdf5",     "HDF5EpisodeSource",     "hdf5"),
     # deployment recording adapters
     "RerunEpisodeSource":     ("emboviz.datasets.rerun",    "RerunEpisodeSource",    "rerun"),
     "FoxgloveEpisodeSource":  ("emboviz.datasets.foxglove", "FoxgloveEpisodeSource", "mcap"),
