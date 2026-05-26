@@ -1,20 +1,37 @@
 # Emboviz
 
-**Diagnostic and interpretability framework for embodied-AI policies.**
+**The X-ray for your deployed robot policy.**
 
-> Drop in a rollout. Get back rich per-frame diagnostic data, playable in Rerun or Foxglove, that shows you exactly when and why your policy fails — across language, vision, state, and mechanism axes.
+> Your VLA picks the wrong cup. Freezes mid-grasp. Reaches the wrong side of the table. Validation loss looked great. Why is the real robot doing this?
+>
+> Emboviz takes your trained model and your recorded deployment episodes — especially the failing ones — and tells you, in plain English, what the policy was actually consuming, what it was ignoring, and where in the trajectory things went off the rails. With overlays you scrub frame-by-frame in Rerun.
 
 ![status](https://img.shields.io/badge/status-alpha-orange) ![license](https://img.shields.io/badge/license-Apache%202.0-blue) ![python](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue)
 
-Emboviz turns the black box of your robot policy into a debugger. Whether you're running OpenVLA, π0, GR00T, ACT, Diffusion Policy, or your own fine-tune — on a Franka, UR, ALOHA, or humanoid — Emboviz surfaces the evidence your model leaves behind and lets you see it inside the playback tools you already use.
-
-**Debugger, not oracle.** We surface signals; you form conclusions.
-
 ---
 
-## Why this exists
+## The problem we solve
 
-Robot policies are getting bigger, more capable, and more opaque. Teams ship a VLA, get a 60% success rate, and have no principled way to find out what's wrong. Is the model ignoring language? Memorizing trajectories? Color-blind on the target object? Not using gripper state at all? Today the answer is "run more rollouts and guess." Emboviz answers it in one command.
+You trained a VLA. You deployed it on the real robot. Some episodes work. Many don't. You're staring at footage of the robot doing dumb things and you have **one** artifact to interrogate (a black-box policy) and **one** source of truth (your recorded episodes).
+
+Validation metrics can't help you here — the model already passed them. Sim eval can't help either — the failure is in the real world. The questions you actually need answered are:
+
+- **Is my policy looking at the target object, or has it gone visually blind?**
+- **Is it listening to the instruction, or just replaying memorized motion from training?**
+- **Where in the trajectory did attention drift away from the task?**
+- **Was the model leaning on the wrist camera that just got occluded — and that's why it froze?**
+- **Are the action chunks internally consistent, or did the policy lose coherence at step 87?**
+
+Today the only answer is *"run more rollouts and guess."* Emboviz answers those questions directly, on your own recordings, in one command.
+
+## What Emboviz is NOT
+
+- Not a sim eval framework. Real-world failures don't reproduce in sim.
+- Not a training-loss tool. The model already converged; that's not the question.
+- Not closed-loop evaluation. We analyze what your model DID, not what it might do.
+- Not "imitation accuracy vs expert." VLAs are trained to generalize, not to copy. Pixel-matching the teleop demonstrator on training data tells you nothing about why real deployments fail.
+
+We **surface signals**. You form conclusions. Debugger, not oracle.
 
 ---
 

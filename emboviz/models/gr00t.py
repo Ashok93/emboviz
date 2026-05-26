@@ -50,6 +50,39 @@ class Gr00tAdapter(VLAModel):
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
+    # GR00T-N1.7 uses Qwen3-VL (Cosmos-Reason2-2B) as the System-2 VLM
+    # backbone. Per the documented behavior:
+    #
+    #   - Layer range: Qwen3-VL with select_layer truncation keeps ~16
+    #     LLM layers. Visual-grounding heads cluster in the middle half
+    #     per the same multi-modal stage analysis that covers LLaVA
+    #     ("How Multimodal LLMs Solve Image Tasks", arXiv:2508.20279) —
+    #     the stage structure (early=tokenization, mid=visual-grounding,
+    #     late=prediction) is universal across LLM backbones.
+    #
+    #   - Sink masking: Qwen3-VL has documented strong attention sinks
+    #     on right-edge / corner image tokens. References:
+    #       * QwenLM/Qwen3-VL Issue #2047 — "Qwen3 VL Attention Focus"
+    #         (community-reported top-corner concentration)
+    #       * "To Sink or Not to Sink" (arXiv:2510.08510) — RoPE-induced
+    #         positional sinks in VLMs
+    #       * "Attention Debiasing for Token Pruning in VLMs"
+    #         (arXiv:2508.17807)
+    #     For an 8×8 per-tile grid these account for ~10% of cells
+    #     (the rightmost column + bottom row ≈ 15 of 64; we mask a
+    #     conservative 10% to keep most real signal).
+    ATTENTION_PROFILE = {
+        "recommended_layer_range_fraction": (0.25, 0.75),
+        "sink_top_pct_to_mask": 0.10,
+        "literature_citation":
+            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
+            "(arXiv:2508.20279) — generalises to Qwen3-VL. "
+            "Sink 10%: QwenLM/Qwen3-VL Issue #2047 (right-edge focus), "
+            "'To Sink or Not to Sink' (arXiv:2510.08510), and "
+            "'Attention Debiasing for Token Pruning in VLMs' "
+            "(arXiv:2508.17807).",
+    }
+
     def __init__(
         self,
         model_path: str = DEFAULT_MODEL_PATH,
@@ -453,6 +486,7 @@ class Gr00tAdapter(VLAModel):
             image_token_ranges=image_token_ranges,
             image_grid_sides=image_grid_sides,
             metadata={
+                "attention_profile": self.ATTENTION_PROFILE,
                 "select_layer": len(attns),
                 "image_grid_thw": thw_np.tolist(),
                 "merge_size": merge_size,

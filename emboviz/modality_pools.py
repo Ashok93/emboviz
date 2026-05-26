@@ -33,13 +33,17 @@ cost. We default to 20.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import pickle
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
-from PIL import Image
 
-from emboviz.core.types import Scene
+# Lazy: PIL is only needed by callers passing PIL.Images; tests / pure
+# import shouldn't require it (keeps the local dev env minimal).
 
 
 @dataclass
@@ -167,6 +171,35 @@ def _distance(modality: str, a: Any, b: Any) -> float:
     raise ValueError(f"distance: unknown modality '{modality}'")
 
 
+def _pool_cache_key(
+    dataset, current_episode: int, declared_modalities: dict,
+    n_samples: int, cameras: Optional[list[str]], seed: int,
+    instruction_must_differ_from_task: Optional[str],
+) -> str:
+    """Hash of all inputs that determine the pool's content.
+
+    Anything that changes the sampled episodes or the per-modality content
+    must be part of the key — including the dataset identity (repo_id or
+    local path) and the declared modalities (which control what we
+    extract per episode).
+    """
+    dataset_id = getattr(dataset, "name", None) or getattr(dataset, "repo_id", None) \
+        or getattr(dataset, "local_dir", None) or type(dataset).__name__
+    payload = json.dumps({
+        "dataset_id": str(dataset_id),
+        "current_episode": int(current_episode),
+        "n_samples": int(n_samples),
+        "cameras": sorted(cameras) if cameras else None,
+        "seed": int(seed),
+        "instruction_must_differ_from_task": instruction_must_differ_from_task,
+        "declared_modalities": {
+            k: (sorted(v) if isinstance(v, list) else bool(v))
+            for k, v in declared_modalities.items()
+        },
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def build_modality_pool(
     dataset,
     current_episode: int,
@@ -176,6 +209,7 @@ def build_modality_pool(
     cameras: Optional[list[str]] = None,
     seed: int = 0,
     instruction_must_differ_from_task: Optional[str] = None,
+    cache_dir: Optional[str] = None,
 ) -> ModalityPool:
     """Build a ModalityPool sampled from episodes OTHER than current_episode.
 
@@ -194,6 +228,10 @@ def build_modality_pool(
         instruction_must_differ_from_task: if set, drops sampled
             instructions that match this exact string (used by the
             runner to ensure substitutions differ from the current task).
+        cache_dir: if provided, the built pool is written to
+            ``{cache_dir}/pool_{key}.pkl`` and re-used by subsequent calls
+            with the same inputs (probe → runner, repeat runs). Keyed
+            by a hash of every argument that affects pool content.
 
     Returns:
         Populated :class:`ModalityPool` with ``ref_distance[modality]``
@@ -201,6 +239,29 @@ def build_modality_pool(
         Used by ``ModalityDropoutDiagnostic`` to decide whether a
         candidate substitution constitutes a "real intervention."
     """
+    # ---- pool-to-disk cache (Layer B) --------------------------------
+    cache_path: Optional[Path] = None
+    if cache_dir:
+        key = _pool_cache_key(
+            dataset, current_episode, declared_modalities,
+            n_samples, cameras, seed, instruction_must_differ_from_task,
+        )
+        cache_path = Path(cache_dir) / f"pool_{key}.pkl"
+        if cache_path.exists():
+            try:
+                with cache_path.open("rb") as f:
+                    cached = pickle.load(f)
+                if isinstance(cached, ModalityPool):
+                    cached.metadata["loaded_from_cache"] = str(cache_path)
+                    return cached
+            except Exception as e:
+                # Cache corrupt or pickle-incompatible — log to metadata
+                # and rebuild. We do NOT silently swallow this; the
+                # rebuilt pool will record the cache miss reason.
+                _cache_load_failure = f"{type(e).__name__}: {e}"
+            else:
+                _cache_load_failure = None
+
     rng = np.random.default_rng(seed)
 
     all_episodes = [int(e) for e in dataset.list_episodes()]
@@ -215,11 +276,14 @@ def build_modality_pool(
     # Sample one random frame from each of up to n_samples other episodes.
     pick = min(n_samples, len(other_episodes))
     chosen = rng.choice(other_episodes, size=pick, replace=False).tolist()
+    chosen_ints = [int(e) for e in chosen]
 
     pool = ModalityPool()
-    pool.metadata["sampled_episodes"] = [int(e) for e in chosen]
+    pool.metadata["sampled_episodes"] = chosen_ints
     pool.metadata["n_requested"]      = int(n_samples)
     pool.metadata["n_available"]      = int(len(other_episodes))
+    pool.metadata["skipped_episodes"] = {}     # ep_idx → reason
+    pool.metadata["per_modality_skips"] = {}   # modality → count of skipped frames
 
     want_state    = bool(declared_modalities.get("state"))
     want_gripper  = bool(declared_modalities.get("gripper"))
@@ -229,32 +293,91 @@ def build_modality_pool(
     for cam in want_cams:
         pool.image_samples[cam] = []
 
-    for ep_idx in chosen:
-        traj = dataset.load_trajectory(int(ep_idx))
-        if not traj.frames:
+    # Batched load — one LeRobotDataset construction for all sampled
+    # episodes. Without this we get N constructor calls per pool build,
+    # each triggering ~50 HF tree-listing API calls → 429 rate limit on
+    # any large dataset. The adapter caches by frozen-tuple of indices,
+    # so this also makes repeated rebuilds free.
+    episodes_dict: dict[int, list] = {}
+    try:
+        episodes_dict = dataset.load_episodes(chosen_ints)
+    except AttributeError:
+        # Adapter doesn't implement batched load — fall back to per-ep,
+        # tolerating per-episode failures.
+        for ep_idx in chosen_ints:
+            try:
+                episodes_dict[ep_idx] = dataset.load_trajectory(ep_idx).frames
+            except Exception as e:
+                pool.metadata["skipped_episodes"][str(ep_idx)] = f"{type(e).__name__}: {e}"
+
+    instr_skip = img_skip = state_skip = gripper_skip = history_skip = 0
+
+    for ep_idx in chosen_ints:
+        frames = episodes_dict.get(ep_idx) or []
+        if not frames:
+            pool.metadata["skipped_episodes"].setdefault(
+                str(ep_idx), "episode yielded zero frames")
             continue
-        # Pick a random frame from this episode.
-        fi = int(rng.choice(len(traj.frames)))
-        scene = traj.frames[fi]
+        fi = int(rng.choice(len(frames)))
+        scene = frames[fi]
         obs = scene.observations
 
-        if want_state and obs.state is not None:
-            pool.state_samples.append(
-                np.asarray(obs.state.values, dtype=np.float32).copy()
-            )
-        if want_gripper and obs.gripper is not None:
-            pool.gripper_samples.append(float(obs.gripper.value))
-        if want_history and obs.action_history is not None:
-            pool.action_history_samples.append(
-                np.asarray(obs.action_history.actions, dtype=np.float32).copy()
-            )
-        if want_instr and scene.instruction:
-            if (instruction_must_differ_from_task is None
-                    or scene.instruction != instruction_must_differ_from_task):
-                pool.instruction_samples.append(str(scene.instruction))
+        if want_state:
+            if obs.state is not None:
+                pool.state_samples.append(
+                    np.asarray(obs.state.values, dtype=np.float32).copy()
+                )
+            else:
+                state_skip += 1
+        if want_gripper:
+            if obs.gripper is not None:
+                pool.gripper_samples.append(float(obs.gripper.value))
+            else:
+                gripper_skip += 1
+        if want_history:
+            if obs.action_history is not None:
+                pool.action_history_samples.append(
+                    np.asarray(obs.action_history.actions, dtype=np.float32).copy()
+                )
+            else:
+                history_skip += 1
+        if want_instr:
+            instr = scene.instruction
+            if instr and (instruction_must_differ_from_task is None
+                          or instr != instruction_must_differ_from_task):
+                pool.instruction_samples.append(str(instr))
+            else:
+                instr_skip += 1
         for cam in want_cams:
             if cam in obs.images:
                 pool.image_samples[cam].append(obs.images[cam].data)
+            else:
+                img_skip += 1
+
+    pool.metadata["per_modality_skips"] = {
+        "instruction":    instr_skip,
+        "state":          state_skip,
+        "gripper":        gripper_skip,
+        "action_history": history_skip,
+        "image":          img_skip,
+    }
+
+    # If NO episode produced any samples for any requested modality we
+    # cannot build a meaningful pool — refuse rather than emit an empty
+    # pool that would make every modality report UNTESTABLE.
+    any_samples = (
+        bool(pool.state_samples) or bool(pool.gripper_samples)
+        or bool(pool.action_history_samples) or bool(pool.instruction_samples)
+        or any(bool(v) for v in pool.image_samples.values())
+    )
+    if not any_samples:
+        raise ValueError(
+            f"build_modality_pool: every sampled episode failed to yield "
+            f"any modality value. Skipped: {pool.metadata['skipped_episodes']}. "
+            f"Per-modality skips: {pool.metadata['per_modality_skips']}. "
+            f"This usually means the dataset adapter raised on every load "
+            f"or no episode has the requested modalities."
+        )
 
     # Compute reference distances (25th percentile of intra-pool pairwise
     # distances). The "minimum meaningful intervention" threshold —
@@ -278,5 +401,19 @@ def build_modality_pool(
     pool.ref_distance["instruction"]    = _ref(pool.instruction_samples,    "instruction")
     for cam in want_cams:
         pool.ref_distance[f"image:{cam}"] = _ref(pool.image_samples[cam], f"image:{cam}")
+
+    # Write to disk cache so subsequent calls with the same key skip the
+    # build entirely. Done LAST so a crash during build leaves no half-
+    # written cache file.
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with cache_path.open("wb") as f:
+                pickle.dump(pool, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pool.metadata["wrote_cache"] = str(cache_path)
+        except Exception as e:
+            # Cache write failure is non-fatal — the pool itself is fine,
+            # we just won't reuse it next time. Surface the reason.
+            pool.metadata["cache_write_error"] = f"{type(e).__name__}: {e}"
 
     return pool

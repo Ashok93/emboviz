@@ -349,117 +349,150 @@ class AttentionMaps:
         self,
         camera: Optional[str] = None,
         *,
-        layer_range: Optional[tuple[int, int]] = None,
-        sink_z_threshold: float = 3.0,
+        layer_range_fraction: Optional[tuple[float, float]] = None,
+        sink_top_pct: Optional[float] = None,
     ) -> tuple[np.ndarray, dict]:
         """Sink-filtered, mid-layer-restricted per-camera attention heatmap.
 
-        Returns a (side, side) array — the user-facing "where is the model
-        looking?" map after applying the two filters the literature
-        recommends as universal for transformer VLMs:
+        This is the **user-facing "where is the model looking?" map.** It
+        applies two literature-backed filters whose parameters come from
+        the per-adapter attention_profile (declared in each adapter's
+        source file with a literature citation):
 
-          1. **Mid-layer filter**: drop the first and last quarter of
-             layers. Early layers do token-grouping (sinks dominate);
-             late layers do prediction summarization (sinks resurge). The
-             middle half holds the visual-grounding heads. See
-             *How Multimodal LLMs Solve Image Tasks*
-             (arXiv:2508.20279) for the LLaVA stage analysis that
-             generalizes across Gemma/LLaMA/Qwen-VL backbones.
+          1. **Layer range filter**: average only over a fraction of
+             the model's transformer layers (typically the middle half).
+             Per *How Multimodal LLMs Solve Image Tasks*
+             (arXiv:2508.20279) and the LLaVA stage analysis, early
+             layers do token-grouping (sinks dominate), late layers do
+             prediction summarization, and the middle holds the visual-
+             grounding heads. The exact fraction is per-backbone (LLaMA
+             vs Gemma vs Qwen3-VL each have different stage structure).
 
-          2. **Sink masking** (post-average): per-position attention
-             value > (median + ``sink_z_threshold`` × MAD) gets zeroed.
-             This catches RoPE-induced corner/edge sinks
-             (arXiv:2508.17807 "Attention Debiasing", OpenReview "To
-             Sink or Not to Sink" arXiv:2510.08510) without needing a
-             per-model hardcoded sink position.
+          2. **Sink masking**: zero out the top ``sink_top_pct`` of
+             attention cells AFTER averaging. The percentage is
+             literature-derived per backbone:
+               • LLaMA (OpenVLA, OFT): 0% (no spatial sinks per LLaVA
+                 stage paper).
+               • PaliGemma/Gemma-2B (π0): ~5% (moderate Gemma sinks per
+                 attention-sink literature).
+               • Qwen3-VL/Cosmos-Reason2 (GR00T): ~10% (strong RoPE
+                 right-edge sinks per Qwen3-VL Issue #2047 and
+                 arXiv:2510.08510 "To Sink or Not to Sink").
+
+        Defaults come from ``metadata["attention_profile"]`` populated
+        by the adapter. Callers can override via kwargs but should
+        ONLY do so to test variations — the adapter's declared values
+        ARE the literature-backed recommendation.
 
         Args:
             camera: which camera (same semantics as ``image_weights``).
-            layer_range: ``(start, end)`` exclusive layer indices to
-                average over. ``None`` uses the middle half (default,
-                literature-backed).
-            sink_z_threshold: positions with attention above
-                ``median + z × MAD`` are treated as sinks and zeroed.
-                Set ``inf`` to disable sink masking entirely.
+            layer_range_fraction: ``(frac_start, frac_end)`` in [0, 1]
+                — fraction of total layers to use. ``None`` reads from
+                adapter's attention_profile.
+            sink_top_pct: fraction of top cells to mask as sinks.
+                ``None`` reads from adapter's attention_profile.
 
         Returns:
             ``(heatmap, debug)`` where ``heatmap`` is the (side, side)
-            cleaned attention map (suitable for visualization) and
-            ``debug`` is a dict with the layer range used, number of
-            sink positions removed, raw vs clean mass, and the sink
-            position list for transparency.
+            cleaned attention map and ``debug`` is a dict with the
+            literature citation, layer range used, number of sink
+            positions masked, etc.
+
+        Raises:
+            ValueError: if no attention_profile is in metadata AND no
+                override kwargs are passed — refusing to fabricate
+                defaults that aren't grounded in this model's literature.
         """
         raw = self.image_weights(camera)   # (L, H, side, side)
-        L = raw.shape[0]
-        if layer_range is None:
-            # Drop first and last quarter; keep the middle half. For
-            # L=32: layers [8, 24). For L=18: layers [4, 14). For L=16:
-            # layers [4, 12).
-            start = L // 4
-            end = L - L // 4
-        else:
-            start, end = layer_range
-            if start < 0 or end > L or start >= end:
+        L, H, side, _ = raw.shape
+
+        # Source per-model defaults from adapter's literature.
+        profile = self.metadata.get("attention_profile", {})
+
+        if layer_range_fraction is None:
+            layer_range_fraction = profile.get("recommended_layer_range_fraction")
+            if layer_range_fraction is None:
                 raise ValueError(
-                    f"image_weights_clean: layer_range {layer_range} "
-                    f"invalid for {L} layers."
+                    "AttentionMaps.image_weights_clean: no "
+                    "``recommended_layer_range_fraction`` in metadata's "
+                    "attention_profile, and no override passed. Every "
+                    "adapter must declare its model's recommended layer "
+                    "range based on the model's literature — see "
+                    "emboviz/models/openvla.py's ATTENTION_PROFILE for "
+                    "the template. Refusing to fabricate a default."
+                )
+        if sink_top_pct is None:
+            sink_top_pct = profile.get("sink_top_pct_to_mask")
+            if sink_top_pct is None:
+                raise ValueError(
+                    "AttentionMaps.image_weights_clean: no "
+                    "``sink_top_pct_to_mask`` in metadata's "
+                    "attention_profile, and no override passed. The "
+                    "adapter must declare its model's sink-masking "
+                    "fraction from that model's literature."
                 )
 
-        # Average across selected layers + all heads.
+        frac_start, frac_end = layer_range_fraction
+        if not (0.0 <= frac_start < frac_end <= 1.0):
+            raise ValueError(
+                f"image_weights_clean: layer_range_fraction "
+                f"{layer_range_fraction} invalid; expected "
+                "0.0 <= start < end <= 1.0."
+            )
+        if not (0.0 <= sink_top_pct < 1.0):
+            raise ValueError(
+                f"image_weights_clean: sink_top_pct {sink_top_pct} "
+                "invalid; expected 0.0 <= pct < 1.0."
+            )
+
+        start = int(round(frac_start * L))
+        end = int(round(frac_end * L))
+        if start == end:
+            end = start + 1   # never zero layers
+        end = min(end, L)
+        start = max(0, min(start, L - 1))
+
+        # Average across the model's literature-recommended layer range.
         mid = raw[start:end].mean(axis=(0, 1))   # (side, side)
         raw_mass = float(raw.mean(axis=(0, 1)).sum())
         mid_mass = float(mid.sum())
 
-        # Adaptive sink-position detection.
-        #
-        # Sinks are a model-dependent phenomenon — Qwen3-VL / Gemma have
-        # strong sinks (max-cell ≫ median), while LLaMA-based models
-        # (OpenVLA, OFT) have near-uniform image attention with no
-        # disproportionate "dump" position. A fixed threshold either:
-        #   (a) misses sinks on Qwen/Gemma if too loose, or
-        #   (b) destroys real near-uniform signal on LLaMA if too strict.
-        #
-        # We use the literature's definition: a sink is a position whose
-        # attention is *disproportionately* high vs the rest. Concretely:
-        #   peak_ratio = max(mid) / median(mid)
-        # If peak_ratio < 8 → attention is roughly balanced; NO sink
-        # masking (raw → clean is identity).
-        # If peak_ratio >= 8 → there ARE outliers; mask the top
-        # ``min(n*0.05, n_above_threshold)`` positions where threshold =
-        # median + ``sink_z_threshold`` × 1.4826 × MAD.
-        med = float(np.median(mid))
-        mad = float(np.median(np.abs(mid - med)) + 1e-12)
-        max_v = float(mid.max())
-        peak_ratio = max_v / max(med, 1e-12)
-        adaptive_threshold = med + sink_z_threshold * 1.4826 * mad
-
-        if peak_ratio < 8.0:
-            sink_mask = np.zeros_like(mid, dtype=bool)
+        # Sink masking: top-K cells where K = round(side² × sink_top_pct).
+        # Per literature, sinks are the few positions that disproportionately
+        # absorb softmax mass; "top X% by attention value" catches them
+        # without needing to identify their absolute spatial position
+        # (which varies by model: Qwen3-VL = right edge, PaliGemma = first
+        # token, etc.).
+        n_cells = side * side
+        k_sink = int(round(n_cells * sink_top_pct))
+        if k_sink > 0:
+            flat = mid.flatten()
+            sink_indices = np.argpartition(-flat, k_sink - 1)[:k_sink]
+            sink_mask = np.zeros(n_cells, dtype=bool)
+            sink_mask[sink_indices] = True
+            sink_mask = sink_mask.reshape(side, side)
         else:
-            sink_mask = mid > adaptive_threshold
+            sink_mask = np.zeros_like(mid, dtype=bool)
 
         clean = mid.copy()
         clean[sink_mask] = 0.0
         clean_mass = float(clean.sum())
 
-        # Find sink (row, col) for transparency
         sink_positions = [tuple(int(x) for x in p) for p in np.argwhere(sink_mask)]
 
         debug = {
-            "layer_range":       (int(start), int(end)),
-            "n_layers_total":    int(L),
-            "raw_mass":          raw_mass,
-            "mid_mass":          mid_mass,
-            "clean_mass":        clean_mass,
-            "sink_threshold":    float(adaptive_threshold),
-            "median":            med,
-            "mad":               mad,
-            "max_value":         max_v,
-            "peak_ratio":        float(peak_ratio),
-            "sink_masking_applied": bool(peak_ratio >= 8.0),
-            "n_sink_positions":  int(sink_mask.sum()),
-            "sink_positions":    sink_positions,
-            "removed_fraction":  float((mid_mass - clean_mass) / max(mid_mass, 1e-12)),
+            "layer_range":            (int(start), int(end)),
+            "layer_range_fraction":   (float(frac_start), float(frac_end)),
+            "n_layers_total":         int(L),
+            "n_heads":                int(H),
+            "raw_mass":               raw_mass,
+            "mid_mass":               mid_mass,
+            "clean_mass":             clean_mass,
+            "sink_top_pct":           float(sink_top_pct),
+            "n_sink_cells_masked":    int(k_sink),
+            "sink_positions":         sink_positions,
+            "removed_fraction":       float((mid_mass - clean_mass) / max(mid_mass, 1e-12)),
+            "profile_source":         profile.get("literature_citation", "unspecified — adapter did not cite"),
         }
         return clean, debug
 

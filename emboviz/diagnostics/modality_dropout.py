@@ -221,20 +221,31 @@ class ModalityDropoutDiagnostic(Diagnostic):
 
         # Roll up verdicts
         verdicts = {m: r["verdict"] for m, r in per_modality.items()}
-        n_used      = sum(1 for v in verdicts.values() if v == "USED")
-        n_ignored   = sum(1 for v in verdicts.values() if v == "IGNORED")
-        n_partial   = sum(1 for v in verdicts.values() if v == "PARTIAL")
-        n_untestable = sum(1 for v in verdicts.values() if v == "UNTESTABLE")
+        n_used        = sum(1 for v in verdicts.values() if v == "USED")
+        n_ignored     = sum(1 for v in verdicts.values() if v == "IGNORED")
+        n_partial     = sum(1 for v in verdicts.values() if v == "PARTIAL")
+        n_below_noise = sum(1 for v in verdicts.values() if v == "BELOW_NOISE")
+        n_untestable  = sum(1 for v in verdicts.values() if v == "UNTESTABLE")
 
-        # Headline severity reflects "any declared modality ignored = CRITICAL"
-        # ONLY when we could actually test it. Untestable does not count as
-        # ignored.
+        # Severity priority (worst → best):
+        #   IGNORED      → CRITICAL  (model demonstrably ignores a real input)
+        #   PARTIAL      → MODERATE  (real response, but weak)
+        #   USED only    → PASS
+        #   BELOW_NOISE  → UNKNOWN   (response is within the model's own
+        #                 sampling noise; we cannot distinguish "ignored"
+        #                 from "noise-floor-bound jitter." A more dynamic
+        #                 frame or larger K should resolve this.)
+        #   UNTESTABLE   → UNKNOWN   (intervention magnitude was below the
+        #                 dataset's intra-pool variance — substitutions
+        #                 too similar to the current value to test)
         if n_ignored > 0:
             sev = Severity.CRITICAL
             verdict_str = (
                 f"{n_ignored}/{len(verdicts)} declared modalities are "
-                f"IGNORED by the model (no response to a real-magnitude "
-                f"intervention). Specifically: "
+                f"IGNORED by the model (real response below "
+                f"{self.noise_floor_score:.0%} of typical action magnitude, "
+                f"but statistically above its own sampling noise). "
+                f"Specifically: "
                 + ", ".join(m for m, v in verdicts.items() if v == "IGNORED")
             )
         elif n_partial > 0:
@@ -243,15 +254,31 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 f"{n_partial} modality/modalities show only PARTIAL "
                 f"response: {', '.join(m for m, v in verdicts.items() if v == 'PARTIAL')}"
             )
-        elif n_used > 0:
+        elif n_used > 0 and n_below_noise == 0 and n_untestable == 0:
             sev = Severity.PASS
             verdict_str = f"All {n_used} testable modalities are USED by the model."
-        else:
+        elif n_used > 0:
+            # Some USED, others BELOW_NOISE / UNTESTABLE — partial information.
+            sev = Severity.PASS
+            verdict_str = (
+                f"{n_used} modalities USED. "
+                f"{n_below_noise} BELOW_NOISE (response within model's sampling "
+                f"noise — try a more dynamic frame), "
+                f"{n_untestable} UNTESTABLE (intervention too similar to current value)."
+            )
+        elif n_below_noise > 0 or n_untestable > 0:
             sev = Severity.UNKNOWN
             verdict_str = (
-                f"No modality could be tested ({n_untestable} untestable, "
-                "0 usable verdicts)."
+                f"No conclusive verdict on this frame: "
+                f"{n_below_noise} BELOW_NOISE (mean response within "
+                f"model's per-call sampling noise — pick a more dynamic "
+                f"frame or increase K samples), "
+                f"{n_untestable} UNTESTABLE (substitutions too similar to "
+                f"current value — dataset lacks intra-pool variety)."
             )
+        else:
+            sev = Severity.UNKNOWN
+            verdict_str = "No modality produced a usable verdict."
 
         scalar = float(n_ignored)   # higher = worse
 
@@ -278,6 +305,7 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 "n_used":                 n_used,
                 "n_ignored":              n_ignored,
                 "n_partial":              n_partial,
+                "n_below_noise":          n_below_noise,
                 "n_untestable":           n_untestable,
                 "k_samples":              self.k_samples,
                 "pool_size":              {
@@ -371,8 +399,27 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 "response_normalized_per_sample": response_norms,
             }
 
-        # Real intervention happened — issue real verdict.
-        if mean_out_norm < self.noise_floor_score:
+        # Real intervention happened. Two-stage verdict:
+        #
+        #   1) Is the response statistically distinguishable from the
+        #      model's own sampling noise? If not, we cannot tell
+        #      "model ignored input" apart from "model jitters by this
+        #      magnitude on every call regardless of input." → BELOW_NOISE
+        #
+        #   2) If yes, compare to the strength thresholds:
+        #      IGNORED  (real but tiny — < noise_floor_score of typical)
+        #      PARTIAL  (real, modest)
+        #      USED     (real, strong — > grounded_threshold of typical)
+        #
+        # The noise threshold is derived from the model's calibrated
+        # noise floor (per-call sigma) divided by sqrt(K) — the SE of
+        # the K-sample mean. See ModelCalibration.signal_threshold_normalized.
+        signal_threshold = self.calibration.signal_threshold_normalized(
+            k_samples=int(len(samples)),
+        )
+        if mean_out_norm < signal_threshold:
+            verdict = "BELOW_NOISE"
+        elif mean_out_norm < self.noise_floor_score:
             verdict = "IGNORED"
         elif mean_out_norm < self.grounded_threshold:
             verdict = "PARTIAL"
@@ -388,6 +435,7 @@ class ModalityDropoutDiagnostic(Diagnostic):
             "mean_response_normalized":      mean_out_norm,
             "mean_response_raw":             mean_out_raw,
             "std_response_normalized":       std_out_norm,
+            "signal_threshold_normalized":   signal_threshold,
             "sensitivity_ratio":             ratio,
             "intervention_magnitudes":       intervention_mags,
             "response_normalized_per_sample": response_norms,

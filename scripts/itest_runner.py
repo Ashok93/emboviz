@@ -212,8 +212,9 @@ def run_story(args) -> None:
             dataset, current_episode=int(args.episode_idx),
             declared_modalities=declared_mods,
             n_samples=int(args.modality_pool_size),
-            seed=int(args.episode_idx) + 1,
+            seed=int(args.modality_pool_seed),
             instruction_must_differ_from_task=trajectory.frames[0].instruction,
+            cache_dir=args.modality_pool_cache_dir,
         )
         print(f"      pool: episodes={pool.metadata.get('sampled_episodes')}", flush=True)
         for mod, ref in pool.ref_distance.items():
@@ -286,8 +287,16 @@ def run_story(args) -> None:
                 # so the Rerun overlay shows real visual grounding, not
                 # softmax routing artifacts. Power users who want raw
                 # attention can use am.image_weights() directly.
+                #
+                # Skip cameras that exist in attention metadata but NOT in
+                # scene.observations.images — e.g. π0's PaliGemma padding
+                # slot <padding_right_wrist_rgb>. These are internal model
+                # slots, not real cameras; Rerun has no image to overlay on.
+                scene_cams = set(scene.observations.images)
                 per_cam: dict[str, np.ndarray] = {}
                 for cam in am.cameras:
+                    if cam not in scene_cams:
+                        continue
                     clean, _ = am.image_weights_clean(cam)
                     per_cam[cam] = clean
                 attention_per_frame[trajectory.frame_indices[i]] = per_cam
@@ -423,17 +432,8 @@ def run_story(args) -> None:
     print(f"      failure moments (≥2 critical):", flush=True)
     print(format_failure_moments(moments, max_show=10), flush=True)
 
-    rrd_path = out_dir / "rollout.rrd"
-    export_rerun(
-        trajectory, per_axis, rrd_path,
-        application_id=f"emboviz:{args.story_id}",
-        attention_per_frame=attention_per_frame,
-        sensitivity_per_frame=sensitivity_per_frame,
-        target_mask_per_frame=target_mask_per_frame,
-    )
-    print(f"      wrote {rrd_path} ({rrd_path.stat().st_size:,} bytes)", flush=True)
-
-    # --- 7. JSON summary -------------------------------------------------
+    # --- 7. JSON summary (written BEFORE Rerun export so a viewer-only
+    #         failure does not lose the diagnostic numbers) -------------
     summary = {
         "story_id":          args.story_id,
         "model":             model.model_id,
@@ -479,8 +479,28 @@ def run_story(args) -> None:
         ],
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+    print(f"      wrote {out_dir}/summary.json", flush=True)
+
+    # --- 8. Rerun export — non-fatal: diagnostic numbers are already on
+    #         disk in summary.json; a viewer-export failure should not
+    #         lose the run.
+    rrd_path = out_dir / "rollout.rrd"
+    try:
+        export_rerun(
+            trajectory, per_axis, rrd_path,
+            application_id=f"emboviz:{args.story_id}",
+            attention_per_frame=attention_per_frame,
+            sensitivity_per_frame=sensitivity_per_frame,
+            target_mask_per_frame=target_mask_per_frame,
+        )
+        print(f"      wrote {rrd_path} ({rrd_path.stat().st_size:,} bytes)", flush=True)
+    except Exception as e:
+        print(f"      [WARN] rerun export FAILED ({type(e).__name__}: {e}) — "
+              f"summary.json still has all diagnostic numbers.", flush=True)
+
     print(f"[done] total {time.time() - t0:.1f}s", flush=True)
-    print(f"  rerun {rrd_path}", flush=True)
+    if rrd_path.exists():
+        print(f"  rerun {rrd_path}", flush=True)
     print(f"  cat {out_dir}/summary.json", flush=True)
 
 
@@ -514,6 +534,23 @@ def main():
         help=(
             "Number of substitution samples drawn from the pool per "
             "modality per frame. Default 10 (Monte-Carlo SE ~ 32%%)."
+        ),
+    )
+    p.add_argument(
+        "--modality-pool-seed", type=int, default=0,
+        help=(
+            "RNG seed for the marginal-pool episode sampler. Use the "
+            "same value across the standalone probe and the runner so "
+            "both hit the same pool-to-disk cache file."
+        ),
+    )
+    p.add_argument(
+        "--modality-pool-cache-dir", default=None,
+        help=(
+            "Optional directory where the modality pool is cached on "
+            "disk. The standalone probe writes the pool; the runner "
+            "reads it. Same seed + pool size + dataset → cache hit, "
+            "no rebuild, no HF API round."
         ),
     )
     p.add_argument(

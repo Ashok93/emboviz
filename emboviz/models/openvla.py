@@ -54,6 +54,33 @@ class OpenVLAAdapter(VLAModel):
         | Capability.ACTIVATION_PATCHING
     )
 
+    # Per-model attention-extraction profile, used by
+    # ``AttentionMaps.image_weights_clean()`` to apply the literature-
+    # backed default visualization for THIS backbone (instead of a
+    # one-size-fits-all heuristic). See the citation field for the
+    # source paper(s) that grounded each value.
+    ATTENTION_PROFILE = {
+        # LLaVA stage analysis ("How Multimodal LLMs Solve Image Tasks",
+        # arXiv:2508.20279) finds that LLaMA-based VLMs (LLaVA-1.5, OpenVLA
+        # via Llama-2 7B) have visual-grounding heads concentrated in
+        # mid-layers 8-23 of 32; early layers do token grouping, late
+        # layers do prediction summarization. Middle half = literature-
+        # backed default for spatial attention extraction.
+        "recommended_layer_range_fraction": (0.25, 0.75),
+        # LLaMA-2 7B does not exhibit strong spatial attention sinks on
+        # image patches per the LLaVA stage paper — the documented sink
+        # is the BOS *text* token (not image positions). For the
+        # image-patch heatmap we therefore mask 0% of image cells.
+        "sink_top_pct_to_mask": 0.0,
+        "literature_citation":
+            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
+            "(arXiv:2508.20279) — visual grounding in mid-layers. "
+            "Sink 0%: LLaMA-2 has no documented image-patch spatial "
+            "sinks; the BOS-token sink (Xiao et al. 'Efficient Streaming "
+            "Language Models with Attention Sinks', arXiv:2309.17453) "
+            "applies to text positions, not image patches.",
+    }
+
     def __init__(
         self,
         hf_repo: str = HF_REPO_DEFAULT,
@@ -208,6 +235,7 @@ class OpenVLAAdapter(VLAModel):
             n_keys=full_seq,
             image_token_ranges={"primary": [(1, 1 + n_image)]},
             image_grid_sides={"primary": grid_side},
+            metadata={"attention_profile": self.ATTENTION_PROFILE},
         )
 
     # ---- hidden states + FFN activations -------------------------------

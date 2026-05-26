@@ -314,14 +314,39 @@ class MemorizationDiagnostic(Diagnostic):
         #   MEMORIZATION_SIGNATURE iff max(δ) < threshold  (all fills agree → small)
         #   VISUALLY_GROUNDED iff min(δ) > threshold        (all fills agree → large)
         #   else MIXED
-        if max_delta < self.noise_floor_score:
+        #
+        # NEW (signal-vs-noise gate, added 2026-05-26): before declaring
+        # memorization we must check that the response is statistically
+        # distinguishable from the model's own per-call sampling noise.
+        # For a stochastic model (e.g. flow-matching DiT), per-call jitter
+        # can dwarf the response to target masking — calling that
+        # "memorization" would conflate signal with noise.
+        signal_threshold = (
+            self.calibration.signal_threshold_normalized(k_samples=len(per_fill_results))
+            if self.calibration is not None
+            else self.noise_floor_score
+        )
+        if max_delta < signal_threshold:
+            sev = Severity.UNKNOWN
+            verdict = (
+                f"Max Δ across fills ({max_delta:.4f}) is below the model's "
+                f"signal threshold ({signal_threshold:.4f}, derived from "
+                f"calibrated noise floor / sqrt(K=fills)). We cannot "
+                f"distinguish 'model ignores target' from 'response is "
+                f"within per-call sampling noise.' Try a more dynamic "
+                f"frame (mid-episode), a larger pool/K, or a higher-"
+                f"contrast fill. Cameras tested: {detected_cams}, "
+                f"intervention contrast {max_contrast:.3f}."
+            )
+        elif max_delta < self.noise_floor_score:
             sev = Severity.CRITICAL
             verdict = (
                 f"All fills ({list(per_fill_results)}) produce normalized "
                 f"Δaction < {self.noise_floor_score} when target masked on "
-                f"{detected_cams} (labels={labels}, confs={confs}). Strong "
-                f"memorization signature: model does not respond to target "
-                f"removal under any fill — max Δ={max_delta:.3f}, "
+                f"{detected_cams} (labels={labels}, confs={confs}). Real "
+                f"signal above sampling noise but below {self.noise_floor_score:.0%} "
+                f"of typical action magnitude — strong memorization signature: "
+                f"model isn't using the target visually. max Δ={max_delta:.4f}, "
                 f"intervention contrast={max_contrast:.3f}."
             )
         elif min_delta > self.grounded_threshold:

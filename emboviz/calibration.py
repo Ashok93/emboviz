@@ -104,6 +104,35 @@ class ModelCalibration:
             )
         return max(0.0, raw_delta - self.noise_floor) / self.typical_action_magnitude
 
+    def signal_threshold_normalized(self, k_samples: int = 1) -> float:
+        """Minimum normalized response statistically distinguishable from
+        the model's sampling noise, at 2-sigma confidence, after
+        averaging ``k_samples`` independent substitutions.
+
+        Derivation: ``noise_floor`` is the empirical std of identical-
+        input calls (i.e. the per-call sampling noise). For the mean of
+        K independent samples, SE = noise_floor / sqrt(K). A response
+        whose mean is below 2*SE is statistically indistinguishable
+        from zero true response → the diagnostic cannot reject the null
+        hypothesis of "no effect from this intervention."
+
+        Returned in NORMALIZED units (divided by typical_action_magnitude)
+        so it can be compared directly to ``normalize(raw_delta)``.
+
+        Notes:
+          - If ``noise_floor`` is zero (deterministic model), the
+            threshold is zero too: any positive normalized response is
+            real signal.
+          - If ``typical_action_magnitude`` is degenerate, ``normalize``
+            already refuses; this method returns ``inf`` to make the
+            threshold infinite (no signal will ever pass) for symmetry.
+        """
+        if self.typical_action_magnitude < 1e-9:
+            return float("inf")
+        k = max(1, int(k_samples))
+        sigma_normalized = self.noise_floor / self.typical_action_magnitude
+        return 2.0 * sigma_normalized / (k ** 0.5)
+
     def to_summary(self) -> dict:
         return {
             "noise_floor":                self.noise_floor,

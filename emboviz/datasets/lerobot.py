@@ -77,6 +77,14 @@ class LeRobotEpisodeSource(EpisodeSource):
         self._n_episodes = n_episodes
         self.name = f"lerobot:{repo_id}"
         self._meta_dataset = None
+        # Cache LeRobotDataset instances keyed by the frozen tuple of
+        # episode indices. Each instantiation hits HF for ~50 tree-listing
+        # API calls; the pool builder samples 8-30 episodes per call, so
+        # without this cache we'd burn the 1000-req/5-min rate limit on
+        # any non-trivial dataset (Bridge has 50K episodes → paginated
+        # tree listing). The cache makes batched loads free on repeat.
+        self._dataset_cache: dict[tuple[int, ...], object] = {}
+        self._dataset_cache_max = 8
 
     # ----- EpisodeSource interface -----------------------------------
 
@@ -109,25 +117,27 @@ class LeRobotEpisodeSource(EpisodeSource):
             from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
         indices = sorted(set(episode_indices))
-        is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
-        if is_local:
-            # Local path: tell lerobot the root + a synthetic repo_id so it
-            # skips the hub call. Some lerobot versions key off ``root`` arg;
-            # others off ``local_files_only`` + ``cache_dir``. We try both.
-            try:
-                dataset = LeRobotDataset(
-                    "local", root=self.repo_id, episodes=indices,
-                )
-            except TypeError:
-                # Fallback for lerobot variants without a ``root`` kwarg.
-                dataset = LeRobotDataset(
-                    "local",
-                    download_videos=False,
-                    cache_dir=os.path.dirname(self.repo_id.rstrip("/")),
-                    episodes=indices,
-                )
-        else:
-            dataset = LeRobotDataset(self.repo_id, episodes=indices)
+        cache_key = tuple(indices)
+        dataset = self._dataset_cache.get(cache_key)
+        if dataset is None:
+            is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
+            if is_local:
+                try:
+                    dataset = LeRobotDataset(
+                        "local", root=self.repo_id, episodes=indices,
+                    )
+                except TypeError:
+                    dataset = LeRobotDataset(
+                        "local",
+                        download_videos=False,
+                        cache_dir=os.path.dirname(self.repo_id.rstrip("/")),
+                        episodes=indices,
+                    )
+            else:
+                dataset = LeRobotDataset(self.repo_id, episodes=indices)
+            self._dataset_cache[cache_key] = dataset
+            if len(self._dataset_cache) > self._dataset_cache_max:
+                self._dataset_cache.pop(next(iter(self._dataset_cache)))
         out: dict[int, list[Scene]] = {i: [] for i in indices}
 
         for i in range(dataset.num_frames):

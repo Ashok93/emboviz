@@ -293,11 +293,18 @@ class GR00TDroidSampleSource:
                     if act_parts else None
                 )
 
-                # Instruction: "language.<key>" column. No fallback — if the
-                # dataset row genuinely lacks a recorded instruction we refuse
-                # to fabricate one. Downstream diagnostics that depend on the
-                # instruction (memorization target, paraphrase, model input)
-                # would otherwise silently evaluate the wrong task.
+                # Instruction: "language.<key>" column. DROID is teleop data
+                # where language was added in a post-hoc crowdsourced
+                # annotation pass; about 20% of episodes never got labeled.
+                # We honestly propagate the missing-label state here:
+                # instruction="" + metadata["has_recorded_instruction"]=False.
+                # We do NOT fabricate a string.
+                #
+                # ``load_trajectory`` (which loads the trajectory under test)
+                # checks this flag and refuses, because diagnostics on the
+                # tested episode require a real instruction. Pool samplers
+                # tolerate missing instructions (they just skip that episode
+                # for the instruction modality but still use its images/state).
                 instruction = None
                 lang_cols_tried: list[str] = []
                 for col in row.index:
@@ -308,22 +315,14 @@ class GR00TDroidSampleSource:
                             instruction = instruction[0] if instruction else None
                         if instruction:
                             break
-                if not instruction:
-                    raise ValueError(
-                        f"GR00TDroidSampleSource: episode {ep_i} frame "
-                        f"{frame_i} has no recorded instruction. Tried "
-                        f"language columns {lang_cols_tried}; row columns "
-                        f"are {list(row.index)[:20]}. Provide the correct "
-                        "language key in modality.json or extend the loader "
-                        "to read the instruction from the dataset's tasks "
-                        "metadata — we never fabricate an instruction."
-                    )
+                has_instr = bool(instruction)
+                instruction_str = str(instruction) if has_instr else ""
 
                 scene = Scene(
                     observations=Observations(
                         images=images, state=proprio, gripper=gripper,
                     ),
-                    instruction=str(instruction),
+                    instruction=instruction_str,
                     profile=self.profile,
                     metadata={
                         "fps": fps,
@@ -331,6 +330,8 @@ class GR00TDroidSampleSource:
                         "episode_index": ep_i,
                         "dataset": self.local_dir,
                         "expert_action": expert_action,
+                        "has_recorded_instruction": has_instr,
+                        "language_columns_tried": lang_cols_tried,
                     },
                     scene_id=f"{self.name}:{ep_i}:{frame_i}",
                 )
@@ -340,6 +341,16 @@ class GR00TDroidSampleSource:
     def load_trajectory(self, episode_idx: int):
         from emboviz.core.types import Trajectory
         scenes = self.load_episode(str(episode_idx))
+        if scenes and not scenes[0].metadata.get("has_recorded_instruction", True):
+            tried = scenes[0].metadata.get("language_columns_tried", [])
+            raise ValueError(
+                f"GR00TDroidSampleSource: episode {episode_idx} has no "
+                f"recorded language instruction (tried columns {tried}). "
+                f"DROID is teleop data with ~20% unlabeled episodes — "
+                f"pick a labeled episode for the trajectory under test, "
+                f"or extend the loader to read instructions from tasks "
+                f"metadata. We never fabricate an instruction."
+            )
         fps = float(scenes[0].metadata.get("fps", 15.0)) if scenes else 15.0
         return Trajectory(
             frames=scenes,

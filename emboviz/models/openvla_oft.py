@@ -51,6 +51,19 @@ class OpenVLAOFTAdapter(VLAModel):
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
+    # Same LLaMA-7B backbone as OpenVLA-7B; literature attention profile
+    # is identical (LLaVA stage analysis applies to any LLaMA-2-based
+    # VLA). See OpenVLAAdapter.ATTENTION_PROFILE for the source citations.
+    ATTENTION_PROFILE = {
+        "recommended_layer_range_fraction": (0.25, 0.75),
+        "sink_top_pct_to_mask": 0.0,
+        "literature_citation":
+            "Same LLaMA-2 7B backbone as OpenVLA-7B; see that adapter "
+            "for the source citations. LLaVA stage analysis "
+            "(arXiv:2508.20279) for layer range; no image-patch sinks "
+            "for LLaMA family.",
+    }
+
     def __init__(
         self,
         checkpoint: str = _DEFAULT_REPO,
@@ -403,6 +416,7 @@ class OpenVLAOFTAdapter(VLAModel):
             image_token_ranges=image_token_ranges,
             image_grid_sides=image_grid_sides,
             metadata={
+                "attention_profile": self.ATTENTION_PROFILE,
                 "num_images":     num_images_used,
                 "num_patches":    NUM_PATCHES,
                 "num_prompt":     NUM_PROMPT_TOKENS,

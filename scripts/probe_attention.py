@@ -149,7 +149,9 @@ def main():
             "debug": debug,
         }
         print(f"  {cam:>10s}: raw mass={raw_agg.sum():.4f}  clean mass={clean_agg.sum():.4f}  "
-              f"sinks removed={debug['n_sink_positions']}  layers used={debug['layer_range']}")
+              f"sink cells masked={debug['n_sink_cells_masked']}  "
+              f"layers used={debug['layer_range']}  "
+              f"({debug['profile_source'][:60]}...)")
         # Overlay on whichever scene-image best matches this camera name
         # (e.g. for π0 the "padding" slot has no real scene image — fall back to primary).
         target_cam = cam if cam in scene.observations.images else "primary"

@@ -251,11 +251,34 @@ class GroundingDINOSAMDetector:
         with torch.inference_mode():
             outputs = model(**inputs)
         target_sizes = torch.tensor([pil.size[::-1]]).to(self.device)
+        # transformers renamed box_threshold → threshold in 4.50; older
+        # versions still expect the old name. Inspect the signature once
+        # and call with whichever kwarg this processor accepts.
+        import inspect
+        sig_params = inspect.signature(
+            proc.post_process_grounded_object_detection
+        ).parameters
+        if "box_threshold" in sig_params:
+            thresh_kwargs = {
+                "box_threshold":  self.box_threshold,
+                "text_threshold": self.text_threshold,
+            }
+        elif "threshold" in sig_params:
+            thresh_kwargs = {
+                "threshold":      self.box_threshold,
+                "text_threshold": self.text_threshold,
+            }
+        else:
+            raise RuntimeError(
+                "GroundingDinoProcessor.post_process_grounded_object_detection "
+                f"signature does not accept either 'box_threshold' or "
+                f"'threshold'. Got params: {list(sig_params)}. transformers "
+                "may have changed the API again — update the call site."
+            )
         results = proc.post_process_grounded_object_detection(
             outputs, input_ids=inputs["input_ids"],
-            box_threshold=self.box_threshold,
-            text_threshold=self.text_threshold,
             target_sizes=target_sizes,
+            **thresh_kwargs,
         )[0]
         boxes = results["boxes"].cpu().numpy()
         scores = results["scores"].cpu().numpy()

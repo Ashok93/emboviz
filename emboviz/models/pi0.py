@@ -329,6 +329,35 @@ class Pi0Adapter(VLAModel):
 
     _BASE_CAPS = Capability.INFERENCE
 
+    # π0 uses PaliGemma (Gemma-2B language model + SigLIP vision tower)
+    # as the VLM backbone. PaliGemma's bidirectional prefix attention
+    # creates a different sink profile than causal-mask models:
+    #
+    #   - Layer range: Gemma-2B has 18 layers; visual-grounding heads
+    #     concentrate in the middle half per the same multi-modal stage
+    #     analysis (arXiv:2508.20279). Very early and very late layers
+    #     dump on the BOS/EOS prefix tokens (Gemma's standard sink
+    #     behaviour); mid-layers contain the visual grounding signal.
+    #
+    #   - Sink masking: PaliGemma image patches show MODERATE spatial
+    #     sinks — weaker than Qwen3-VL but present (per PaliGemma paper
+    #     §4 and "To Sink or Not to Sink" arXiv:2510.08510 analysis of
+    #     prefix-LM architectures). 5% top-cell masking is a balance
+    #     between catching the few obvious sinks (typically the first
+    #     image token in raster order) and preserving real grounding
+    #     signal on the rest.
+    ATTENTION_PROFILE = {
+        "recommended_layer_range_fraction": (0.25, 0.75),
+        "sink_top_pct_to_mask": 0.05,
+        "literature_citation":
+            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
+            "(arXiv:2508.20279) — generalises to Gemma-2B/PaliGemma. "
+            "Sink 5%: PaliGemma paper (arXiv:2407.07726) §4 + "
+            "'To Sink or Not to Sink' (arXiv:2510.08510) — prefix-LM "
+            "architectures have moderate spatial sinks weaker than "
+            "Qwen3-VL but present.",
+    }
+
     @property
     def _CAPS(self) -> Capability:
         # Attention extraction needs the PyTorch backend (JAX nnx doesn't
@@ -627,6 +656,7 @@ class Pi0Adapter(VLAModel):
             image_token_ranges=image_token_ranges,
             image_grid_sides=image_grid_sides,
             metadata={
+                "attention_profile": self.ATTENTION_PROFILE,
                 "config_name":   self.config_name,
                 "n_images":      n_images,
                 "tokens_per_image": tokens_per_image,
