@@ -109,7 +109,18 @@ def export_rerun(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     recording_id = trajectory.source or trajectory.episode_id or "rollout"
-    rec = rr.new_recording(application_id=application_id, recording_id=recording_id)
+    # rerun-sdk 0.22 exposed ``new_recording(application_id, recording_id)``;
+    # 0.32+ removed that constructor in favour of ``RecordingStream(...)``.
+    # Support both — we hand the resulting handle to ``rr.log(...,
+    # recording=rec)`` in either case.
+    if hasattr(rr, "new_recording"):
+        rec = rr.new_recording(
+            application_id=application_id, recording_id=recording_id,
+        )
+    else:
+        rec = rr.RecordingStream(
+            application_id=application_id, recording_id=recording_id,
+        )
     fps = trajectory.fps if trajectory.fps > 0 else 5.0
 
     attention_per_frame          = attention_per_frame          or {}

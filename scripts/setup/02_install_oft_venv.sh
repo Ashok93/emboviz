@@ -22,6 +22,10 @@ uv pip install --python "$VENV/bin/python" -e .
 echo "[oft] adding lerobot for dataset loading (LIBERO-spatial)"
 uv pip install --python "$VENV/bin/python" "lerobot==0.3.3"
 
+echo "[oft] runtime deps used by emboviz diagnostics + reports"
+uv pip install --python "$VENV/bin/python" \
+    "scipy>=1.11" "pyarrow" "rerun-sdk>=0.22" "jinja2>=3.1"
+
 echo "[oft] installing emboviz (editable)"
 uv pip install --python "$VENV/bin/python" -e /root/emboviz/
 

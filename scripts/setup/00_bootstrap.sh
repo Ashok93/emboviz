@@ -3,6 +3,10 @@
 # Idempotent — safe to re-run.
 set -euo pipefail
 
+echo "[bootstrap] system packages — ffmpeg for torchcodec, git-lfs for Isaac-GR00T demo_data"
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg git-lfs curl git
+
 echo "[bootstrap] installing uv"
 if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh

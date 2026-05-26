@@ -7,38 +7,71 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<3.13"
 
 # ──────────────────────────────────────────────────────────────────────
-# Core install is intentionally ML-free. Users only ever install
-# `emboviz` directly when they need the core types/diagnostic interfaces
-# without any model — e.g. when integrating into a larger pipeline.
+# Core install. Designed so users only ever pick ONE model extra and
+# everything else (reports, .rrd export, MCAP / HDF5 readers, viz) just
+# works. No model / framework deps here — those live in the extras
+# below and bring their own torch + transformers versions.
 #
-# For actual use you always combine core with at least one model extra
-# (emboviz[openvla], emboviz[gr00t], …) AND at least one data-source
-# extra (emboviz[lerobot], emboviz[mcap], …). The CLI gates on what's
-# installed and errors with a clean "pip install emboviz[<extra>]"
-# message if you ask it to do something the extra didn't ship.
+# Why these specific packages are core:
+#   • numpy / scipy / Pillow / pyarrow — pure data plumbing
+#   • click / pydantic / tqdm / huggingface_hub — CLI + config + downloads
+#   • matplotlib / jinja2 — Markdown + HTML report rendering
+#   • rerun-sdk — write .rrd files (the killer visualizer); 80 MB
+#   • mcap + mcap-ros2-support + mcap-protobuf-support — read .mcap
+#     deployment recordings (the de-facto ROS 2 / Isaac SIM standard)
+#   • h5py — read Robomimic / ALOHA / Isaac Lab demonstration files
+#   • imageio + imageio-ffmpeg — video / mp4 read+write for overlays
+#
+# Combined size: ~270 MB. No GPU framework. Imports in <1 s.
 # ──────────────────────────────────────────────────────────────────────
 dependencies = [
+    # plumbing
     "numpy>=1.26",
+    "scipy>=1.11",
+    "pyarrow>=14",
     "Pillow>=10.0",
     "tqdm>=4.66",
-    "click>=8.1",                  # CLI
-    "pydantic>=2.7",               # typed config + Finding serialization
-    "huggingface_hub>=0.24",       # repo id resolution; very lightweight
+    "click>=8.1",
+    "pydantic>=2.7",
+    "huggingface_hub>=0.24",
+    # report rendering
+    "matplotlib>=3.8",
+    "jinja2>=3.1",
+    # deployment recording readers (small, no torch)
+    "mcap>=1.2",
+    "mcap-ros2-support>=0.5",
+    "mcap-protobuf-support>=0.5",
+    # tabular / scientific dataset readers
+    "h5py>=3.10",
+    # interactive Rerun export (always-on; .rrd is the headline artifact).
+    # Upper-pin <0.30 — rerun 0.30+ renamed several APIs we depend on
+    # (e.g. ``new_recording`` → ``RecordingStream`` + ``set_time_seconds``
+    # → ``set_time(duration=)``). When we upgrade we audit + bump.
+    "rerun-sdk>=0.22,<0.30",
+    # video / image media
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4.9",
 ]
 
 [project.optional-dependencies]
 
-# ────────── Model adapters ──────────
-# Each model lives in its own virtualenv because upstream packages pin
-# incompatible transformers / lerobot versions. uv's conflict declaration
-# below enforces this at install time. Direct VCS URLs are NOT placed in
-# optional-dependencies (PyPI rejects them); when an adapter requires a
-# fork or git-only package (OFT, openpi, Isaac-GR00T), the adapter
-# docstring + `scripts/setup/<NN>_install_<model>_venv.sh` give the
-# exact `pip install -e git+...` command.
+# ────────── Model adapters (one per venv — mutually exclusive) ─────
+# Each extra ships everything the matching adapter needs to do real
+# inference AND read the standard datasets paired with it (LeRobot
+# format, where applicable). The only thing the user does is:
+#
+#     pip install 'emboviz[<model>]'
+#
+# Then ``emboviz analyze --model <model> ...`` works for the standard
+# (model, dataset) pair. No second pip command, no manual scipy /
+# pyarrow / rerun-sdk add-ons.
+#
+# Three of the four model adapters wrap an upstream Python package that
+# is NOT on PyPI (moojink/openvla-oft, Physical-Intelligence/openpi,
+# NVIDIA/Isaac-GR00T). The user runs an additional ``pip install -e
+# git+<url>`` for those — documented in the adapter docstring + the
+# scripts/setup/<NN>_install_<model>_venv.sh dev recipe.
 
-# OpenVLA-7B — fully on HF Hub, loads via transformers AutoModel
-# with trust_remote_code=True. Self-contained.
 openvla = [
     "torch>=2.2,<2.13",
     "torchvision>=0.17",
@@ -50,13 +83,13 @@ openvla = [
     "sentencepiece>=0.2",
     "einops>=0.8",
     "safetensors>=0.4",
+    # LeRobot for Bridge / LIBERO datasets
+    "lerobot>=0.3,<0.5",
+    "torchcodec>=0.5",
+    "av>=14",
+    "pandas>=2.0",
 ]
 
-# OpenVLA-OFT — needs the moojink fork of openvla-oft repo + its
-# vendored transformers. Install with:
-#   git clone https://github.com/moojink/openvla-oft && cd openvla-oft
-#   uv pip install -e .
-# Then add this extra for our adapter's runtime deps:
 oft = [
     "torch>=2.2,<2.10",
     "torchvision>=0.17",
@@ -66,25 +99,28 @@ oft = [
     "einops>=0.8",
     "safetensors>=0.4",
     "diffusers>=0.30,<0.40",
+    "lerobot>=0.3,<0.5",
+    "av>=14",
+    "pandas>=2.0",
+    # OpenVLA-OFT is research code (not on PyPI). Pulled via PEP 508
+    # direct-URL refs so ``uv pip install emboviz[oft]`` actually
+    # installs everything — no manual ``git clone`` step.
+    "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
+    "openvla @ git+https://github.com/moojink/openvla-oft.git",
 ]
 
-# π0 / pi0_libero — runs inside Physical-Intelligence's openpi repo
-# (their pyproject pins JAX + PyTorch). Install with:
-#   git clone https://github.com/Physical-Intelligence/openpi && cd openpi
-#   uv pip install -e .
-# Then add this extra for the few extras our adapter touches:
 pi0 = [
     "torch>=2.2,<2.10",
     "transformers>=4.50,<4.55",   # openpi's gemma wrapper targets 4.53.x
     "einops>=0.8",
     "safetensors>=0.5",
+    # openpi is not on PyPI (the name is reserved but empty). Pulled
+    # via git+ direct-URL so emboviz[pi0] installs everything in one
+    # command. openpi pins its own lerobot via a git rev so we do NOT
+    # pin lerobot separately.
+    "openpi @ git+https://github.com/Physical-Intelligence/openpi.git",
 ]
 
-# GR00T-N1.7 — NVIDIA's Isaac-GR00T repo, with the Qwen3-VL VLM
-# (transformers 4.57+). Install with:
-#   git clone https://github.com/NVIDIA/Isaac-GR00T && cd Isaac-GR00T
-#   uv pip install -e .
-# Then add this extra:
 gr00t = [
     "torch>=2.2,<2.13",
     "transformers>=4.57,<4.60",   # Qwen3-VL needs >=4.57
@@ -95,63 +131,28 @@ gr00t = [
     "albumentations>=2.0",
     "av>=14",
     "decord>=0.6",
-    "torchcodec>=0.5",
     "pandas>=2.0",
-]
-
-# ────────── Dataset adapters (training / eval data) ──────────
-
-# LeRobot v2/v3 — the de-facto open-source standard. Bridge, LIBERO,
-# DROID, π0-libero, OFT fine-tunes all live here.
-lerobot = [
+    # LeRobot is optional for GR00T (droid_sample uses NVIDIA's loader),
+    # but most users want to also test on LeRobot-format data:
     "lerobot>=0.3,<0.5",
-    "torch>=2.2,<2.13",            # lerobot depends on torch
-    "torchcodec>=0.5",
-    "av>=14",
-    "pandas>=2.0",
+    # IMPORTANT: NVIDIA's gr00t Python package lists flash-attn as a
+    # hard dep but flash-attn's build setup imports torch before pip
+    # has installed it (build-isolation failure). We cannot put gr00t
+    # itself in this extra. Instead the user runs ``emboviz install-
+    # gr00t`` ONE TIME after ``uv pip install emboviz[gr00t]``; that
+    # subcommand calls ``pip install --no-deps git+...NVIDIA/Isaac-GR00T``
+    # which skips flash-attn (the gr00t adapter already falls back to
+    # SDPA / eager attention so flash-attn isn't actually used).
 ]
 
-# RLDS / TFDS — Open-X-Embodiment, RT-X, Octo, anything Google-style.
+# ────────── Optional heavy dataset family ──────────
+# Only pulled in by users who actually have RLDS / Open-X-Embodiment
+# data. Adds tensorflow_datasets + tensorflow-cpu (~500 MB) so we keep
+# it out of the model extras above.
 rlds = [
     "tensorflow-datasets>=4.9",
-    "tensorflow-cpu>=2.15",        # CPU-only; we only read, never train
+    "tensorflow-cpu>=2.15",
     "rlds>=0.1.8",
-]
-
-# HDF5 — Robomimic / ALOHA / NVIDIA Isaac Lab + MimicGen format.
-hdf5 = [
-    "h5py>=3.10",
-]
-
-# ────────── Deployment recording adapters ──────────
-
-# MCAP — default for ROS 2 Iron+ and NVIDIA Isaac SIM. Anything
-# recorded on a real robot in 2026 is almost certainly MCAP.
-mcap = [
-    "mcap>=1.2",
-    "mcap-ros2-support>=0.5",
-    "mcap-protobuf-support>=0.5",
-]
-
-# Rerun .rrd — code-first logging from the user's inference loop.
-rerun = [
-    "rerun-sdk>=0.22",
-]
-
-# ────────── Report generation ──────────
-viz = [
-    "matplotlib>=3.8",
-    "jinja2>=3.1",                 # HTML reports
-    "imageio>=2.34",
-    "imageio-ffmpeg>=0.4.9",       # for video export when we add it
-]
-
-# ────────── Convenience meta-extras ──────────
-# `all` deliberately picks ONE model adapter (openvla) — installing
-# openvla + gr00t together is impossible due to transformers conflict.
-# Users who want multiple models install one per venv.
-all = [
-    "emboviz[openvla,lerobot,mcap,rerun,viz]",
 ]
 
 # ────────── Dev / test ──────────
@@ -163,10 +164,10 @@ dev = [
 ]
 
 # ──────────────────────────────────────────────────────────────────────
-# Tell uv that model adapter groups are mutually exclusive — they pin
-# incompatible transformers/lerobot versions and must live in separate
-# virtualenvs. Without this, `uv sync --all-extras` would try to satisfy
-# them all at once and fail to resolve.
+# uv enforces that the model adapter extras are mutually exclusive —
+# they pin incompatible transformers / lerobot versions and must live
+# in separate virtualenvs. Without this, ``uv sync --all-extras`` would
+# try to resolve all four at once and fail.
 # ──────────────────────────────────────────────────────────────────────
 [tool.uv]
 conflicts = [
@@ -194,4 +195,4 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501"]   # line length is handled by formatter
+ignore = ["E501"]

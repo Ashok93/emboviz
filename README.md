@@ -37,23 +37,77 @@ We **surface signals**. You form conclusions. Debugger, not oracle.
 
 ## Quickstart
 
+One system dep on Linux: `sudo apt install ffmpeg` (Mac: `brew install ffmpeg`).
+That's the ONE thing pip can't handle for you — `lerobot` reads videos
+via `torchcodec` which needs FFmpeg system libraries.
+
+Then per model, three commands (each in its own venv — the model
+adapter extras are mutually exclusive because the upstream packages
+pin incompatible transformers / torch versions):
+
+### OpenVLA-7B (or any fine-tune of it) on Bridge / LIBERO / any LeRobot data
+
 ```bash
-# Install
-uv add emboviz
-
-# Diagnose a rollout (auto-detects format)
-uv run emboviz diagnose ./episode.bag --model openvla-7b --profile franka_robotiq
-
-# Open the results in Rerun (or Foxglove)
-rerun ./out/diagnostics.rrd
+uv venv && source .venv/bin/activate
+uv pip install "emboviz[openvla]"
+uv run emboviz analyze \
+    --model openvla --dataset bridge \
+    --episodes 0,1,2 --target "the spoon" \
+    --output ./report
 ```
 
-You get back:
+### OpenVLA-OFT on LIBERO
 
-- **Rerun `.rrd`** with every diagnostic emitted as a toggleable timeline track — per-frame attention heatmaps overlaid on your camera, severity tape per axis, P(failure) curve, predicted-vs-expert action vectors.
-- **Foxglove `.mcap`** with the same data as topics.
-- **A scorecard PNG** — axis-by-axis severity grid for at-a-glance triage.
-- **Per-diagnostic detail pages** — drill into one axis without wading through the rest.
+```bash
+uv venv && source .venv/bin/activate
+uv pip install "emboviz[oft]"     # pulls moojink fork + transformers patch automatically
+uv run emboviz analyze \
+    --model oft --dataset libero-spatial \
+    --episodes 0,1,2 --target "the black bowl" \
+    --output ./report
+```
+
+### π0 / pi0_libero (Physical Intelligence)
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install "emboviz[pi0]"     # pulls openpi automatically
+# 3rd command ONLY if you want the attention-extraction diagnostic
+# (the other 4 diagnostics work on the JAX checkpoint as-is):
+uv run emboviz convert-pi0 pi0_libero
+uv run emboviz analyze \
+    --model pi0 --dataset pi-libero \
+    --episodes 0,1,2 --target "the white mug" \
+    --output ./report
+```
+
+### GR00T-N1.7 (NVIDIA) on DROID or your LeRobot data
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install "emboviz[gr00t]"
+# Isaac-GR00T's flash-attn build dep fails under pip's standard build
+# isolation. ``install-gr00t`` does the `--no-deps` install (gr00t's
+# adapter falls back to SDPA / eager attention anyway):
+uv run emboviz install-gr00t
+uv run emboviz analyze \
+    --model gr00t \
+    --model-kwargs '{"camera_mapping": {"primary": "exterior_image_1_left", "wrist_left": "wrist_image_left"}}' \
+    --dataset droid-sample --episodes 1 --target "the blue block" \
+    --output ./report
+```
+
+### What you get back, per episode
+
+In every `report/episode_<idx>/`:
+
+- **`summary.json`** — every metric the diagnostic suite produced, with the per-frame numbers.
+- **`report.md` / `report.html`** — plain-English findings ("masked the bowl, action barely moved — memorized-trajectory signature, try an unseen episode") sorted worst-first. No internal severity words.
+- **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention heatmaps, GroundingDINO bbox + per-fill masked images for memorization, per-modality response timeline, per-camera occlusion grids, action plots with abrupt-shift markers.
+
+Across all the episodes you analyzed, at the top of `report/`:
+
+- **`aggregate.json` / `aggregate.md` / `aggregate.html`** — cross-episode patterns ("on 7/10 episodes the wrist camera was IGNORED in the final 20 frames before failure") with links to per-episode pages.
 
 No prose synthesis, no "we think your model is broken because…" — just evidence, in the tools you already use, scrubbable frame by frame.
 

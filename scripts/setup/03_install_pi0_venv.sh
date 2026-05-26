@@ -22,8 +22,15 @@ uv pip install --python "$VENV/bin/python" -e .
 echo "[pi0] pinning transformers (4.53.2 — required by openpi's gemma wrapper)"
 uv pip install --python "$VENV/bin/python" "transformers==4.53.2"
 
-echo "[pi0] adding lerobot for pi0_libero dataset"
-uv pip install --python "$VENV/bin/python" "lerobot==0.3.2"
+# IMPORTANT: openpi pins lerobot to a specific git commit (the legacy
+# lerobot.common.* import layout). We do NOT install a newer lerobot
+# here because openpi's own modules ``import lerobot.common.datasets``
+# at import time. Our LeRobotEpisodeSource adapter handles both old
+# and new layouts, so the openpi-pinned version works fine.
+
+echo "[pi0] runtime deps used by emboviz diagnostics + reports"
+uv pip install --python "$VENV/bin/python" \
+    "scipy>=1.11" "pyarrow" "rerun-sdk>=0.22" "jinja2>=3.1"
 
 echo "[pi0] installing emboviz (editable)"
 uv pip install --python "$VENV/bin/python" -e /root/emboviz/

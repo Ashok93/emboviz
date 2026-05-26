@@ -24,7 +24,8 @@ uv pip install --python "$VENV/bin/python" \
     "av==17.0.1" \
     "torchcodec==0.13.0" \
     "pandas==2.3.3" \
-    "numpy" "pillow" "matplotlib" "tqdm"
+    "numpy" "pillow" "matplotlib" "tqdm" \
+    "scipy>=1.11" "pyarrow" "rerun-sdk>=0.22" "jinja2>=3.1"
 
 # flash-attn needs --no-build-isolation; slow build (~10 min)
 echo "[openvla] installing flash-attn (slow ~10 min build)"
