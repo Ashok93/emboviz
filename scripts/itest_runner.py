@@ -335,17 +335,38 @@ def run_story(args) -> None:
     print(f"      target-mask frames: {len(target_mask_per_frame)}", flush=True)
 
     # --- 6. expert delta (imitation-accuracy only) + Rerun + failure moments
-    # expert_delta is an IMITATION-ACCURACY metric, not a deployment-debugging
-    # metric. It compares the model's prediction to the action a human
-    # demonstrator recorded for the SAME frame. Only meaningful when the
-    # dataset has recorded expert actions (training/validation demos) —
-    # NOT for raw deployment rollouts where the robot was driven by the
-    # model and no human ever teleoperated those frames.
-    print(f"[6/7] expert delta (imitation accuracy) + Rerun export...", flush=True)
+    # Imitation accuracy compares the model's predicted action to the
+    # recorded human-demonstrator action on the same frame. It's a BC
+    # validation metric — useful when the dataset is teleoperation data
+    # with recorded expert actions, useless on deployment rollouts (no
+    # expert exists), and arguably misleading even on training data
+    # because VLAs are trained to GENERALIZE, not to copy.
+    #
+    # Two gates control whether we compute + show it:
+    #   1) The dataset must actually have expert actions per frame.
+    #   2) The user must opt in via --show-imitation. We default to
+    #      hidden because "imitation L2 = 0.03" routinely gets read as
+    #      "policy quality" when it's really a similarity-to-training
+    #      number.
     has_expert = any(
         scene.metadata.get("expert_action") is not None
         for scene in trajectory.frames
     )
+    show_imitation = bool(getattr(args, "show_imitation", False)) and has_expert
+
+    if not show_imitation:
+        if has_expert:
+            print(f"[6/7] imitation L2 vs expert: HIDDEN "
+                  f"(dataset has recorded expert actions but "
+                  f"--show-imitation was not passed; this is a BC "
+                  f"validation metric, not a VLA diagnostic).", flush=True)
+        else:
+            print(f"[6/7] imitation L2 vs expert: N/A "
+                  f"(deployment data has no expert actions to compare to).",
+                  flush=True)
+    else:
+        print(f"[6/7] expert delta (imitation accuracy) + Rerun export "
+              f"[--show-imitation enabled]...", flush=True)
     profile = trajectory.frames[0].profile
     dim_names: list[str] = (
         list(profile.action.dim_names)
@@ -361,17 +382,10 @@ def run_story(args) -> None:
     dim_label: list[str] = []
     mean_delta: float = float("nan")
 
-    if not has_expert:
-        print(f"      expert_delta SKIPPED — dataset has no recorded "
-              f"expert actions (typical for deployment rollouts).", flush=True)
-        not_applicable["evaluation.expert_delta"] = (
-            "dataset has no recorded expert action column "
-            "(scene.metadata['expert_action'] is None on every frame). "
-            "expert_delta only applies to training/validation demos where "
-            "a human demonstrator's action was recorded per frame; raw "
-            "deployment rollouts can't be evaluated against an expert "
-            "they don't have."
-        )
+    if not show_imitation:
+        # Not opt-in OR no expert actions → don't run the loop. Removes
+        # the metric from output entirely, saves N forward passes.
+        pass
     else:
         n_compared_dims = 0
         for scene in trajectory.frames:
@@ -426,7 +440,7 @@ def run_story(args) -> None:
 
     moments = find_failure_moments(
         per_axis,
-        expert_delta_per_frame=expert_delta_per_frame if has_expert else None,
+        expert_delta_per_frame=expert_delta_per_frame if show_imitation else None,
         min_critical_axes=2,
     )
     print(f"      failure moments (≥2 critical):", flush=True)
@@ -449,8 +463,11 @@ def run_story(args) -> None:
         "not_applicable":    not_applicable,
         "paraphrase_deltas": paraphrase_deltas,
         "paraphrase_mean_delta": paraphrase_mean,
-        # Imitation-accuracy block — only populated when the dataset has
-        # recorded expert actions. Absent when running on deployment rollouts.
+        # Imitation-accuracy block — populated ONLY when (a) the dataset
+        # has recorded expert actions AND (b) the user explicitly opts
+        # in via --show-imitation. VLAs are trained to generalize, not
+        # to imitate; we hide this number by default to keep users from
+        # reading it as a quality signal.
         "imitation_accuracy": (
             {
                 "expert_delta_per_frame":         expert_delta_per_frame,
@@ -462,10 +479,12 @@ def run_story(args) -> None:
                 "note": (
                     "Imitation-accuracy is per-frame distance between the "
                     "model's prediction and the dataset's recorded expert "
-                    "action. Useful for validation runs against training/demo "
-                    "data; NOT a deployment-debug signal."
+                    "action. Useful as a BC validation metric on training "
+                    "or held-out demonstration data. NOT a deployment-"
+                    "debug signal — VLAs are trained to generalize, not "
+                    "to copy the demonstrator exactly."
                 ),
-            } if has_expert else None
+            } if show_imitation else None
         ),
         "failure_moments": [
             {
@@ -561,6 +580,17 @@ def main():
             "directly (works for any task). Use when the instruction "
             "mentions multiple objects and you want to scope memorization "
             "to one specific referent (e.g. --target-text \"the mug\")."
+        ),
+    )
+    p.add_argument(
+        "--show-imitation", action="store_true",
+        help=(
+            "Compute and show per-frame imitation L2 (model action vs "
+            "recorded expert action). Hidden by default because (a) "
+            "deployment recordings have no expert action, (b) even on "
+            "training data, imitation L2 is a BC validation metric — "
+            "not a deployment-debug signal. VLAs are trained to "
+            "generalize, not to copy the demonstrator."
         ),
     )
     args = p.parse_args()
