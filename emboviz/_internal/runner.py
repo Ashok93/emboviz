@@ -92,12 +92,30 @@ def run_story(args) -> None:
     print(f"[2/7] load dataset: {args.dataset_builder} kwargs={args.dataset_kwargs_json}", flush=True)
     dataset = _resolve(args.dataset_builder, args.dataset_kwargs_json)
     full_traj = dataset.load_trajectory(int(args.episode_idx))
-    window_frames = full_traj.frames[args.frame_start : args.frame_start + args.n_frames]
-    window_indices = list(
-        full_traj.frame_indices[args.frame_start : args.frame_start + args.n_frames]
-    )
+
+    # Window construction.
+    #   frame_start: first index to include
+    #   n_frames   : number of frames in the window. ``n_frames <= 0`` means
+    #                "all frames from frame_start to the end of the episode."
+    #   frame_stride: step between frames (default 1 = every frame).
+    n_total = len(full_traj.frames)
+    start = max(0, int(args.frame_start))
+    n_req = int(args.n_frames)
+    stride = max(1, int(getattr(args, "frame_stride", 1)))
+    end = n_total if n_req <= 0 else min(n_total, start + n_req * stride)
+    sel = list(range(start, end, stride))
+    if not sel:
+        raise ValueError(
+            f"empty trajectory window for episode {args.episode_idx}: "
+            f"frame_start={start} n_frames={n_req} stride={stride} "
+            f"out of {n_total} total frames."
+        )
+    window_frames  = [full_traj.frames[i] for i in sel]
+    window_indices = [full_traj.frame_indices[i] for i in sel]
     trajectory = replace(full_traj, frames=window_frames, frame_indices=window_indices)
-    print(f"      trajectory: {len(trajectory.frames)} frames source={trajectory.source}", flush=True)
+    print(f"      trajectory: {len(trajectory.frames)} frames "
+          f"(stride={stride}, episode has {n_total} total) "
+          f"source={trajectory.source}", flush=True)
     print(f"      cameras in scene: {sorted(trajectory.frames[0].observations.images)}", flush=True)
     print(f'      instruction: "{trajectory.frames[0].instruction}"', flush=True)
 
@@ -536,7 +554,16 @@ def main():
                    help="JSON dict of kwargs passed to the dataset builder")
     p.add_argument("--episode-idx", type=int, required=True)
     p.add_argument("--frame-start", type=int, default=0)
-    p.add_argument("--n-frames", type=int, default=8)
+    p.add_argument(
+        "--n-frames", type=int, default=-1,
+        help="Number of frames in the analysis window. Default -1 means "
+             "ALL frames from --frame-start to the end of the episode.",
+    )
+    p.add_argument(
+        "--frame-stride", type=int, default=1,
+        help="Stride between frames in the window. Default 1 = every "
+             "frame. Use 5 or 10 to subsample long episodes.",
+    )
     p.add_argument("--sensitivity-grid-side", type=int, default=4)
     p.add_argument("--out-dir", required=True)
     p.add_argument(
