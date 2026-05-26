@@ -178,12 +178,8 @@ conflicts = [
     ],
 ]
 
-# The `emboviz` console script is wired in Phase 4 (single-CLI consolidation).
-# Until then, drive the framework via the dev scripts in scripts/ or the
-# Python API directly. We intentionally do not ship a half-working entry
-# point — that would teach users a CLI that's about to change.
-# [project.scripts]
-# emboviz = "emboviz.cli:main"
+[project.scripts]
+emboviz = "emboviz.cli:main"
 
 [build-system]
 requires = ["hatchling"]
