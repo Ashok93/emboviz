@@ -97,6 +97,58 @@ uv run emboviz analyze \
     --output ./report
 ```
 
+### Bring your own data
+
+The per-model quickstarts above use `--dataset <alias>` for the canonical
+training datasets we pre-shipped (`bridge`, `libero-spatial`, `pi-libero`,
+`droid-sample`, ...). For your own dataset or your own deployment recording,
+point emboviz at it directly with `--dataset-format <fmt>` + `--dataset-path <path>`:
+
+```bash
+# Local HDF5 file (Robomimic / ALOHA / NVIDIA Isaac Lab Mimic)
+uv run emboviz analyze --model pi0 \
+    --dataset-format hdf5 --dataset-path /data/my_demos.hdf5 \
+    --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb", "wrist": "robot0_eye_in_hand_rgb"}, "instruction": "pick up the mug"}' \
+    --episodes 0 --target "the white mug" --output ./report
+
+# RLDS / Open-X-Embodiment (needs `uv pip install 'emboviz[rlds]'`)
+uv run emboviz analyze --model gr00t \
+    --dataset-format rlds --dataset-path /tfds \
+    --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \
+    --episodes 0,1 --target "the green block" --output ./report
+
+# MCAP deployment recording from ROS 2 / NVIDIA Isaac SIM
+uv run emboviz analyze --model oft \
+    --dataset-format mcap --dataset-path /logs/rollout_2026_05_26.mcap \
+    --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \
+    --episodes 0 --target "the black bowl" --output ./report
+
+# Rerun .rrd deployment recording
+uv run emboviz analyze --model openvla \
+    --dataset-format rerun-rrd --dataset-path /logs/rollout.rrd \
+    --episodes 0 --target "the spoon" --output ./report
+```
+
+Each format's adapter requires a small set of mapping kwargs (which
+HDF5 group / RLDS field / ROS topic holds each camera, the state, the
+action) — pass them via `--dataset-kwargs '<JSON>'`. See
+`emboviz.datasets.hdf5:HDF5EpisodeSource`,
+`emboviz.datasets.rlds:RLDSEpisodeSource`, etc. for the full signature.
+
+**For your own LeRobot v2/v3 dataset:** use one of the pre-shipped
+aliases (`bridge`, `libero-spatial`, `droid-sample`, ...) if your robot
+matches a pre-shipped `RobotProfile`. For a different robot, subclass
+`emboviz.datasets.lerobot:LeRobotEpisodeSource` (~10 lines — see
+`emboviz/datasets/lerobot_bridge.py` for the template), then pass
+`--dataset emboviz.your_module:YourSource`. LeRobot adapters need
+a `RobotProfile` object (action axes, gripper convention) that can't
+be expressed in JSON, so they don't fit the generic
+`--dataset-format` flow.
+
+Run `uv run emboviz list-datasets` to see every supported format on the
+current install (✓ = installed, · = needs an extra) with the exact
+`uv pip install` line for any missing one.
+
 ### What you get back, per episode
 
 In every `report/episode_<idx>/`:
@@ -121,10 +173,10 @@ Each adapter declares which interpretability surfaces it exposes — inference, 
 
 | Family | Inference | **Attention extraction** | Hidden states / patching | Install |
 |---|---|---|---|---|
-| OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv add emboviz[openvla]` |
-| **OpenVLA-OFT** | ✅ | 🚧 in progress — same LLaMA backbone, copy-paste from OpenVLA | — | needs the moojink/transformers fork; separate venv |
-| **π0 / π0.5** | ✅ | 🚧 in progress — extracting from PaliGemma VLM inside openpi | — | `uv add emboviz[pi0]`; separate venv |
-| **GR00T-N1 / N1.7** | ✅ | 🚧 in progress — extracting from Eagle-2 VLM inside Gr00tPolicy | — | `uv add emboviz[gr00t]` + `git+https://github.com/NVIDIA/Isaac-GR00T.git` |
+| OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv pip install 'emboviz[openvla]'` |
+| **OpenVLA-OFT** | ✅ | ✅ shipped (moojink LLaMA backbone, BOS-aware token ranges) | — | `uv pip install 'emboviz[oft]'`; separate venv |
+| **π0 / π0.5** | ✅ | ✅ shipped (PaliGemma VLM inside openpi; needs `emboviz convert-pi0`) | — | `uv pip install 'emboviz[pi0]'`; separate venv |
+| **GR00T-N1 / N1.7** | ✅ | ✅ shipped (Eagle-2 VLM inside Gr00tPolicy) | — | `uv pip install 'emboviz[gr00t]'` + `uv run emboviz install-gr00t` |
 | LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ via `LeRobotPolicyAdapter` | 🚧 case-by-case (depends on backbone) | — | base install |
 | Mock (no GPU) | ✅ — for diagnostic-side dev | N/A | N/A | base install |
 | RDT-1B | 📅 planned (flash-attn build complexity) | | | |
@@ -153,14 +205,15 @@ Custom robots: write a ~30-line `RobotProfile` and drop it in `emboviz/profiles/
 
 ### Data formats
 
-| Format | Ingest | Export |
-|---|---|---|
-| LeRobot v3 (BridgeV2, ALOHA, custom uploads) | ✅ | — |
-| Rerun `.rrd` | ✅ | ✅ **(killer feature)** |
-| Foxglove `.mcap` | ✅ | ✅ |
-| HuggingFace `datasets` (generic) | ✅ | — |
-| ROS bag (native) | 📅 roadmap | — |
-| RLDS | 📅 roadmap | — |
+| Format | Ingest | Export | Selector |
+|---|---|---|---|
+| LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | ✅ | — | `--dataset-format lerobot` |
+| HuggingFace `datasets` (generic) | ✅ | — | `--dataset-format hf` |
+| HDF5 (Robomimic, ALOHA, NVIDIA Isaac Lab Mimic) | ✅ | — | `--dataset-format hdf5` |
+| RLDS / TFDS (Open-X-Embodiment, RT-X, Octo) | ✅ (extra: `rlds`) | — | `--dataset-format rlds` |
+| MCAP (ROS 2, NVIDIA Isaac SIM) | ✅ | — | `--dataset-format mcap` |
+| Rerun `.rrd` | ✅ | ✅ **(killer feature)** | `--dataset-format rerun-rrd` |
+| ROS bag (native) | 📅 roadmap | — | — |
 
 ---
 

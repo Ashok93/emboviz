@@ -60,6 +60,29 @@ _DATASET_ALIASES: dict[str, str] = {
 }
 
 
+# Generic data-format shortcuts for users with their own dataset / recording
+# at a local path. Maps a short format name to (adapter_spec, path-kwarg-name).
+# Selected via ``--dataset-format <fmt> --dataset-path <path>``; any other
+# adapter-specific kwargs (camera_keys, topic_map, builder_name, ...) go in
+# ``--dataset-kwargs '<JSON>'``.
+#
+# These are the formats whose ALL required adapter kwargs are JSON-friendly
+# (dicts of strings, paths). LeRobot v2/v3 and generic HuggingFace datasets
+# are intentionally NOT in this dict because their adapters need a
+# ``RobotProfile`` instance (and, for HF, a ``row_to_scene`` callable) that
+# can't be expressed in JSON. For those, use one of the pre-shipped
+# ``--dataset <alias>`` (bridge / libero-* / droid-* / aloha-*) which bakes
+# in the right profile, or subclass ``LeRobotEpisodeSource`` for your own
+# robot and pass it via ``--dataset emboviz.your_module:YourSource``.
+_DATASET_FORMATS: dict[str, tuple[str, str]] = {
+    # name             (adapter spec,                                  path-kwarg)
+    "hdf5":           ("emboviz.datasets:HDF5EpisodeSource",          "path"),
+    "rlds":           ("emboviz.datasets:RLDSEpisodeSource",          "data_dir"),
+    "mcap":           ("emboviz.recordings:MCAPRecording",            "path"),
+    "rerun-rrd":      ("emboviz.recordings:RerunRecording",           "path"),
+}
+
+
 def _resolve_model_spec(model: str) -> str:
     if model in _MODEL_ALIASES:
         return _MODEL_ALIASES[model]
@@ -85,7 +108,74 @@ def _resolve_dataset_spec(dataset: str) -> str:
     raise click.UsageError(
         f"Unknown dataset '{dataset}'. Choose one of: "
         + ", ".join(sorted(_DATASET_ALIASES))
+        + ". For generic local data, use --dataset-format + --dataset-path."
     )
+
+
+def _resolve_dataset_from_args(
+    dataset: Optional[str],
+    dataset_format: Optional[str],
+    dataset_path: Optional[str],
+    dataset_kwargs_json: str,
+) -> tuple[str, str]:
+    """Combine the three dataset-selection flags into a (spec, kwargs_json) pair.
+
+    Three valid combinations:
+      1. ``--dataset <alias-or-spec>`` only — pre-shipped dataset; kwargs
+         come solely from ``--dataset-kwargs``.
+      2. ``--dataset-format <fmt> --dataset-path <p>`` — generic adapter
+         pointed at a local file/dir/repo; extra kwargs in ``--dataset-kwargs``
+         get merged on top.
+      3. ``--dataset emboviz.module:Class --dataset-kwargs '{...}'`` —
+         power-user explicit module path.
+
+    Mutually exclusive: cannot pass both ``--dataset`` and
+    ``--dataset-format``.
+    """
+    import json
+
+    if dataset and dataset_format:
+        raise click.UsageError(
+            "Pass EITHER --dataset (alias / module:class) OR "
+            "--dataset-format (generic format shortcut), not both."
+        )
+    if not dataset and not dataset_format:
+        raise click.UsageError(
+            "Specify a dataset via either:\n"
+            "  --dataset <alias>            (e.g. bridge, libero-spatial, droid-sample)\n"
+            "  --dataset-format <fmt>       (e.g. lerobot, hdf5, mcap, rlds, hf)\n"
+            "       --dataset-path <path>   (required when --dataset-format is set)"
+        )
+
+    if dataset_format:
+        if dataset_format not in _DATASET_FORMATS:
+            raise click.UsageError(
+                f"Unknown --dataset-format '{dataset_format}'. Available: "
+                + ", ".join(sorted(_DATASET_FORMATS))
+            )
+        if not dataset_path:
+            raise click.UsageError(
+                f"--dataset-format {dataset_format} requires --dataset-path."
+            )
+        spec, path_kwarg = _DATASET_FORMATS[dataset_format]
+        extra = {}
+        if dataset_kwargs_json:
+            try:
+                extra = json.loads(dataset_kwargs_json)
+                if not isinstance(extra, dict):
+                    raise ValueError("must be a JSON object")
+            except (ValueError, json.JSONDecodeError) as e:
+                raise click.UsageError(f"--dataset-kwargs is not valid JSON: {e}")
+        if path_kwarg in extra and extra[path_kwarg] != dataset_path:
+            raise click.UsageError(
+                f"--dataset-path={dataset_path!r} conflicts with "
+                f"--dataset-kwargs key {path_kwarg}={extra[path_kwarg]!r}. "
+                f"Use one or the other."
+            )
+        extra[path_kwarg] = dataset_path
+        return spec, json.dumps(extra)
+
+    return _resolve_dataset_spec(dataset), dataset_kwargs_json
 
 
 @click.command("analyze")
@@ -93,8 +183,22 @@ def _resolve_dataset_spec(dataset: str) -> str:
               help="Model adapter alias (e.g. 'openvla', 'oft', 'pi0', 'gr00t').")
 @click.option("--model-kwargs", "model_kwargs_json", default="",
               help="JSON dict of kwargs passed to the model adapter constructor.")
-@click.option("--dataset", required=True,
-              help="Dataset alias (e.g. 'bridge', 'libero-spatial', 'droid-sample').")
+@click.option("--dataset", default=None,
+              help="Pre-shipped dataset alias (e.g. 'bridge', 'libero-spatial', "
+                   "'droid-sample') OR a full 'module.path:Class' spec. "
+                   "Mutually exclusive with --dataset-format.")
+@click.option("--dataset-format", "dataset_format", default=None,
+              type=click.Choice(sorted(_DATASET_FORMATS), case_sensitive=False),
+              help="Generic dataset / recording format for users with their "
+                   "own local data. Choose from: "
+                   + ", ".join(sorted(_DATASET_FORMATS))
+                   + ". Use together with --dataset-path. Adapter-specific "
+                     "options (camera_keys, builder_name, topic_map, ...) go "
+                     "in --dataset-kwargs.")
+@click.option("--dataset-path", "dataset_path", default=None,
+              type=click.Path(),
+              help="Path to the local dataset file / directory / HF repo id. "
+                   "Required when --dataset-format is given; ignored otherwise.")
 @click.option("--dataset-kwargs", "dataset_kwargs_json", default="",
               help="JSON dict of kwargs passed to the dataset adapter constructor.")
 @click.option("--episodes", "episodes_spec", default="0",
@@ -130,7 +234,9 @@ def _resolve_dataset_spec(dataset: str) -> str:
               help="Compute and show imitation L2 vs recorded expert action.")
 def analyze_cmd(
     model: str, model_kwargs_json: str,
-    dataset: str, dataset_kwargs_json: str,
+    dataset: Optional[str],
+    dataset_format: Optional[str], dataset_path: Optional[str],
+    dataset_kwargs_json: str,
     episodes_spec: str, frame_start: int, n_frames: int, frame_stride: int,
     target_text: str, out_dir: str,
     sensitivity_grid_side: int,
@@ -143,15 +249,32 @@ def analyze_cmd(
     Examples:
 
     \b
-        # Single episode, all frames
+        # Pre-shipped dataset (LeRobot / Bridge), all frames of episode 0
         emboviz analyze --model openvla --dataset bridge --episodes 0 \\
             --target "the spoon" --output ./report
 
     \b
-        # Multiple episodes with stride
-        emboviz analyze --model oft --dataset libero-spatial \\
-            --episodes "0,3,7,12" --frame-stride 5 \\
-            --target "the black bowl" --output ./report
+        # Local HDF5 file (Robomimic / ALOHA / Isaac Lab Mimic). The
+        # camera_keys / state_key / instruction tell the adapter where
+        # in the HDF5 hierarchy to pull each modality from.
+        emboviz analyze --model pi0 \\
+            --dataset-format hdf5 --dataset-path /data/demos.hdf5 \\
+            --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb"}, "instruction": "pick up the mug"}' \\
+            --episodes 0 --target "the white mug" --output ./report
+
+    \b
+        # RLDS / TFDS (needs `uv pip install 'emboviz[rlds]'`)
+        emboviz analyze --model gr00t \\
+            --dataset-format rlds --dataset-path /tfds \\
+            --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \\
+            --episodes 0,1 --target "the green block" --output ./report
+
+    \b
+        # MCAP deployment recording (ROS 2 / Isaac SIM)
+        emboviz analyze --model gr00t \\
+            --dataset-format mcap --dataset-path /logs/rollout.mcap \\
+            --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \\
+            --episodes 0 --target "the green block" --output ./report
 
     \b
         # All episodes (use with caution on big datasets)
@@ -169,7 +292,12 @@ def analyze_cmd(
     from emboviz._internal.report import write_episode_reports
 
     model_spec = _resolve_model_spec(model)
-    dataset_spec = _resolve_dataset_spec(dataset)
+    dataset_spec, dataset_kwargs_json = _resolve_dataset_from_args(
+        dataset=dataset,
+        dataset_format=dataset_format.lower() if dataset_format else None,
+        dataset_path=dataset_path,
+        dataset_kwargs_json=dataset_kwargs_json,
+    )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
