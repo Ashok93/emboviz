@@ -43,6 +43,9 @@ _SEVERITY_RGB = {
 
 
 PerFrameByCamera = dict[int, dict[str, np.ndarray]]
+PerFrameDetection = dict[int, dict[str, dict]]
+PerFrameMaskedImage = dict[int, dict[str, dict[str, np.ndarray]]]
+PerFrameModalityResponse = dict[int, dict[str, float]]
 
 
 def export_rerun(
@@ -54,6 +57,9 @@ def export_rerun(
     attention_per_frame: Optional[PerFrameByCamera] = None,
     sensitivity_per_frame: Optional[PerFrameByCamera] = None,
     target_mask_per_frame: Optional[PerFrameByCamera] = None,
+    target_detection_per_frame: Optional[PerFrameDetection] = None,
+    masked_image_per_frame: Optional[PerFrameMaskedImage] = None,
+    modality_response_per_frame: Optional[PerFrameModalityResponse] = None,
 ) -> Path:
     """Emit an .rrd recording containing camera streams + diagnostic tracks.
 
@@ -64,14 +70,27 @@ def export_rerun(
         application_id: shown in the Rerun viewer title bar.
         attention_per_frame: optional ``{frame_idx → {camera_name → (H, W)
             float heatmap}}`` per-camera attention overlays. Logged at
-            ``attention/<camera>/heatmap``. Cameras not present in a
-            frame's dict are simply not logged for that frame — we never
-            attach an overlay to a camera the model didn't actually
-            attend to.
-        sensitivity_per_frame: same nested shape — per-camera BYOVLA grids,
-            logged at ``sensitivity/<camera>/heatmap``.
-        target_mask_per_frame: same nested shape — per-camera target masks,
+            ``attention/<camera>/heatmap``.
+        sensitivity_per_frame: same nested shape — per-camera occlusion
+            grids, logged at ``sensitivity/<camera>/heatmap``.
+        target_mask_per_frame: same shape — per-camera target masks,
             logged at ``target/<camera>/mask``.
+        target_detection_per_frame: ``{frame_idx → {camera → {bbox,
+            confidence, label}}}`` — GroundingDINO detections logged as
+            ``target/<camera>/bbox`` (with confidence + label text), so
+            users can verify the diagnostic targeted the right object
+            before trusting any memorization verdict on that frame.
+        masked_image_per_frame: ``{frame_idx → {camera → {fill_mode →
+            HxWxC uint8 image}}}`` — the masked-with-each-fill images
+            the memorization diagnostic actually fed to the model.
+            Logged at ``target/<camera>/masked_<fill_mode>`` so users
+            can see at a glance whether the fill made the target
+            visually disappear.
+        modality_response_per_frame: ``{frame_idx → {modality →
+            normalized Δaction}}`` — per-modality response magnitudes
+            from modality_dropout. Logged as scalar timelines at
+            ``modality/<modality>/response_normalized`` so users get a
+            line plot showing which input drives the action over time.
     """
     try:
         import rerun as rr
@@ -93,9 +112,12 @@ def export_rerun(
     rec = rr.new_recording(application_id=application_id, recording_id=recording_id)
     fps = trajectory.fps if trajectory.fps > 0 else 5.0
 
-    attention_per_frame = attention_per_frame or {}
-    sensitivity_per_frame = sensitivity_per_frame or {}
-    target_mask_per_frame = target_mask_per_frame or {}
+    attention_per_frame          = attention_per_frame          or {}
+    sensitivity_per_frame        = sensitivity_per_frame        or {}
+    target_mask_per_frame        = target_mask_per_frame        or {}
+    target_detection_per_frame   = target_detection_per_frame   or {}
+    masked_image_per_frame       = masked_image_per_frame       or {}
+    modality_response_per_frame  = modality_response_per_frame  or {}
 
     def _per_camera_for_frame(
         store: PerFrameByCamera, frame_idx: int, fallback_i: int,
@@ -162,8 +184,82 @@ def export_rerun(
                 rr.Image(_mask_to_rgb(tmask)), recording=rec,
             )
 
-        # Action vectors + per-frame action delta to expert.
+        # Per-camera GroundingDINO detection metadata (bbox + label +
+        # confidence). Lets the user verify the diagnostic targeted the
+        # RIGHT object before trusting any memorization verdict.
+        for cam, det in _per_camera_for_frame(
+            target_detection_per_frame, frame_idx, i,
+        ).items():
+            if cam not in scene_cameras:
+                continue
+            x0, y0, x1, y1 = det.get("bbox", (0, 0, 0, 0))
+            label = det.get("label", "")
+            conf  = float(det.get("confidence", 0.0))
+            try:
+                rr.log(
+                    f"target/{cam}/bbox",
+                    rr.Boxes2D(
+                        array=[[x0, y0, x1, y1]],
+                        array_format=rr.Box2DFormat.XYXY,
+                        labels=[f"{label} ({conf:.2f})"],
+                    ),
+                    recording=rec,
+                )
+            except Exception:
+                # Older rerun-sdk versions had a different Boxes2D API.
+                # Fall back to a text annotation; bbox geometry is
+                # still in the mask logged above.
+                rr.log(
+                    f"target/{cam}/label",
+                    rr.TextDocument(
+                        f"detected '{label}' "
+                        f"conf {conf:.2f} bbox {(x0, y0, x1, y1)}"
+                    ),
+                    recording=rec,
+                )
+
+        # Per-fill masked images — what the diagnostic actually fed to
+        # the model when computing Δaction for memorization.
+        for cam, fills in _per_camera_for_frame(
+            masked_image_per_frame, frame_idx, i,
+        ).items():
+            if cam not in scene_cameras:
+                continue
+            for fill_mode, masked_arr in fills.items():
+                rr.log(
+                    f"target/{cam}/masked_{fill_mode}",
+                    rr.Image(np.asarray(masked_arr)),
+                    recording=rec,
+                )
+
+        # Per-modality response scalars (modality attribution line plot).
+        mod_resp = (
+            modality_response_per_frame.get(frame_idx)
+            or modality_response_per_frame.get(i)
+            or {}
+        )
+        for modality, value in mod_resp.items():
+            # Sanitize modality name for Rerun's path namespace.
+            safe = modality.replace(":", "_").replace("/", "_")
+            rr.log(
+                f"modality/{safe}/response_normalized",
+                _Scalar(float(value)),
+                recording=rec,
+            )
+
+        # Action vectors + per-frame action delta to expert + frame-to-
+        # frame action shift magnitude. The shift magnitude highlights
+        # "abrupt change moments" — common right before deployment
+        # failures (the policy lurched into the wrong direction).
         baseline_action = _find_baseline_action(scene, per_axis_results, i)
+        if i > 0 and baseline_action is not None:
+            prev_baseline = _find_baseline_action(
+                trajectory.frames[i - 1], per_axis_results, i - 1,
+            )
+            if prev_baseline is not None and len(prev_baseline) == len(baseline_action):
+                shift = float(np.linalg.norm(baseline_action - prev_baseline))
+                rr.log("predictions/frame_to_frame_shift",
+                       _Scalar(shift), recording=rec)
         expert = scene.metadata.get("expert_action")
         if baseline_action is not None:
             dim_names = _action_dim_names(scene, len(baseline_action))

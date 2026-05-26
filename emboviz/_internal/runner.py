@@ -330,23 +330,73 @@ def run_story(args) -> None:
             cam: np.asarray(g, dtype=np.float32) for cam, g in grids.items()
         }
 
+    # Per-frame GroundingDINO detection + per-fill masked image overlays.
+    # The user must be able to VERIFY visually that GD nailed the right
+    # object; a memorization verdict on a wrong mask is useless. We log
+    # the detected bbox + label + confidence + each fill-mode's masked
+    # image to Rerun so they can scrub through and check.
+    target_detection_per_frame: dict[int, dict[str, dict]] = {}
+    masked_image_per_frame:    dict[int, dict[str, dict[str, np.ndarray]]] = {}
     if gd_sam is not None and "vision.memorization" in per_axis:
+        from emboviz.diagnostics.memorization import _apply_fill
+        from emboviz.perturb.image._image_utils import to_array
         for i, r in enumerate(per_axis["vision.memorization"].per_frame):
             raw = r.raw or {}
             detected = raw.get("detected_cameras") or []
             if not detected:
                 continue
             scene = trajectory.frames[i]
-            cam_masks = {}
+            cam_masks: dict[str, np.ndarray] = {}
+            cam_detection: dict[str, dict] = {}
+            cam_masked_per_fill: dict[str, dict[str, np.ndarray]] = {}
+            fill_modes = raw.get("min_mask_contrast")  # fallback below
+            fill_modes_list = list((raw.get("per_fill") or {}).keys()) or [
+                "channel_mean", "gaussian_blur",
+            ]
+            per_cam_det_meta = raw.get("per_camera_detection") or {}
             for cam in detected:
                 probe = scene.with_image(scene.observations.images[cam].data, camera="primary") \
                         if cam != "primary" and "primary" in scene.observations.images \
                         else scene.with_image(scene.observations.images[cam].data, camera=cam)
                 det = gd_sam(probe)
-                if det is not None and det.mask is not None:
-                    cam_masks[cam] = det.mask
+                if det is None or det.mask is None:
+                    continue
+                cam_masks[cam] = det.mask
+                cam_detection[cam] = {
+                    "label":      det.label,
+                    "bbox":       list(det.bbox),
+                    "confidence": float(det.confidence),
+                }
+                # Re-apply each fill mode so we can log the masked image
+                # users will see in Rerun (same fills the diagnostic used
+                # internally; deterministic).
+                arr = to_array(scene.observations.images[cam].data)
+                cam_masked_per_fill[cam] = {
+                    fm: _apply_fill(arr, det.mask, fm) for fm in fill_modes_list
+                }
             if cam_masks:
                 target_mask_per_frame[trajectory.frame_indices[i]] = cam_masks
+            if cam_detection:
+                target_detection_per_frame[trajectory.frame_indices[i]] = cam_detection
+            if cam_masked_per_fill:
+                masked_image_per_frame[trajectory.frame_indices[i]] = cam_masked_per_fill
+
+    # Per-frame per-modality response magnitudes — feeds the "modality
+    # attribution" line plot in Rerun. From modality_dropout's per-frame
+    # raw["per_modality"][modality]["mean_response_normalized"].
+    modality_response_per_frame: dict[int, dict[str, float]] = {}
+    if "input.modality_dropout" in per_axis:
+        for i, r in enumerate(per_axis["input.modality_dropout"].per_frame):
+            raw = r.raw or {}
+            per_mod = raw.get("per_modality") or {}
+            if not per_mod:
+                continue
+            per: dict[str, float] = {}
+            for modality, sub in per_mod.items():
+                if isinstance(sub, dict) and "mean_response_normalized" in sub:
+                    per[modality] = float(sub["mean_response_normalized"])
+            if per:
+                modality_response_per_frame[trajectory.frame_indices[i]] = per
 
     print(f"      attention frames: {len(attention_per_frame)}", flush=True)
     print(f"      sensitivity frames: {len(sensitivity_per_frame)}", flush=True)
@@ -529,6 +579,9 @@ def run_story(args) -> None:
             attention_per_frame=attention_per_frame,
             sensitivity_per_frame=sensitivity_per_frame,
             target_mask_per_frame=target_mask_per_frame,
+            target_detection_per_frame=target_detection_per_frame,
+            masked_image_per_frame=masked_image_per_frame,
+            modality_response_per_frame=modality_response_per_frame,
         )
         print(f"      wrote {rrd_path} ({rrd_path.stat().st_size:,} bytes)", flush=True)
     except Exception as e:
