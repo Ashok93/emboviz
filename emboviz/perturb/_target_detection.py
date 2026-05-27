@@ -42,6 +42,12 @@ class TargetDetection:
     mask: Optional[np.ndarray] = None
     label: str = ""
     confidence: float = 1.0
+    # When the detector masks MULTIPLE instances of the phrase (e.g. every
+    # spoon in a drawer), `mask` is the UNION over instances and these hold
+    # the per-instance boxes / scores for display + transparency. `bbox` is
+    # then the union's bounding box.
+    all_boxes: Optional[list[tuple[int, int, int, int]]] = None
+    all_scores: Optional[list[float]] = None
 
 
 class TargetDetector(Protocol):
@@ -284,19 +290,23 @@ class GroundingDINOSAMDetector:
         scores = results["scores"].cpu().numpy()
         if boxes.size == 0:
             return None
-        best = int(np.argmax(scores))
-        score = float(scores[best])
-        if score < self.min_confidence:
+        # Keep EVERY instance above min_confidence — not just the top-1. In
+        # cluttered scenes (a drawer full of spoons) the single highest-
+        # scoring box is often not the task-relevant instance, so masking
+        # only it produces a meaningless memorization verdict. We mask ALL
+        # instances of the phrase and union their masks.
+        keep = [i for i in range(len(scores)) if float(scores[i]) >= self.min_confidence]
+        if not keep:
             return None
-        x0, y0, x1, y1 = boxes[best].astype(int)
-        bbox = (int(x0), int(y0), int(x1), int(y1))
+        inst_boxes = [tuple(int(v) for v in boxes[i].astype(int)) for i in keep]
+        inst_scores = [float(scores[i]) for i in keep]
 
-        # SAM refinement — pixel-accurate mask. SAM was required at load
-        # time, so any failure here is a real bug we want surfaced
-        # (rather than papered over with a coarse bbox fill).
+        # SAM refinement — pixel-accurate mask per instance, one batched call.
+        # SAM was required at load time, so any failure here is a real bug we
+        # surface (rather than paper over with a coarse bbox fill).
         sam_proc, sam_model = self._sam
         sam_inputs = sam_proc(
-            pil, input_boxes=[[list(bbox)]], return_tensors="pt",
+            pil, input_boxes=[[list(b) for b in inst_boxes]], return_tensors="pt",
         ).to(self.device)
         with torch.inference_mode():
             sam_out = sam_model(**sam_inputs, multimask_output=False)
@@ -307,11 +317,25 @@ class GroundingDINOSAMDetector:
         )
         if not masks or len(masks) == 0 or masks[0].shape[0] == 0:
             raise RuntimeError(
-                f"SAM returned no mask for bbox {bbox} on a phrase that "
-                f"GroundingDINO scored at {score:.3f}. Likely a SAM "
-                "preprocessing edge case — investigate rather than fall "
-                "back to bbox-only."
+                f"SAM returned no mask for {len(inst_boxes)} box(es) on a phrase "
+                f"GroundingDINO scored up to {max(inst_scores):.3f}. Likely a SAM "
+                "preprocessing edge case — investigate rather than fall back to bbox-only."
             )
-        mask = masks[0][0][0].numpy().astype(bool)
+        # Union every instance's mask into one (covers all spoons, etc.).
+        per_instance = masks[0]  # (N, 1, H, W)
+        union: Optional[np.ndarray] = None
+        for k in range(per_instance.shape[0]):
+            m = per_instance[k][0].numpy().astype(bool)
+            union = m if union is None else (union | m)
+        if union is None or not union.any():
+            return None
+        ys, xs = np.where(union)
+        union_bbox = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+        n = len(inst_boxes)
+        label = phrase if n == 1 else f"{phrase} ×{n}"
 
-        return TargetDetection(bbox=bbox, mask=mask, label=phrase, confidence=score)
+        return TargetDetection(
+            bbox=union_bbox, mask=union, label=label,
+            confidence=max(inst_scores),
+            all_boxes=inst_boxes, all_scores=inst_scores,
+        )

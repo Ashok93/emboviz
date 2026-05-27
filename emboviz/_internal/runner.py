@@ -366,6 +366,10 @@ def run_story(args) -> None:
                     "label":      det.label,
                     "bbox":       list(det.bbox),
                     "confidence": float(det.confidence),
+                    # per-instance boxes when multiple instances were masked
+                    # (e.g. every spoon) — so the viz draws each, not just the union.
+                    "all_boxes":  [list(b) for b in det.all_boxes] if det.all_boxes else None,
+                    "all_scores": det.all_scores,
                 }
                 # Re-apply each fill mode so we can log the masked image
                 # users will see in Rerun (same fills the diagnostic used
@@ -582,6 +586,7 @@ def run_story(args) -> None:
             target_detection_per_frame=target_detection_per_frame,
             masked_image_per_frame=masked_image_per_frame,
             modality_response_per_frame=modality_response_per_frame,
+            trajectory_axis_results=trajectory_axes,
         )
         print(f"      wrote {rrd_path} ({rrd_path.stat().st_size:,} bytes)", flush=True)
     except Exception as e:
