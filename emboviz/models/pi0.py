@@ -347,15 +347,22 @@ class Pi0Adapter(VLAModel):
     #     image token in raster order) and preserving real grounding
     #     signal on the rest.
     ATTENTION_PROFILE = {
-        "recommended_layer_range_fraction": (0.25, 0.75),
-        "sink_top_pct_to_mask": 0.05,
+        "recommended_layer_range_fraction": (0.25, 0.85),
+        # Localization-head selection (arXiv:2503.06287) isolates the few
+        # grounding heads; with it, blanket sink-cell masking is unnecessary
+        # and not used by the paper. Keep at 0.
+        "sink_top_pct_to_mask": 0.0,
+        "localization_heads_topk": 3,
+        "localization_smooth_sigma": 1.0,
+        "exclude_first_n_layers": 2,
         "literature_citation":
-            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
-            "(arXiv:2508.20279) — generalises to Gemma-2B/PaliGemma. "
-            "Sink 5%: PaliGemma paper (arXiv:2407.07726) §4 + "
-            "'To Sink or Not to Sink' (arXiv:2510.08510) — prefix-LM "
-            "architectures have moderate spatial sinks weaker than "
-            "Qwen3-VL but present.",
+            "Method: 'Your Large Vision-Language Model Only Needs A Few "
+            "Attention Heads For Visual Grounding' (CVPR 2025, "
+            "arXiv:2503.06287) — query = last instruction token; select "
+            "localization heads by image-mass + spatial entropy; sum top-k "
+            "(no gradient, no sink removal). Layer range (mid-to-late, "
+            "exclude first 2): same paper + 'How Multimodal LLMs Solve "
+            "Image Tasks' (arXiv:2508.20279) for Gemma-2B/PaliGemma.",
     }
 
     @property
@@ -446,11 +453,23 @@ class Pi0Adapter(VLAModel):
         We monkey-patch ``modeling_gemma.eager_attention_forward`` to
         capture ``attn_weights`` as a side effect — same exact computation
         openpi runs, no re-call, no mask reconstruction, no risk of mask
-        mismatch. The first ``num_hidden_layers`` captured entries are
-        the PREFIX-only forward (the first ``paligemma_with_expert.forward``
-        call inside ``sample_actions``, with ``suffix_embs=None``);
-        subsequent entries are the per-denoise-step forwards which
-        include the action expert stream — we ignore those.
+        mismatch. The first ``num_hidden_layers`` captured entries are the
+        PREFIX forward (image+text, bidirectional); subsequent entries are the
+        per-denoise-step action-expert forwards.
+
+        **Which signal: instruction-token → image (the PREFIX), per the
+        visual-grounding literature.** Per *Your LVLM Only Needs A Few
+        Attention Heads For Visual Grounding* (CVPR 2025, arXiv:2503.06287)
+        the object-localization signal in a VLM is the LAST input TEXT
+        token's attention over the image patches — picked out by a few
+        "localization heads", NOT a head-average. This is exactly what the
+        OpenVLA adapter queries, and why its map is clean. So we read the
+        PREFIX forward's last-instruction-token row over the image columns
+        (images lead the prefix). The action expert's suffix→prefix attention
+        — although it is what literally drives the action — is diffuse and
+        positional ("inverted", object-cold) and is NOT used for the
+        user-facing "where does the model look" map. Head selection happens
+        downstream in ``AttentionMaps.image_weights_clean``.
 
         Why not re-run paligemma standalone:
           • PaliGemma's bidirectional-prefix masking lives on the parent
@@ -545,31 +564,62 @@ class Pi0Adapter(VLAModel):
                 "of times — openpi's layer loop may have changed."
             )
 
-        # First n_layers captures = the prefix-only forward. The
-        # subsequent denoise_step forwards include the action expert
-        # stream and have a longer key sequence (we'd need to slice
-        # them — defer for now; prefix attention is what user-facing
-        # diagnostics want).
-        prefix_attns = captured_attns[:n_layers]
-        # Verify all prefix-forward attentions have the same key length
-        # (== prefix sequence length).
-        prefix_seq_len = int(capture_meta["prefix_embs_shape"][1])
-        for li, attn in enumerate(prefix_attns):
-            if attn.shape[-1] != prefix_seq_len:
-                raise RuntimeError(
-                    f"Pi0Adapter.extract_attention: prefix layer {li} "
-                    f"attention has key-length {attn.shape[-1]} but "
-                    f"prefix_embs has seq-length {prefix_seq_len}. The "
-                    "captured tensor is from a non-prefix forward."
-                )
-
+        # ── Last-instruction-token → image attention (PaliGemma prefix) ──
+        # The visual-grounding signal is the LAST input TEXT token's attention
+        # over the image tokens (arXiv:2503.06287; this is exactly what the
+        # OpenVLA adapter queries via `before_action` → full_seq_len-1, and why
+        # OpenVLA's map is clean). It is NOT the action expert's suffix→prefix
+        # attention, which is diffuse and positional ("inverted", object-cold).
+        #
+        # π0's PaliGemma prefix is processed FIRST (captured_attns[:n_layers]);
+        # its sequence is [image tokens (all cameras) ; language tokens] and is
+        # bidirectional. We take the LAST VALID prefix token (the final
+        # instruction token, which has aggregated the whole sentence's grounding
+        # under bidirectional attention) as the query row, and read its
+        # attention over the image key columns (images lead the prefix). The
+        # localization-head selection in AttentionMaps.image_weights_clean then
+        # isolates the few grounding heads.
         n_images = int(capture_meta["n_images"])
-        prefix_pad_masks = capture_meta["prefix_pad_masks"]
 
-        # Resolve query position.
-        full_seq = prefix_seq_len
-        # Image tokens come first in embed_prefix output. Per-image
-        # token count comes from the SigLIP vision tower config.
+        prefix_attns = captured_attns[:n_layers]
+        prefix_len = int(prefix_attns[0].shape[-1])
+        for li, attn in enumerate(prefix_attns):
+            if attn.shape[-2] != prefix_len or attn.shape[-1] != prefix_len:
+                raise RuntimeError(
+                    f"Pi0Adapter.extract_attention: prefix capture {li} has "
+                    f"shape {tuple(attn.shape)}; expected square "
+                    f"({prefix_len},{prefix_len}) prefix self-attention."
+                )
+        pad = capture_meta.get("prefix_pad_masks")
+        if pad is None:
+            raise RuntimeError(
+                "Pi0Adapter.extract_attention: prefix pad mask not captured; "
+                "cannot locate the last instruction token."
+            )
+        valid_positions = np.where(np.asarray(pad[0].cpu().numpy()).astype(bool))[0]
+        if valid_positions.size == 0:
+            raise RuntimeError(
+                "Pi0Adapter.extract_attention: prefix pad mask is all-False — "
+                "no valid prefix token to query."
+            )
+        query_pos = int(valid_positions[-1])    # last instruction token
+
+        # Last instruction token's attention to image, per layer & head, with
+        # the CONTENT-INDEPENDENT attention-sink component removed (subtract the
+        # query-averaged attention; sinks are high for every query and cancel,
+        # instruction-specific grounding survives). Xiao et al. 2309.17453.
+        per_layer = []
+        for layer in range(n_layers):
+            a = prefix_attns[layer][0]                          # (H, S, S)
+            row = a[:, query_pos, :].float().cpu().numpy()      # (H, S) last-token → keys
+            marg = a.float().mean(dim=1).cpu().numpy()          # (H, S) query-averaged (sink)
+            per_layer.append(np.clip(row - marg, 0.0, None))
+        weights = np.stack(per_layer, axis=0)                   # (L, H, prefix_len)
+        full_seq = prefix_len
+        action_horizon = int(pi0_model.config.action_horizon)   # informational
+
+        # Per-image token grid side (SigLIP vision tower). Image tokens lead
+        # the prefix, so the image key columns are [0, tokens_per_image*N).
         vt = paligemma_with_expert.paligemma.model.vision_tower
         vis_cfg = vt.config if hasattr(vt, "config") else \
                   paligemma_with_expert.paligemma.config.vision_config
@@ -578,50 +628,14 @@ class Pi0Adapter(VLAModel):
         side_per_image = image_size // patch_size
         tokens_per_image = side_per_image * side_per_image
 
-        # openpi pads the language sequence to a fixed length. The
-        # tail of the prefix is PADDING (prefix_pad_masks=False), not
-        # a real token, so its hidden state / attention is uninformative
-        # — reading from that position gives degenerate uniform softmax.
-        # We resolve "last" / "before_action" to the LAST VALID position
-        # (the last True index in prefix_pad_masks).
-        valid_mask_np = prefix_pad_masks[0].cpu().numpy().astype(bool)
-        valid_positions = np.where(valid_mask_np)[0]
-        if valid_positions.size == 0:
-            raise RuntimeError(
-                "Pi0Adapter.extract_attention: prefix_pad_masks has no "
-                "valid positions — entire prefix is padding. Adapter / "
-                "observation_builder bug."
-            )
-        last_valid_pos = int(valid_positions[-1])
-
-        if query.position is not None:
-            query_pos = int(query.position)
-        elif query.relative == "last" or query.relative == "before_action":
-            # Last VALID prefix token — the one whose hidden state
-            # actually conditions the action head.
-            query_pos = last_valid_pos
-        elif query.relative == "first":
-            query_pos = 0
-        else:
-            query_pos = last_valid_pos
-
-        per_layer = [
-            attn[0, :, query_pos, :].float().cpu().numpy()
-            for attn in prefix_attns
-        ]
-        weights = np.stack(per_layer, axis=0)   # (L, H, n_keys)
-
-        # Sanity gate: confirm attention at the chosen query position is
-        # not uniform across keys (which would indicate a degenerate
-        # mask / impl rather than a real verdict).
+        # Sanity gate: the instruction-token→image attention must not be
+        # uniform across keys (uniform = degenerate mask/impl, not a verdict).
         first_row = weights[0, 0, :]
         if np.allclose(first_row, first_row[0], atol=1e-9):
             raise RuntimeError(
-                f"Pi0Adapter.extract_attention: attention at query "
-                f"position {query_pos} (last_valid={last_valid_pos}) is "
-                f"uniform across all keys (constant "
-                f"{float(first_row[0]):.6e}). Mask / attn-impl / "
-                "position is wrong — refusing to return degenerate output."
+                "Pi0Adapter.extract_attention: prefix attention is uniform "
+                "across all keys — degenerate mask/impl. Refusing to return "
+                "degenerate output."
             )
 
         # Per-camera image-token ranges. Cameras appear in the order
@@ -661,9 +675,128 @@ class Pi0Adapter(VLAModel):
                 "n_images":      n_images,
                 "tokens_per_image": tokens_per_image,
                 "side_per_image":   side_per_image,
-                "n_layers":      int(len(prefix_attns)),
-                "query_pos":     int(query_pos),
-                "last_valid_pos": int(last_valid_pos),
+                "n_prefix_layers":  int(n_layers),
+                "action_horizon":   int(action_horizon),
+                "query_token":      "last_instruction_token (PaliGemma prefix)",
+                "attention_source": "instruction-token->image (PaliGemma prefix self-attention, localization heads)",
+            },
+        )
+
+    def extract_attention_trace(self, scene: Scene):
+        """Per-denoise-step, per-head action-expert cross-attention to the image.
+
+        This is the signal the pi0.5 attention visualizer shows: the action
+        expert only sees the image THROUGH cross-attention, and that attention
+        SHARPENS across the flow-matching denoise steps (diffuse at t=0, locked
+        onto task objects at the last step). We capture the action-expert
+        attention at EVERY denoise step and keep the head axis, so the
+        visualizer can scrub t=0..last and toggle heads. No averaging over
+        steps, no head-mean baked in, no calibration — raw attention.
+        """
+        if not self.use_pytorch:
+            from emboviz.models.protocol import NotSupported
+            raise NotSupported("extract_attention_trace requires use_pytorch=True.")
+        import torch
+        from emboviz.core.types import AttentionTrace
+
+        reason = self._required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"Pi0Adapter.extract_attention_trace: {reason}")
+
+        pi0_model = self._policy._model
+        pwe = pi0_model.paligemma_with_expert
+        n_layers = int(pwe.paligemma.config.text_config.num_hidden_layers)
+        from openpi.models_pytorch import gemma_pytorch as _gp
+        from transformers.models.gemma import modeling_gemma as _mg
+
+        captured: list = []
+        meta: dict = {}
+        orig_embed = pi0_model.embed_prefix
+        orig_eager = _mg.eager_attention_forward
+
+        def p_embed(images, img_masks, lang_tokens, lang_masks):
+            meta["n_images"] = len(images)
+            return orig_embed(images, img_masks, lang_tokens, lang_masks)
+
+        def p_eager(module, q, k, v, attention_mask=None, scaling=None, **kw):
+            out, w = orig_eager(module, q, k, v, attention_mask=attention_mask,
+                                scaling=scaling, **kw)
+            captured.append(w.detach())
+            return out, w
+
+        pi0_model.embed_prefix = p_embed
+        _mg.eager_attention_forward = p_eager
+        _gp_orig = getattr(_gp, "eager_attention_forward", None)
+        if hasattr(_gp, "modeling_gemma"):
+            _gp.modeling_gemma.eager_attention_forward = p_eager
+        try:
+            with torch.inference_mode():
+                _ = self._policy.infer(self._observation_builder(scene))
+        finally:
+            pi0_model.embed_prefix = orig_embed
+            _mg.eager_attention_forward = orig_eager
+            if hasattr(_gp, "modeling_gemma"):
+                _gp.modeling_gemma.eager_attention_forward = orig_eager
+            if _gp_orig is not None:
+                _gp.eager_attention_forward = _gp_orig
+
+        if "n_images" not in meta:
+            raise RuntimeError("extract_attention_trace: embed_prefix was not invoked.")
+        n_images = int(meta["n_images"])
+
+        # captured = [prefix layers] + [n_steps × expert layers]; keep the
+        # denoise (action-expert) sweeps only.
+        denoise = captured[n_layers:]
+        if not denoise:
+            raise RuntimeError("extract_attention_trace: no denoise-step attention captured.")
+        n_steps = len(denoise) // n_layers
+        if n_steps == 0:
+            raise RuntimeError("extract_attention_trace: <1 full expert sweep captured.")
+        suffix_len = int(denoise[0].shape[-2])
+        n_heads = int(denoise[0].shape[1])
+        action_horizon = int(pi0_model.config.action_horizon)
+        action_rows = slice(suffix_len - action_horizon, suffix_len)
+
+        # SigLIP grid; image tokens lead the prefix (cols [0, tpi*N)).
+        vt = pwe.paligemma.model.vision_tower
+        vis = vt.config if hasattr(vt, "config") else pwe.paligemma.config.vision_config
+        side = int(vis.image_size) // int(vis.patch_size)
+        tpi = side * side
+        cams = self._image_order_for_platform()
+        if len(cams) != n_images:
+            raise RuntimeError(
+                f"extract_attention_trace: {len(cams)} image slots ({cams}) vs "
+                f"{n_images} images fed to embed_prefix."
+            )
+
+        # Per denoise step: mean over expert LAYERS, mean over the action-query
+        # rows, KEEP heads → (n_steps, H, key_len).
+        per_step = []
+        for s in range(n_steps):
+            layer_maps = [
+                denoise[s * n_layers + l][0, :, action_rows, :].float().cpu().numpy().mean(axis=1)
+                for l in range(n_layers)
+            ]
+            per_step.append(np.mean(layer_maps, axis=0))   # (H, key_len)
+        per_step = np.stack(per_step, axis=0)              # (n_steps, H, key_len)
+
+        per_camera, grid_sides = {}, {}
+        cursor = 0
+        for slot in cams:
+            cols = per_step[:, :, cursor:cursor + tpi]
+            per_camera[slot] = cols.reshape(n_steps, n_heads, side, side)
+            grid_sides[slot] = side
+            cursor += tpi
+
+        return AttentionTrace(
+            per_camera=per_camera, grid_sides=grid_sides,
+            n_steps=n_steps, n_heads=n_heads,
+            source="pi0 action-expert cross-attention",
+            query_desc="action chunk tokens (mean) × expert layers (mean), per head",
+            metadata={
+                "config_name": self.config_name,
+                "tokens_per_image": tpi, "side": side,
+                "n_denoise_steps": n_steps, "action_horizon": action_horizon,
             },
         )
 

@@ -219,13 +219,17 @@ class OpenVLAAdapter(VLAModel):
         n_image = full_seq - text_seq
         grid_side = int(np.sqrt(n_image))
 
-        # Pull attention from the chosen query position to all keys; mean
-        # over heads kept separately.
+        # Query-position attention to all keys, per layer & head, with the
+        # CONTENT-INDEPENDENT attention-sink component removed: subtract the
+        # query-averaged attention so any token attended-to regardless of query
+        # (BOS/sink) cancels and the query-specific grounding survives. (Xiao
+        # et al. 2309.17453; near no-op for LLaMA, which has weak image sinks.)
         per_layer_per_head = []
         for layer_attn in outputs.attentions:
-            # layer_attn: (1, n_heads, seq, seq)
-            row = layer_attn[0, :, query_pos, :].float().cpu().numpy()
-            per_layer_per_head.append(row)
+            a = layer_attn[0]                               # (n_heads, seq, seq)
+            row = a[:, query_pos, :].float().cpu().numpy()  # (H, seq)
+            marg = a.float().mean(dim=1).cpu().numpy()      # (H, seq) query-averaged (sink)
+            per_layer_per_head.append(np.clip(row - marg, 0.0, None))
         weights = np.stack(per_layer_per_head, axis=0)  # (L, H, n_keys)
         # OpenVLA is single-camera (the "primary" alias), single-tile. The
         # image-token slice is one contiguous run starting at position 1.

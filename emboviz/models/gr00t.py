@@ -50,37 +50,24 @@ class Gr00tAdapter(VLAModel):
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
-    # GR00T-N1.7 uses Qwen3-VL (Cosmos-Reason2-2B) as the System-2 VLM
-    # backbone. Per the documented behavior:
+    # GR00T-N1.7 is DUAL-SYSTEM: the Qwen3-VL backbone (System-2) PERCEIVES the
+    # scene; the System-1 DiT produces actions from its hidden states. The
+    # "where does the model look" map is the canonical VLM "last attention":
+    # the last instruction token's attention over the image tokens in the Qwen
+    # backbone — the SAME method that makes OpenVLA clean, just on Qwen instead
+    # of LLaMA. (The DiT action cross-attention is a separate "where it acts"
+    # view, exposed via extract_attention_trace, not this map.)
     #
-    #   - Layer range: Qwen3-VL with select_layer truncation keeps ~16
-    #     LLM layers. Visual-grounding heads cluster in the middle half
-    #     per the same multi-modal stage analysis that covers LLaVA
-    #     ("How Multimodal LLMs Solve Image Tasks", arXiv:2508.20279) —
-    #     the stage structure (early=tokenization, mid=visual-grounding,
-    #     late=prediction) is universal across LLM backbones.
-    #
-    #   - Sink masking: Qwen3-VL has documented strong attention sinks
-    #     on right-edge / corner image tokens. References:
-    #       * QwenLM/Qwen3-VL Issue #2047 — "Qwen3 VL Attention Focus"
-    #         (community-reported top-corner concentration)
-    #       * "To Sink or Not to Sink" (arXiv:2510.08510) — RoPE-induced
-    #         positional sinks in VLMs
-    #       * "Attention Debiasing for Token Pruning in VLMs"
-    #         (arXiv:2508.17807)
-    #     For an 8×8 per-tile grid these account for ~10% of cells
-    #     (the rightmost column + bottom row ≈ 15 of 64; we mask a
-    #     conservative 10% to keep most real signal).
+    # Aggregation = mean over mid-to-late layers + all heads (no head selection,
+    # no sink removal, no calibration). The DiT is truncated to `select_layer`
+    # kept layers; grounding sits in the late kept layers.
     ATTENTION_PROFILE = {
-        "recommended_layer_range_fraction": (0.25, 0.75),
-        "sink_top_pct_to_mask": 0.10,
+        "recommended_layer_range_fraction": (0.5, 1.0),
+        "sink_top_pct_to_mask": 0.0,
         "literature_citation":
-            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
-            "(arXiv:2508.20279) — generalises to Qwen3-VL. "
-            "Sink 10%: QwenLM/Qwen3-VL Issue #2047 (right-edge focus), "
-            "'To Sink or Not to Sink' (arXiv:2510.08510), and "
-            "'Attention Debiasing for Token Pruning in VLMs' "
-            "(arXiv:2508.17807).",
+            "Canonical VLM 'last attention': last text token → image tokens, "
+            "mean over mid-late layers + heads (LLaVA/Qwen-VL attention "
+            "visualizers; same recipe OpenVLA uses). Raw attention, no gradient.",
     }
 
     def __init__(
@@ -242,27 +229,46 @@ class Gr00tAdapter(VLAModel):
     def extract_attention(
         self, scene: Scene, query: TokenSelector,
     ) -> AttentionMaps:
-        """Extract per-camera attention from GR00T's Qwen3-VL backbone.
+        """Extract per-camera attention from GR00T's System-1 action DiT.
 
-        Strategy: monkey-patch the Qwen3-VL ``forward`` to inject
-        ``output_attentions=True`` while running the normal
-        ``policy.get_action`` pipeline (we discard the action output;
-        only attention is wanted). Capture attention + the input_ids +
-        image_grid_thw needed to map image tokens back to per-camera
-        spatial grids.
+        GR00T-N1.7 is a DUAL-SYSTEM model. System-2 (Qwen3-VL / Cosmos-
+        Reason2) perceives the scene and emits hidden states; System-1, a
+        Diffusion Transformer (DiT), cross-attends to those VL features to
+        denoise the action chunk. Two attention signals exist:
 
-        Multi-camera handling:
-          • Image tokens are INLINE in input_ids (marked by
-            ``image_token_id``). Multiple cameras appear as multiple
-            contiguous runs of image tokens.
-          • ``image_grid_thw`` is shape ``(N_images, 3)`` with per-image
-            ``(T, H, W)``. After Qwen3-VL's spatial merge of size
-            ``merge_size`` (default 2), each image consumes
-            ``T * (H // merge_size) * (W // merge_size)`` tokens.
-          • The order images are emitted into the prompt is determined
-            by the modality config's ``video.modality_keys`` order. We
-            reverse-map those to user-facing camera names via
-            ``self._camera_mapping`` (which maps Scene-camera → GR00T-key).
+          • VLM last-instruction-token → image self-attention ("what the model
+            perceives"). For THIS checkpoint (Cosmos-Reason2-2B truncated to
+            ``select_layer`` layers) we measured it and found it genuinely
+            diffuse — early layers are a pure border sink, late layers spread
+            broadly with no compact object blob — so it is NOT used.
+          • DiT action → image cross-attention ("where the policy reads the
+            image to act"). This is the action-relevant signal and what we
+            extract.
+
+        The DiT (``gr00t/model/modules/dit.py``, ``AlternateVLDiT``) interleaves
+        self-attention (idx%2==1) with cross-attention blocks that alternate
+        between non-image and IMAGE keys; we capture the image-cross blocks via
+        a diffusers ``AttnProcessor`` that materializes the (unmasked)
+        ``attention_probs`` (same math as the fused path), restrict to the image
+        columns, average over the action queries, and stack over
+        (image-block × denoise-step).
+
+        The raw DiT cross-attention has a strong content-independent corner/
+        border sink that buries the object signal under a head-average — the
+        exact failure the cleaning step fixes. ``AttentionMaps.
+        image_weights_clean`` removes the positional sink (cells consistently
+        hot across heads) and then selects the few most-localized heads by
+        spatial entropy and sums them (arXiv:2503.06287; attention-sink
+        removal Xiao et al. 2309.17453). Raw attention, no gradient.
+
+        Multi-camera handling: image tokens are INLINE in ``input_ids``
+        (marked by ``image_token_id``, expanded to one id per merged patch);
+        ``image_grid_thw`` gives per-image ``(T, H, W)`` so each image consumes
+        ``T*(H//merge)*(W//merge)`` tokens. Tiles map to cameras in
+        ``video.modality_keys`` order. The VLM hidden-state sequence shares the
+        ``input_ids`` length (``qwen3_backbone.forward``: ``image_mask =
+        input_ids == image_token_id``), so these column indices index the
+        captured attention directly.
         """
         import torch
 
@@ -272,94 +278,70 @@ class Gr00tAdapter(VLAModel):
 
         observation = self._build_observation(scene)
 
-        qwen_model = self.policy.model.backbone.model
-        original_forward = qwen_model.forward
+        model = self.policy.model
+        qwen_model = model.backbone.model        # Qwen3-VL VLM (perception)
 
-        # SDPA / flash-attention attention implementations silently return
-        # ``None`` for ``output_attentions=True`` (they fuse the softmax
-        # into the kernel and never materialize the attention matrix).
-        # We MUST switch to the "eager" implementation while extracting
-        # attention, then restore. Without this our patched_forward would
-        # capture ``None`` and raise the "forward was not invoked" error.
-        original_attn_impl = None
-        if hasattr(qwen_model, "set_attn_implementation"):
-            try:
-                # Best-effort read of current impl (varies by version).
-                original_attn_impl = getattr(qwen_model.config, "_attn_implementation", None)
-                qwen_model.set_attn_implementation("eager")
-            except Exception as e:
-                raise RuntimeError(
-                    f"Gr00tAdapter.extract_attention: could not switch Qwen3-VL "
-                    f"to 'eager' attention via set_attn_implementation: {e}. "
-                    "Required for attention capture — SDPA / flash-attention "
-                    "kernels never materialize the attention matrix."
-                ) from e
-        else:
-            raise RuntimeError(
-                "Gr00tAdapter.extract_attention: Qwen3-VL model does not "
-                "expose set_attn_implementation(). transformers version too "
-                "old (need >=4.43 or so). Pin a newer transformers in the "
-                "gr00t venv."
-            )
+        # Force eager attention on the Qwen LM so output_attentions returns real
+        # per-head weights (sdpa/flash return None). Saved + restored below.
+        lang = getattr(qwen_model, "language_model", None)
+        if lang is None and hasattr(qwen_model, "model"):
+            lang = getattr(qwen_model.model, "language_model", None)
+        _attn_cfgs = [qwen_model.config, getattr(qwen_model.config, "text_config", None),
+                      getattr(lang, "config", None)]
+        _saved_impl = [(c, getattr(c, "_attn_implementation", None)) for c in _attn_cfgs if c is not None]
+        for c, _ in _saved_impl:
+            c._attn_implementation = "eager"
 
-        captured: dict = {
-            "attentions":     None,
-            "input_ids":      None,
-            "image_grid_thw": None,
-        }
+        # Capture the VLM's per-layer attention + input_ids/grid by wrapping the
+        # backbone's call to the Qwen model with output_attentions=True. The
+        # return is unchanged (hidden_states intact) so get_action still runs.
+        captured_meta: dict = {"input_ids": None, "image_grid_thw": None, "attentions": None}
+        original_qwen_forward = qwen_model.forward
 
-        def patched_forward(*args, **kwargs):
+        def meta_capture_forward(*args, **kwargs):
+            captured_meta["input_ids"] = kwargs.get("input_ids", args[0] if args else None)
+            captured_meta["image_grid_thw"] = kwargs.get("image_grid_thw")
             kwargs["output_attentions"] = True
-            result = original_forward(*args, **kwargs)
-            captured["attentions"]     = result.attentions
-            captured["input_ids"]      = kwargs.get("input_ids", args[0] if args else None)
-            captured["image_grid_thw"] = kwargs.get("image_grid_thw")
-            return result
+            out = original_qwen_forward(*args, **kwargs)
+            if getattr(out, "attentions", None) is not None:
+                captured_meta["attentions"] = tuple(a.detach() for a in out.attentions)
+            return out
 
-        qwen_model.forward = patched_forward
+        qwen_model.forward = meta_capture_forward
         try:
             with torch.inference_mode():
                 _ = self.policy.get_action(observation)
         finally:
-            qwen_model.forward = original_forward
-            if original_attn_impl is not None:
-                try:
-                    qwen_model.set_attn_implementation(original_attn_impl)
-                except Exception:
-                    pass  # best-effort restore
+            qwen_model.forward = original_qwen_forward
+            for c, impl in _saved_impl:
+                c._attn_implementation = impl
 
-        if captured["attentions"] is None:
+        input_ids = captured_meta["input_ids"]
+        image_grid_thw = captured_meta["image_grid_thw"]
+        attentions = captured_meta["attentions"]
+        if input_ids is None or image_grid_thw is None or not attentions:
             raise RuntimeError(
-                "Gr00tAdapter.extract_attention: Qwen3-VL forward was "
-                "not invoked during policy.get_action — the patched "
-                "forward never ran. This indicates a GR00T-policy code "
-                "path change; review gr00t/model/gr00t_n1d7."
+                "Gr00tAdapter.extract_attention: VLM forward did not yield "
+                "output_attentions / input_ids / image_grid_thw (eager attention "
+                "may not have taken effect)."
             )
 
-        # Build (n_layers, n_heads, n_keys) attention tensor at query_pos.
-        attns = captured["attentions"]
-        input_ids = captured["input_ids"]
-        image_grid_thw = captured["image_grid_thw"]
-
-        full_seq = int(attns[0].shape[-1])
-
-        # Resolve query position.
-        if query.position is not None:
-            query_pos = int(query.position)
-        elif query.relative == "last" or query.relative == "before_action":
-            # GR00T predicts actions via a separate diffusion head conditioned
-            # on the LM hidden states; "before_action" is the LAST LM position
-            # whose hidden state feeds the action head.
-            query_pos = full_seq - 1
-        elif query.relative == "first":
-            query_pos = 0
-        else:
-            query_pos = full_seq - 1
-
-        per_layer = [
-            layer_attn[0, :, query_pos, :].float().cpu().numpy() for layer_attn in attns
-        ]
-        weights = np.stack(per_layer, axis=0)   # (L, H, n_keys)
+        # Last text token's attention to the image, per layer & head, with the
+        # CONTENT-INDEPENDENT attention-sink component removed. An attention
+        # sink / ViT register token (Xiao et al. 2309.17453; Darcet et al.
+        # "ViTs Need Registers" ICLR'24) is attended-to regardless of the query
+        # — e.g. Qwen's corner patches. We isolate the instruction-SPECIFIC
+        # grounding by subtracting the query-averaged attention (the
+        # content-independent component) from the last-token row, per (layer,
+        # head): sink tokens are high in BOTH and cancel; grounding survives.
+        full_seq = int(attentions[0].shape[-1])
+        query_pos = full_seq - 1
+        per_layer = []
+        for a in attentions:
+            row = a[0, :, query_pos, :].float().cpu().numpy()       # (H, S)  last-token → keys
+            marg = a[0].float().mean(dim=1).cpu().numpy()           # (H, S)  query-averaged (sink)
+            per_layer.append(np.clip(row - marg, 0.0, None))        # content-specific
+        weights = np.stack(per_layer, axis=0)  # (L, H, full_seq)
 
         # ---- Map image tokens to per-camera ranges ----
         image_token_id = qwen_model.config.image_token_id
@@ -481,17 +463,148 @@ class Gr00tAdapter(VLAModel):
 
         return AttentionMaps(
             weights=weights,
-            query_position=query_pos,
+            query_position=int(query_pos),   # last instruction token of the VLM
             n_keys=full_seq,
             image_token_ranges=image_token_ranges,
             image_grid_sides=image_grid_sides,
             metadata={
                 "attention_profile": self.ATTENTION_PROFILE,
-                "select_layer": len(attns),
+                "attention_source": "Qwen3-VL backbone: last-instruction-token -> image (canonical last attention)",
+                "query_token": "last_instruction_token (Qwen3-VL VLM)",
+                "n_vlm_layers": int(weights.shape[0]),
                 "image_grid_thw": thw_np.tolist(),
                 "merge_size": merge_size,
                 "n_image_tokens_total": int(image_positions.size),
             },
+        )
+
+    def extract_attention_trace(self, scene: Scene):
+        """Per-denoise-step, per-head DiT image cross-attention (action → image).
+
+        GR00T's System-1 DiT cross-attends to the image VL tokens to denoise the
+        action chunk; like π0, that attention sharpens across denoise steps. We
+        capture the image-cross-attention at EVERY denoise step, keep the head
+        axis, and map to the per-camera grid — so the visualizer can scrub the
+        denoise steps and toggle heads. No averaging over steps, no head-mean.
+        """
+        import torch
+        from emboviz.core.types import AttentionTrace
+
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"Gr00tAdapter.extract_attention_trace: {reason}")
+
+        observation = self._build_observation(scene)
+        model = self.policy.model
+        qwen_model = model.backbone.model
+        dit = model.action_head.model
+
+        captured_meta: dict = {"input_ids": None, "image_grid_thw": None}
+        original_qwen_forward = qwen_model.forward
+
+        def meta_capture_forward(*args, **kwargs):
+            captured_meta["input_ids"] = kwargs.get("input_ids", args[0] if args else None)
+            captured_meta["image_grid_thw"] = kwargs.get("image_grid_thw")
+            return original_qwen_forward(*args, **kwargs)
+
+        n_text_every = int(getattr(dit, "attend_text_every_n_blocks", 2))
+        image_block_idxs = [
+            i for i in range(len(dit.transformer_blocks))
+            if (i % 2 == 0) and (i % (2 * n_text_every) != 0)
+        ]
+        if not image_block_idxs:
+            raise RuntimeError("extract_attention_trace: no DiT image-cross blocks found.")
+        n_blocks = len(image_block_idxs)
+
+        dit_attns: list = []   # appended in call order: [step0 blocks...][step1 blocks...]...
+
+        class _Capture:
+            def __call__(self, attn, hidden_states, encoder_hidden_states=None,
+                         attention_mask=None, temb=None, **kwargs):
+                q = attn.to_q(hidden_states)
+                ehs = hidden_states if encoder_hidden_states is None else encoder_hidden_states
+                if encoder_hidden_states is not None and attn.norm_cross:
+                    ehs = attn.norm_encoder_hidden_states(ehs)
+                k = attn.to_k(ehs); v = attn.to_v(ehs)
+                q = attn.head_to_batch_dim(q); k = attn.head_to_batch_dim(k); v = attn.head_to_batch_dim(v)
+                probs = attn.get_attention_scores(q, k, None)
+                bh, tq, tk = probs.shape; h = attn.heads
+                dit_attns.append(probs.detach().float().cpu().reshape(bh // h, h, tq, tk)[0].numpy())
+                out = torch.bmm(probs, v)
+                out = attn.batch_to_head_dim(out)
+                out = attn.to_out[0](out); out = attn.to_out[1](out)
+                return out
+
+        original_procs = {}
+        for i in image_block_idxs:
+            m = dit.transformer_blocks[i].attn1
+            original_procs[i] = m.processor
+            m.set_processor(_Capture())
+        qwen_model.forward = meta_capture_forward
+        try:
+            with torch.inference_mode():
+                _ = self.policy.get_action(observation)
+        finally:
+            qwen_model.forward = original_qwen_forward
+            for i, proc in original_procs.items():
+                dit.transformer_blocks[i].attn1.set_processor(proc)
+
+        input_ids = captured_meta["input_ids"]
+        image_grid_thw = captured_meta["image_grid_thw"]
+        if input_ids is None or image_grid_thw is None or not dit_attns:
+            raise RuntimeError("extract_attention_trace: VLM meta / DiT attention not captured.")
+
+        n_steps = len(dit_attns) // n_blocks
+        if n_steps == 0:
+            raise RuntimeError("extract_attention_trace: <1 full denoise sweep of image blocks.")
+        n_heads = int(dit_attns[0].shape[0])
+        # per step: mean over action queries (Tq) then mean over image blocks → (H, Tk)
+        per_step = []
+        for s in range(n_steps):
+            block_maps = [dit_attns[s * n_blocks + b].mean(axis=1) for b in range(n_blocks)]  # (H,Tk)
+            per_step.append(np.mean(block_maps, axis=0))
+        per_step = np.stack(per_step, axis=0)   # (n_steps, H, Tk)
+
+        # per-camera image-token columns (same mapping as extract_attention)
+        image_token_id = qwen_model.config.image_token_id
+        ids_row = input_ids[0].cpu().numpy()
+        image_positions = np.where(ids_row == image_token_id)[0]
+        try:
+            merge_size = int(qwen_model.config.vision_config.spatial_merge_size)
+        except AttributeError:
+            merge_size = 2
+        thw_np = image_grid_thw.cpu().numpy().astype(int)
+        video_keys = list(self._modality_configs["video"].modality_keys)
+        gr00t_key_to_user = {v: k for k, v in self._camera_mapping.items()}
+        num_cameras = len(video_keys)
+
+        ranges: dict[str, list] = {}
+        sides: dict[str, int] = {}
+        cursor = 0
+        for tile_i, (t, h, w) in enumerate(thw_np):
+            tpt = int(t * (h // merge_size) * (w // merge_size))
+            run_start = int(image_positions[cursor])
+            run_end = int(image_positions[cursor + tpt - 1]) + 1
+            cursor += tpt
+            h_eff = int(h // merge_size)
+            user_cam = gr00t_key_to_user.get(video_keys[tile_i % num_cameras], video_keys[tile_i % num_cameras])
+            ranges.setdefault(user_cam, []).append((run_start, run_end))
+            sides[user_cam] = h_eff
+
+        per_camera, grid_sides = {}, {}
+        for cam, tiles in ranges.items():
+            side = sides[cam]
+            tile_maps = [per_step[:, :, s:e].reshape(n_steps, n_heads, side, side) for s, e in tiles]
+            per_camera[cam] = np.sum(tile_maps, axis=0) if len(tile_maps) > 1 else tile_maps[0]
+            grid_sides[cam] = side
+
+        return AttentionTrace(
+            per_camera=per_camera, grid_sides=grid_sides,
+            n_steps=n_steps, n_heads=n_heads,
+            source="gr00t DiT image cross-attention",
+            query_desc="action tokens (mean) × image-cross blocks (mean), per head",
+            metadata={"image_grid_thw": thw_np.tolist(), "merge_size": merge_size,
+                      "n_denoise_steps": n_steps, "n_image_blocks": n_blocks},
         )
 
     def _state_key_dim(self, state_key: str) -> int:

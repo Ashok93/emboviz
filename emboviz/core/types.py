@@ -452,49 +452,98 @@ class AttentionMaps:
         end = min(end, L)
         start = max(0, min(start, L - 1))
 
-        # Average across the model's literature-recommended layer range.
-        mid = raw[start:end].mean(axis=(0, 1))   # (side, side)
-        raw_mass = float(raw.mean(axis=(0, 1)).sum())
-        mid_mass = float(mid.sum())
-
-        # Sink masking: top-K cells where K = round(side² × sink_top_pct).
-        # Per literature, sinks are the few positions that disproportionately
-        # absorb softmax mass; "top X% by attention value" catches them
-        # without needing to identify their absolute spatial position
-        # (which varies by model: Qwen3-VL = right edge, PaliGemma = first
-        # token, etc.).
-        n_cells = side * side
-        k_sink = int(round(n_cells * sink_top_pct))
-        if k_sink > 0:
-            flat = mid.flatten()
-            sink_indices = np.argpartition(-flat, k_sink - 1)[:k_sink]
-            sink_mask = np.zeros(n_cells, dtype=bool)
-            sink_mask[sink_indices] = True
-            sink_mask = sink_mask.reshape(side, side)
-        else:
-            sink_mask = np.zeros_like(mid, dtype=bool)
-
-        clean = mid.copy()
-        clean[sink_mask] = 0.0
-        clean_mass = float(clean.sum())
-
-        sink_positions = [tuple(int(x) for x in p) for p in np.argwhere(sink_mask)]
-
+        # ── Layer-adaptive "last-token attention" map ──
+        # The last text token's attention to the image, mean over heads, at the
+        # ONE layer where visual grounding is clearest. Per the layer-adaptive
+        # localization literature (arXiv:2602.04304; "How Multimodal LLMs Solve
+        # Image Tasks" arXiv:2508.20279) the grounding signal lives in a single
+        # mid-stack layer, while attention sinks (special / border tokens)
+        # dominate the other layers. So within the candidate layer range we
+        # SELECT the layer whose attention is most concentrated on the image
+        # INTERIOR (where objects are) rather than the border ring (where the
+        # positional/RoPE sink sits), then average over heads. One layer chosen
+        # from the data — no magic layer index, no per-cell sink removal, no
+        # head selection, no calibration.
+        per_layer = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, side, side)
+        border = np.zeros((side, side), dtype=bool)
+        border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+        interior = ~border
+        interior_frac = np.array([
+            float(m[interior].sum() / s) if (s := float(m.sum())) > 1e-12 else 0.0
+            for m in per_layer
+        ])
+        best = int(np.argmax(interior_frac))
+        clean = per_layer[best]
         debug = {
-            "layer_range":            (int(start), int(end)),
-            "layer_range_fraction":   (float(frac_start), float(frac_end)),
-            "n_layers_total":         int(L),
-            "n_heads":                int(H),
-            "raw_mass":               raw_mass,
-            "mid_mass":               mid_mass,
-            "clean_mass":             clean_mass,
-            "sink_top_pct":           float(sink_top_pct),
-            "n_sink_cells_masked":    int(k_sink),
-            "sink_positions":         sink_positions,
-            "removed_fraction":       float((mid_mass - clean_mass) / max(mid_mass, 1e-12)),
-            "profile_source":         profile.get("literature_citation", "unspecified — adapter did not cite"),
+            "selected_layer":       int(start + best),
+            "candidate_layer_range": (int(start), int(end)),
+            "layer_range_fraction": (float(frac_start), float(frac_end)),
+            "interior_fraction":    float(interior_frac[best]),
+            "n_layers_total":       int(L),
+            "n_heads":              int(H),
+            "method":               "layer-adaptive last-token attention (arXiv:2602.04304): "
+                                    "pick the layer with max interior concentration, mean over heads",
+            "profile_source":       profile.get("literature_citation", "unspecified"),
         }
         return clean, debug
+
+
+@dataclass
+class AttentionTrace:
+    """Action→image cross-attention with the denoise-step and head axes KEPT.
+
+    This is the structure a VLA attention visualizer actually needs (cf. the
+    pi0.5 attention visualizer + villekuosmanen/physical-AI-interpretability):
+
+      • ``per_camera[cam]`` has shape ``(n_steps, n_heads, side, side)`` — the
+        action queries' cross-attention onto that camera's image patches.
+      • ``n_steps`` is the flow-matching / diffusion denoise steps. Attention
+        **sharpens** from t=0 (pure-noise action, diffuse) to the last step
+        (clean action, locked onto task-relevant objects) — so the default
+        view is the LAST step, and the whole t=0..last progression is worth
+        scrubbing. We never average across steps (that blurs the signal).
+      • ``n_heads`` is the attention heads, which **specialize** — so we expose
+        per-head maps and a head-mean, never a forced global average.
+
+    Raw attention, reshaped row-major to the grid (no transpose/flip). All
+    display normalization happens in the renderer, not here.
+    """
+
+    per_camera: dict[str, np.ndarray]          # cam -> (n_steps, n_heads, side, side)
+    grid_sides: dict[str, int]                 # cam -> side (tokens = side*side)
+    n_steps: int
+    n_heads: int
+    source: str                                # e.g. "pi0 action-expert cross-attention"
+    query_desc: str                            # e.g. "action chunk tokens (mean)"
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        for cam, a in self.per_camera.items():
+            if a.ndim != 4:
+                raise ValueError(
+                    f"AttentionTrace[{cam}]: expected (n_steps,n_heads,side,side), got {a.shape}"
+                )
+            s = self.grid_sides[cam]
+            if a.shape[2] != s or a.shape[3] != s:
+                raise ValueError(
+                    f"AttentionTrace[{cam}]: grid {a.shape[2:]} != side {s}"
+                )
+
+    @property
+    def cameras(self) -> list[str]:
+        return sorted(self.per_camera)
+
+    def step_head(self, camera: str, step: int, head: int) -> np.ndarray:
+        """Single (side, side) map for one denoise step + one head."""
+        return self.per_camera[camera][step, head]
+
+    def step_mean(self, camera: str, step: int) -> np.ndarray:
+        """Mean over heads at one denoise step → (side, side)."""
+        return self.per_camera[camera][step].mean(axis=0)
+
+    def final_mean(self, camera: str) -> np.ndarray:
+        """The default map: last denoise step, mean over heads → (side, side)."""
+        return self.per_camera[camera][-1].mean(axis=0)
 
 
 @dataclass

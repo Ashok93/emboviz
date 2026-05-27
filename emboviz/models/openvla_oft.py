@@ -379,10 +379,17 @@ class OpenVLAOFTAdapter(VLAModel):
         else:
             query_pos = first_action_pos
 
+        # Query-position attention to all keys, per layer & head, with the
+        # CONTENT-INDEPENDENT attention-sink component removed: subtract the
+        # query-averaged attention (any token attended-to regardless of query —
+        # BOS/sink — cancels; query-specific grounding survives). Same pipeline
+        # as OpenVLA/π0/GR00T. (Xiao et al. 2309.17453.)
         per_layer = []
         for layer_attn in outputs.attentions:
-            # (B, n_heads, seq, seq) → row at query_pos
-            per_layer.append(layer_attn[0, :, query_pos, :].float().cpu().numpy())
+            a = layer_attn[0]                               # (n_heads, seq, seq)
+            row = a[:, query_pos, :].float().cpu().numpy()  # (H, seq)
+            marg = a.float().mean(dim=1).cpu().numpy()      # (H, seq) query-averaged (sink)
+            per_layer.append(np.clip(row - marg, 0.0, None))
         weights = np.stack(per_layer, axis=0)
 
         # Per-camera image-token ranges. SigLIP+DINOv2 backbone is square.
