@@ -6,6 +6,9 @@ Subcommands:
   emboviz list-models    — show installed model adapters
   emboviz list-datasets  — show installed dataset / recording adapters
   emboviz version        — print version + Python info
+  emboviz install-pi0    — install Physical Intelligence's openpi with
+                            GIT_LFS_SKIP_SMUDGE=1 (one-time after
+                            `uv pip install 'emboviz[pi0]'`)
   emboviz convert-pi0    — wrap openpi's JAX→PyTorch checkpoint conversion
                             (only needed if user wants π0 attention extraction)
   emboviz install-gr00t  — install NVIDIA's gr00t package with --no-deps
@@ -24,6 +27,7 @@ from emboviz.cli.analyze import analyze_cmd
 from emboviz.cli.convert_pi0 import convert_pi0_cmd
 from emboviz.cli.info import list_datasets_cmd, list_models_cmd, version_cmd
 from emboviz.cli.install_gr00t import install_gr00t_cmd
+from emboviz.cli.install_pi0 import install_pi0_cmd
 
 
 @click.group(
@@ -41,6 +45,7 @@ main.add_command(analyze_cmd)
 main.add_command(list_models_cmd)
 main.add_command(list_datasets_cmd)
 main.add_command(version_cmd)
+main.add_command(install_pi0_cmd)
 main.add_command(convert_pi0_cmd)
 main.add_command(install_gr00t_cmd)
 

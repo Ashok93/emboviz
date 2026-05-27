@@ -19,11 +19,12 @@ This subcommand is a one-line wrapper for the user.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 
 import click
+
+from emboviz.cli._install_common import pip_install
 
 
 _DEFAULT_GR00T_REPO = "git+https://github.com/NVIDIA/Isaac-GR00T.git"
@@ -70,36 +71,15 @@ def install_gr00t_cmd(repo: str, force_reinstall: bool) -> None:
     python = sys.executable
     click.echo(f"[install-gr00t] using python at: {python}")
 
-    # Ensure pip exists in this venv.
-    r = subprocess.run(
-        [python, "-m", "pip", "--version"],
-        capture_output=True, text=True,
+    click.echo("[install-gr00t] installing gr00t with --no-deps")
+    click.echo("[install-gr00t] (--no-deps because gr00t's flash-attn build dep")
+    click.echo("                 fails under pip build isolation; gr00t adapter")
+    click.echo("                 falls back to SDPA/eager attention.)\n")
+    backend = pip_install(
+        [repo], python=python, no_deps=True, force_reinstall=force_reinstall,
+        label="install-gr00t",
     )
-    if r.returncode != 0:
-        click.echo("[install-gr00t] pip not available in this venv — installing it")
-        r = subprocess.run(
-            [python, "-m", "ensurepip", "--upgrade"],
-            capture_output=False,
-        )
-        if r.returncode != 0:
-            raise click.ClickException(
-                "could not bootstrap pip in this venv. Activate the venv and try again."
-            )
-
-    cmd = [python, "-m", "pip", "install", "--no-deps", repo]
-    if force_reinstall:
-        cmd.insert(-1, "--force-reinstall")
-
-    click.echo(f"[install-gr00t] running: {' '.join(cmd)}")
-    click.echo(f"[install-gr00t] (--no-deps because gr00t's flash-attn build dep")
-    click.echo(f"                 fails under pip build isolation; gr00t adapter")
-    click.echo(f"                 falls back to SDPA/eager attention.)\n")
-
-    result = subprocess.run(cmd, capture_output=False)
-    if result.returncode != 0:
-        raise click.ClickException(
-            f"pip install exited with code {result.returncode}"
-        )
+    click.echo(f"[install-gr00t] (used {backend} as the installer)")
 
     # Verify import.
     click.echo("\n[install-gr00t] verifying import")

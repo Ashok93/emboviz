@@ -71,8 +71,13 @@ uv run emboviz analyze \
 
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install "emboviz[pi0]"     # pulls openpi automatically
-# 3rd command ONLY if you want the attention-extraction diagnostic
+uv pip install "emboviz[pi0]"
+# openpi is git-only and its documented install REQUIRES
+# GIT_LFS_SKIP_SMUDGE=1 (it pins an old lerobot commit whose git-lfs test
+# fixtures are no longer fetchable). `install-pi0` sets that env var for
+# you — a plain transitive install would crash:
+uv run emboviz install-pi0
+# 4th command ONLY if you want the attention-extraction diagnostic
 # (the other 4 diagnostics work on the JAX checkpoint as-is):
 uv run emboviz convert-pi0 pi0_libero
 uv run emboviz analyze \

@@ -106,7 +106,10 @@ oft = [
     # direct-URL refs so ``uv pip install emboviz[oft]`` actually
     # installs everything — no manual ``git clone`` step.
     "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
-    "openvla @ git+https://github.com/moojink/openvla-oft.git",
+    # The fork's distribution name is `openvla-oft` (the import package is
+    # still `prismatic`/`openvla`). The PEP 508 LHS must match the dist
+    # name or uv refuses to resolve `emboviz[oft]`.
+    "openvla-oft @ git+https://github.com/moojink/openvla-oft.git",
 ]
 
 pi0 = [
@@ -114,11 +117,14 @@ pi0 = [
     "transformers>=4.50,<4.55",   # openpi's gemma wrapper targets 4.53.x
     "einops>=0.8",
     "safetensors>=0.5",
-    # openpi is not on PyPI (the name is reserved but empty). Pulled
-    # via git+ direct-URL so emboviz[pi0] installs everything in one
-    # command. openpi pins its own lerobot via a git rev so we do NOT
-    # pin lerobot separately.
-    "openpi @ git+https://github.com/Physical-Intelligence/openpi.git",
+    # NOTE: openpi itself is NOT listed here. It is git-only and its
+    # documented install REQUIRES `GIT_LFS_SKIP_SMUDGE=1` (it pins an old
+    # lerobot commit whose git-lfs test fixtures are no longer fetchable —
+    # see openpi's README + issue #313). A transitive `openpi @ git+...`
+    # would resolve with smudge ENABLED and crash, and a user cannot inject
+    # an env var into a transitive build. So after `uv pip install
+    # 'emboviz[pi0]'`, the user runs `emboviz install-pi0` once, which sets
+    # the env var exactly as openpi documents. (Same pattern as gr00t.)
 ]
 
 gr00t = [
@@ -185,6 +191,13 @@ emboviz = "emboviz.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# The model-adapter extras (oft / pi0) pull their upstream packages via
+# PEP 508 direct-URL refs (``pkg @ git+https://...``). Hatchling rejects
+# direct references in project metadata unless this is explicitly enabled.
+# See https://hatch.pypa.io/latest/config/metadata/#allowing-direct-references
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["emboviz"]

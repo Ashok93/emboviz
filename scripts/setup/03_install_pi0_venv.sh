@@ -5,6 +5,16 @@
 set -euo pipefail
 source /root/.bashrc.emboviz
 
+# openpi pins lerobot to an old git commit. uv clones it and runs
+# `git reset --hard`, which triggers a git-lfs smudge of lerobot's
+# tests/artifacts/*.safetensors fixtures — and at least one of those
+# LFS blobs has been GC'd from the remote ("remote missing object"),
+# so the smudge (and the whole build) fails. Those artifacts are test
+# fixtures, NOT part of the built lerobot wheel, so skipping the smudge
+# is safe: git-lfs leaves pointer files in place and the wheel builds
+# from the (non-LFS) Python sources. See git-lfs docs on GIT_LFS_SKIP_SMUDGE.
+export GIT_LFS_SKIP_SMUDGE=1
+
 REPO=/root/repos/openpi
 echo "[pi0] cloning Physical-Intelligence/openpi"
 if [ ! -d "$REPO" ]; then
