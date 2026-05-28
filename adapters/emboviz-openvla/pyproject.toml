@@ -1,0 +1,31 @@
+[project]
+name = "emboviz-openvla"
+version = "0.3.0"
+description = "OpenVLA-7B adapter for emboviz — runs the model in an isolated Ray actor + venv."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# This is the THIN SHIM that goes in the user's MAIN venv. It carries
+# zero heavy deps — its only job is to advertise an AdapterSpec via
+# entry points so ``emboviz install-openvla`` knows what to install
+# in the isolated runtime venv. The heavy stuff (torch, transformers,
+# lerobot, OpenVLA's checkpoint code) lives in ``AdapterSpec.runtime_pip``
+# and ships into ``~/.emboviz/venvs/openvla/`` via that subcommand.
+dependencies = [
+    "emboviz>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+openvla = "emboviz_openvla.spec:SPEC"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The runtime_pip on the AdapterSpec uses PEP 508 direct refs (lerobot's
+# fork etc.). Hatch must allow them in metadata even though the SHIM
+# itself doesn't pull them in.
+[tool.hatch.metadata]
+allow-direct-references = true

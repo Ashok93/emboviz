@@ -92,18 +92,38 @@ _GC_EVERY_N_FRAMES = 5
 
 
 def _resolve(spec: str, kwargs_json: str = ""):
-    """Resolve ``module.path:attr[:arg]`` into a callable instance.
+    """Resolve a model / dataset spec into a callable instance.
 
-    Examples:
-      ``emboviz.models.registry:get_model:openvla-7b``
-          → ``get_model("openvla-7b")()``  (the registry returns a class)
-      ``emboviz.datasets.lerobot_bridge:BridgeEpisodeSource``
-          → ``BridgeEpisodeSource()``
+    Three forms are supported:
+
+      1. ``adapter:<name>`` — spawn a Ray actor for the installed
+         emboviz adapter package registered under ``<name>`` (e.g.
+         ``adapter:openvla``). Returns a :class:`RayVLAClient` that
+         implements the VLAModel protocol; the model runs in its
+         isolated runtime venv. Kwargs are forwarded to the actor's
+         ``__init__`` (merged on top of the adapter's defaults).
+
+      2. ``module.path:attr`` — call ``attr(**kwargs)``. Used by
+         dataset adapters and the built-in mock / lerobot model.
+
+      3. ``module.path:attr:arg`` — call ``attr(arg)`` first; if it
+         returns a class, then call ``cls(**kwargs)``. Used by the
+         (now-deprecated) ``emboviz.models.registry:get_model:<name>``
+         resolver path; kept for back-compat until the legacy in-
+         process adapters are removed.
     """
+    kwargs = json.loads(kwargs_json) if kwargs_json else {}
+
+    # ── Form 1: adapter:<name> ──────────────────────────────────────
+    if spec.startswith("adapter:"):
+        from emboviz.adapters import RayVLAClient, connect
+        name = spec.split(":", 1)[1]
+        handle = connect(name, actor_kwargs=kwargs)
+        return RayVLAClient(handle)
+
     parts = spec.split(":")
     module = importlib.import_module(parts[0])
     obj = getattr(module, parts[1])
-    kwargs = json.loads(kwargs_json) if kwargs_json else {}
     if len(parts) == 2:
         return obj(**kwargs)
     intermediate = obj(parts[2])

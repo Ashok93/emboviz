@@ -32,16 +32,19 @@ from typing import Optional
 import click
 
 
-# Built-in model adapter shortcuts → ``module:attr:registry-key`` specs.
-_MODEL_ALIASES: dict[str, str] = {
-    "openvla":     "emboviz.models.registry:get_model:openvla",
-    "openvla-7b":  "emboviz.models.registry:get_model:openvla",
-    "oft":         "emboviz.models.registry:get_model:openvla-oft",
-    "openvla-oft": "emboviz.models.registry:get_model:openvla-oft",
-    "pi0":         "emboviz.models.registry:get_model:pi0",
-    "pi05":        "emboviz.models.registry:get_model:pi0",
-    "gr00t":       "emboviz.models.registry:get_model:gr00t",
-    "gr00t-n1":    "emboviz.models.registry:get_model:gr00t",
+# Legacy in-process adapter aliases. The new path is the entry-point
+# adapter registry — ``--model openvla`` first looks for an installed
+# ``emboviz-openvla`` package and routes through Ray. Aliases below
+# are only used when (a) no matching adapter is installed AND (b) the
+# legacy in-process module is still present (mock + lerobot). Once
+# every VLA adapter has been migrated to a Ray-actor package, this
+# table shrinks to ``mock`` and ``lerobot``.
+_LEGACY_MODEL_ALIASES: dict[str, str] = {
+    "openvla-7b":  "adapter:openvla",
+    "openvla-oft": "adapter:oft",
+    "oft":         "adapter:oft",
+    "pi05":        "adapter:pi0",
+    "gr00t-n1":    "adapter:gr00t",
     "mock":        "emboviz.models.registry:get_model:mock",
 }
 
@@ -84,19 +87,43 @@ _DATASET_FORMATS: dict[str, tuple[str, str]] = {
 
 
 def _resolve_model_spec(model: str) -> str:
-    if model in _MODEL_ALIASES:
-        return _MODEL_ALIASES[model]
+    """Resolve ``--model <X>`` to a spec the runner understands.
+
+    Lookup order:
+
+      1. Verbatim ``adapter:<name>`` (or any ``module:Class`` form) →
+         passed through; runner handles each.
+      2. Match against the installed adapter entry-point registry. If
+         a package called ``emboviz-<model>`` is installed, route as
+         ``adapter:<model>``. This is the new common path.
+      3. Match against the legacy alias table — handles aliases like
+         ``openvla-7b`` and the still-in-process ``mock`` adapter.
+      4. Otherwise: raise a useful error listing what IS installed
+         AND the legacy aliases, so the user always knows their next
+         move (install a missing adapter package or fix a typo).
+    """
     if ":" in model:
         return model
-    if "/" in model:
-        raise click.UsageError(
-            f"HuggingFace repo id '{model}' resolution is not implemented "
-            "yet. Use an adapter alias from this list: "
-            + ", ".join(sorted(_MODEL_ALIASES))
-        )
+
+    # Prefer installed adapter packages over legacy aliases.
+    from emboviz.adapters import list_adapters
+    installed = list_adapters()
+    if model in installed:
+        return f"adapter:{model}"
+
+    if model in _LEGACY_MODEL_ALIASES:
+        return _LEGACY_MODEL_ALIASES[model]
+
+    available_adapters = sorted(installed)
+    legacy = sorted(_LEGACY_MODEL_ALIASES)
     raise click.UsageError(
-        f"Unknown model '{model}'. Choose one of: "
-        + ", ".join(sorted(_MODEL_ALIASES))
+        f"Unknown model '{model}'.\n"
+        f"  Installed adapters (entry-point): {available_adapters or '(none)'}\n"
+        f"  Legacy aliases:                   {legacy}\n"
+        f"  Power-user form:                  --model <module>:<Class>\n"
+        f"  To add '{model}' as a Ray-actor adapter, run:\n"
+        f"      uv pip install emboviz-{model}\n"
+        f"      emboviz install-{model}"
     )
 
 

@@ -221,6 +221,74 @@ def shutdown(handle: ActorHandle, *, kill: bool = False) -> None:
         ray.kill(handle.actor, no_restart=True)
 
 
+def _editable_install_path(dist_name: str) -> Optional[Path]:
+    """Return the local source directory if ``dist_name`` is installed
+    editable in the current Python; None otherwise.
+
+    Uses :mod:`importlib.metadata` to find the dist's ``direct_url.json``
+    marker that ``pip install -e`` writes alongside the egg-info. That
+    file's ``dir_info.editable == True`` is the canonical "installed
+    in editable mode" signal.
+    """
+    import json as _json
+    from importlib import metadata as importlib_metadata
+
+    try:
+        dist = importlib_metadata.distribution(dist_name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+    direct_url_text = dist.read_text("direct_url.json")
+    if direct_url_text is None:
+        return None
+    try:
+        info = _json.loads(direct_url_text)
+    except ValueError:
+        return None
+    dir_info = info.get("dir_info") or {}
+    if not dir_info.get("editable"):
+        return None
+    url = info.get("url", "")
+    if url.startswith("file://"):
+        return Path(url[len("file://"):])
+    return None
+
+
+def _rewrite_pip_for_dev(runtime_pip: tuple[str, ...]) -> list[str]:
+    """Replace ``emboviz`` / ``emboviz-<x>`` deps with their editable
+    local paths if they happen to be editable in the CURRENT venv.
+
+    This is what makes "dev path = user path" hold for the runtime
+    venv install. A developer running from a git checkout has
+    ``emboviz`` and ``emboviz-openvla`` installed editable; the
+    runtime venv should pick those up rather than the (probably
+    nonexistent or stale) PyPI release. End-users with both shims
+    installed from PyPI hit None on both lookups and the spec's
+    runtime_pip is used verbatim.
+    """
+    rewritten: list[str] = []
+    for req in runtime_pip:
+        # Only consider plain ``name`` or ``name==X`` style specs; PEP
+        # 508 markers / direct URLs / -e refs already specify exactly
+        # what they want.
+        if req.startswith("-") or "@" in req or "/" in req:
+            rewritten.append(req)
+            continue
+        # Grab the bare dist name.
+        bare = req.split(";")[0].split("[")[0]
+        for op in ("==", ">=", "<=", "!=", "~=", ">", "<"):
+            bare = bare.split(op)[0]
+        bare = bare.strip()
+        if bare in ("emboviz",) or bare.startswith("emboviz-"):
+            local = _editable_install_path(bare)
+            if local is not None:
+                rewritten.append("-e")
+                rewritten.append(str(local))
+                continue
+        rewritten.append(req)
+    return rewritten
+
+
 def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
     """Create the adapter's runtime venv and install its heavy deps.
 
@@ -233,7 +301,11 @@ def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
 
     The implementation shells out to ``uv venv`` and ``uv pip install``
     — same commands the README documents — so dev and user paths are
-    byte-identical (CLAUDE.md "dev path is the user path" rule).
+    byte-identical (CLAUDE.md "dev path is the user path" rule). The
+    one place we diverge: ``emboviz`` / ``emboviz-<name>`` entries in
+    ``spec.runtime_pip`` are rewritten to ``-e <local_path>`` if those
+    shims are installed editable in the current venv (i.e. running
+    from a git checkout).
     """
     import subprocess
 
@@ -258,8 +330,9 @@ def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
     env.update(spec.runtime_env_vars)
 
     py = path / "bin" / "python"
+    requirements = _rewrite_pip_for_dev(spec.runtime_pip)
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(py), *spec.runtime_pip],
+        ["uv", "pip", "install", "--python", str(py), *requirements],
         check=True,
         env=env,
     )
