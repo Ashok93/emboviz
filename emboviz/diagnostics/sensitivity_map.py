@@ -25,7 +25,7 @@ import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Scene, resolve_cameras
+from emboviz.core.types import ActionResult, Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.metrics.action_divergence import ActionDivergenceMetric
 from emboviz.models.protocol import Capability, VLAModel
@@ -51,14 +51,25 @@ class SensitivityMapDiagnostic(Diagnostic):
         self.name = f"sensitivity_map_{grid_side}x{grid_side}"
         self.axis = "vision.scene_sensitivity"
 
-    def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+    def run(
+        self, model: VLAModel, scene: Scene,
+        *, baseline: Optional[ActionResult] = None,
+    ) -> DiagnosticResult:
+        """Run the sensitivity grid for ``scene``.
+
+        ``baseline`` is an optional precomputed unperturbed prediction —
+        the runner computes it once per frame and shares it across all
+        diagnostics. Without this we'd waste ``n_samples`` forward passes
+        per diagnostic per frame on the same baseline.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         cameras = resolve_cameras(scene, self.cameras)
         metric = self._metric_override or ActionDivergenceMetric(model=model)
         n_samples = self.calibration.n_samples if self.calibration else 1
-        baseline = averaged_predict(model, scene, n_samples)
+        if baseline is None:
+            baseline = averaged_predict(model, scene, n_samples)
 
         per_camera_grid: dict[str, np.ndarray] = {}
         per_camera_top_k: dict[str, float] = {}

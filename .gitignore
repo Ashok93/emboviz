@@ -101,3 +101,8 @@ CLAUDE.md
 .claude/
 
 story_outputs/
+
+# ──────────────────────────────────────────────────────────────────────
+# Internal planning / strategy notes (not for the public repo)
+# ──────────────────────────────────────────────────────────────────────
+PLAN.md

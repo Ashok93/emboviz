@@ -215,8 +215,23 @@ def _resolve_dataset_from_args(
                    "subsample long episodes.")
 @click.option("--target", "target_text", default="",
               help="Target object phrase (e.g. 'the red cup') passed to "
-                   "GroundingDINO for the memorization diagnostic. "
-                   "If empty, memorization is skipped.")
+                   "the text-prompted detector (SAM 3 by default; --detector "
+                   "gd-sam for the legacy GroundingDINO+SAM combo). If empty "
+                   "and --target-annotations is also empty, memorization is "
+                   "skipped.")
+@click.option("--target-annotations", "target_annotations", default="",
+              type=click.Path(),
+              help="Per-frame target-annotation file (JSON or COCO). When "
+                   "set, replaces text-prompted detection entirely — no "
+                   "GroundingDINO, no SAM, no SAM 3. Use when your tracker "
+                   "(motion capture, fiducials, hand labels) already knows "
+                   "where the target is.")
+@click.option("--detector", "detector", default="sam3",
+              type=click.Choice(["sam3", "gd-sam"], case_sensitive=False),
+              help="Text-to-mask detector backend. 'sam3' (default) — single "
+                   "model, faster, native concept prompting. 'gd-sam' — "
+                   "legacy GroundingDINO + SAM combo, kept as a maintained "
+                   "fallback. Ignored when --target-annotations is set.")
 @click.option("--output", "out_dir", type=click.Path(), required=True,
               help="Output directory. Per-episode subdirs + aggregate "
                    "report are written here.")
@@ -232,17 +247,22 @@ def _resolve_dataset_from_args(
               help="Optional directory where the modality pool is cached on disk.")
 @click.option("--show-imitation", is_flag=True, default=False,
               help="Compute and show imitation L2 vs recorded expert action.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Print the per-frame and per-episode forward-pass "
+                   "estimate without running the diagnostic suite. Use "
+                   "this BEFORE committing GPU hours on a long episode.")
 def analyze_cmd(
     model: str, model_kwargs_json: str,
     dataset: Optional[str],
     dataset_format: Optional[str], dataset_path: Optional[str],
     dataset_kwargs_json: str,
     episodes_spec: str, frame_start: int, n_frames: int, frame_stride: int,
-    target_text: str, out_dir: str,
+    target_text: str, target_annotations: str, detector: str,
+    out_dir: str,
     sensitivity_grid_side: int,
     modality_pool_size: int, modality_k_samples: int,
     modality_pool_seed: int, modality_pool_cache_dir: Optional[str],
-    show_imitation: bool,
+    show_imitation: bool, dry_run: bool,
 ) -> None:
     """Analyze a model on one or more episodes and write diagnostics.
 
@@ -346,7 +366,10 @@ def analyze_cmd(
             modality_pool_seed=modality_pool_seed,
             modality_pool_cache_dir=modality_pool_cache_dir,
             target_text=target_text,
+            target_annotations=target_annotations,
+            detector=detector,
             show_imitation=show_imitation,
+            dry_run=dry_run,
         )
 
         from emboviz._internal.runner import run_story

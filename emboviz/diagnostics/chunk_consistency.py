@@ -39,7 +39,7 @@ import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Scene, Trajectory
+from emboviz.core.types import ActionResult, Scene, Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 
@@ -87,7 +87,18 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             "run_trajectory(model, traj) instead",
         )
 
-    def run_trajectory(self, model: VLAModel, trajectory: Trajectory) -> DiagnosticResult:
+    def run_trajectory(
+        self, model: VLAModel, trajectory: Trajectory,
+        *, baselines: Optional[list[ActionResult]] = None,
+    ) -> DiagnosticResult:
+        """Compute chunk-consistency across the trajectory.
+
+        ``baselines`` is an optional list of pre-computed unperturbed
+        predictions, one per frame in trajectory order. When supplied,
+        the diagnostic uses their ``action_chunk`` directly instead of
+        re-running ``averaged_predict`` per frame — saving a full
+        ``n_samples`` model forwards per frame on stochastic models.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(
                 model, trajectory.frames[0] if trajectory.frames else None,
@@ -98,12 +109,22 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 model, trajectory.frames[0] if trajectory.frames else None,
                 "need ≥2 frames for chunk consistency",
             )
+        if baselines is not None and len(baselines) != len(trajectory.frames):
+            raise ValueError(
+                f"chunk_consistency: baselines length {len(baselines)} "
+                f"does not match trajectory frame count "
+                f"{len(trajectory.frames)}."
+            )
 
-        # Collect chunks from every frame.
+        # Collect chunks from every frame (re-use precomputed baselines
+        # if the runner supplied them).
         chunks: list[np.ndarray] = []
-        for scene in trajectory.frames:
-            n_samples = self.calibration.n_samples if self.calibration else 1
-            ar = averaged_predict(model, scene, n_samples)
+        for i, scene in enumerate(trajectory.frames):
+            if baselines is not None:
+                ar = baselines[i]
+            else:
+                n_samples = self.calibration.n_samples if self.calibration else 1
+                ar = averaged_predict(model, scene, n_samples)
             if ar.action_chunk is None:
                 return self._not_applicable(
                     model, scene,

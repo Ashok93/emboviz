@@ -53,7 +53,7 @@ from emboviz.core.observations import (
     RGBImage,
 )
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Observations, Scene, resolve_cameras
+from emboviz.core.types import ActionResult, Observations, Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 from emboviz.modality_pools import ModalityPool, _distance
@@ -113,13 +113,23 @@ class ModalityDropoutDiagnostic(Diagnostic):
         self.name = "modality_dropout"
         self.axis = "input.modality_dropout"
 
-    def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+    def run(
+        self, model: VLAModel, scene: Scene,
+        *, baseline: Optional[ActionResult] = None,
+    ) -> DiagnosticResult:
+        """Run marginal-distribution modality dropout for ``scene``.
+
+        ``baseline`` is an optional precomputed unperturbed prediction —
+        the runner shares it across diagnostics so we don't re-pay
+        ``n_samples`` forward passes for the same baseline in every one.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         rng = np.random.default_rng(self.seed)
         n_samples = self.calibration.n_samples
-        baseline = averaged_predict(model, scene, n_samples)
+        if baseline is None:
+            baseline = averaged_predict(model, scene, n_samples)
 
         reqs = model.required_inputs
         per_modality: dict[str, dict] = {}

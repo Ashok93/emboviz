@@ -57,7 +57,20 @@ class AttentionDriftDiagnostic(Diagnostic):
             "attention_drift requires a Trajectory; use run_trajectory()",
         )
 
-    def run_trajectory(self, model: VLAModel, trajectory: Trajectory) -> DiagnosticResult:
+    def run_trajectory(
+        self, model: VLAModel, trajectory: Trajectory,
+        *, attention_per_frame_clean: Optional[dict[int, dict[str, np.ndarray]]] = None,
+    ) -> DiagnosticResult:
+        """Compute attention-centroid drift across the trajectory.
+
+        ``attention_per_frame_clean`` is an optional map
+        ``{trajectory_index → {camera → cleaned (side, side) heatmap}}``.
+        When supplied, the diagnostic uses these pre-extracted heatmaps
+        instead of re-running ``model.extract_attention`` per frame —
+        which the runner does anyway for the Rerun overlay. Without this,
+        we'd pay the (already heavy) attention-tensor allocation twice
+        per frame.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(
                 model, trajectory.frames[0] if trajectory.frames else None,
@@ -80,21 +93,23 @@ class AttentionDriftDiagnostic(Diagnostic):
             )
 
         centroids: list[tuple[float, float]] = []   # (cy_norm, cx_norm) in [0,1]
-        for scene in trajectory.frames:
-            try:
-                attn = model.extract_attention(scene, self.query)
-            except NotSupported as e:
-                return self._not_applicable(
-                    model, scene, f"attention extraction failed: {e}",
-                )
-            # Clean per-camera attention heatmap: mid-layer head filter
-            # + sink masking. The literature is unambiguous that raw
-            # all-layers-all-heads averaging is dominated by softmax
-            # routing artifacts (RoPE sinks, BOS sinks, early-layer
-            # token-grouping). See LITERATURE.md §4. For
-            # power-users wanting raw, call ``attn.image_weights(cam)``
-            # directly. The diagnostic always uses ``_clean``.
-            img_attn, _debug = attn.image_weights_clean(self.camera)   # (side, side)
+        for i, scene in enumerate(trajectory.frames):
+            img_attn: Optional[np.ndarray] = None
+            if attention_per_frame_clean is not None:
+                per_cam = attention_per_frame_clean.get(i)
+                if per_cam is not None and self.camera in per_cam:
+                    img_attn = np.asarray(per_cam[self.camera], dtype=np.float32)
+            if img_attn is None:
+                # Fall back to extracting attention ourselves only when
+                # the runner didn't provide it (e.g. standalone use of
+                # the diagnostic outside the integrated runner).
+                try:
+                    attn = model.extract_attention(scene, self.query)
+                except NotSupported as e:
+                    return self._not_applicable(
+                        model, scene, f"attention extraction failed: {e}",
+                    )
+                img_attn, _debug = attn.image_weights_clean(self.camera)
             side = img_attn.shape[0]
             total = img_attn.sum()
             if total <= 0:

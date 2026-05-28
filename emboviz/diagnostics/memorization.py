@@ -9,10 +9,13 @@ arXiv:2510.03827) and the BYOVLA visual-robustness probe inverted
 
 Implementation principles (LITERATURE.md §1):
 
-  1. **Phrase grounding, no taxonomy.** Target is located by passing
-     ``scene.instruction`` (or an explicit ``target_text`` override) to
-     GroundingDINO + SAM. We never extract a noun from a fixed
-     taxonomy — that silently skips any out-of-taxonomy task.
+  1. **Open-vocabulary target localization.** Default detector is SAM 3
+     (single model, text → mask, native concept-aware prompting). The
+     legacy GroundingDINO + SAM combo is kept as a maintained fallback
+     for environments where SAM 3 isn't available. Users with their own
+     tracker / motion-capture / hand-labelled bboxes plug in via the
+     ``CallableConnector`` / ``JSONAnnotationConnector`` /
+     ``CocoAnnotationConnector`` connectors.
 
   2. **Fill ensemble.** We mask with TWO independent fills (channel-mean
      and Gaussian blur) and require AGREEMENT across both fills before
@@ -29,33 +32,42 @@ Implementation principles (LITERATURE.md §1):
      refuse to emit a verdict.
 
   4. **Per-camera detection and masking.** Each camera in the scene is
-     queried independently. We mask EVERY camera that produced a
-     confident detection, simultaneously, in one perturbed scene.
+     queried independently via a probe scene that aliases the camera as
+     ``primary`` and sets ``scene.metadata['_emboviz_probe_camera']`` so
+     annotation connectors can resolve the right per-camera entry. We
+     mask EVERY camera that produced a confident detection,
+     simultaneously, in one perturbed scene.
 
   5. **N-sample averaging for stochastic policies.** π0, GR00T,
      diffusion policies need K samples per prediction averaged before
      comparison (handled via ``averaged_predict`` and the
-     ``ModelCalibration.n_samples`` derivation).
+     ``ModelCalibration.n_samples`` derivation). The runner can compute
+     the per-frame baseline ONCE and pass it via the ``baseline=``
+     kwarg so the diagnostic does not duplicate that work across the
+     other diagnostics.
 
-  6. **No SAM-fallback.** SAM is required (no bbox-only fallback) —
-     the GroundingDINOSAMDetector raises at load if SAM is unavailable.
-     A coarse bbox covers target + background and is too weak.
+  6. **Required masks (no bbox-only fallback).** The diagnostic needs a
+     pixel-accurate mask to make the intervention interpretable.
+     Detectors that return only a bbox raise rather than silently
+     degrading.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Scene
+from emboviz.core.types import ActionResult, Scene
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 from emboviz.perturb._target_detection import (
     BBoxDetector,
     GroundingDINOSAMDetector,
+    SAM3Detector,
     TargetDetector,
 )
 from emboviz.perturb.image._image_utils import to_array, to_pil
@@ -191,7 +203,20 @@ class MemorizationDiagnostic(Diagnostic):
         elif target_detector is not None:
             self.detector = target_detector
         else:
-            self.detector = GroundingDINOSAMDetector()
+            # Default detector — text-required. The diagnostic is never
+            # constructed without either a bbox, a custom detector, or a
+            # target_text being passed through by the runner. We pick
+            # SAM 3 over the legacy GD+SAM combo (single model, faster,
+            # native concept prompting). Adapters that want the old
+            # pipeline pass it explicitly.
+            raise ValueError(
+                "MemorizationDiagnostic needs one of: ``bbox=(x0,y0,x1,y1)`` "
+                "for a fixed user-supplied box, or ``target_detector=...`` "
+                "for any TargetDetector (SAM3Detector / "
+                "GroundingDINOSAMDetector / JSONAnnotationConnector / "
+                "CocoAnnotationConnector / CallableConnector). The "
+                "diagnostic refuses to guess what to mask."
+            )
         self.fill_modes = list(fill_modes) if fill_modes else ["channel_mean", "gaussian_blur"]
         self.min_mask_contrast = float(min_mask_contrast)
         self.noise_floor_score = noise_floor_score
@@ -201,16 +226,32 @@ class MemorizationDiagnostic(Diagnostic):
         self.name = "memorization_test"
         self.axis = "vision.memorization"
 
-    def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+    def run(
+        self, model: VLAModel, scene: Scene,
+        *, baseline: Optional[ActionResult] = None,
+    ) -> DiagnosticResult:
+        """Evaluate memorization for one scene.
+
+        ``baseline`` is an optional precomputed unperturbed prediction.
+        The runner computes one baseline per frame and shares it across
+        every diagnostic; without that, each diagnostic would re-run
+        ``averaged_predict`` and we'd pay n_samples × num-diagnostics
+        worth of forward passes per frame.
+        """
         from emboviz.core.types import resolve_cameras
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         cameras = resolve_cameras(scene, self.cameras)
         n_samples = self.calibration.n_samples if self.calibration else 1
-        baseline = averaged_predict(model, scene, n_samples)
+        if baseline is None:
+            baseline = averaged_predict(model, scene, n_samples)
 
-        # 1. Per-camera target detection.
+        # 1. Per-camera target detection. Each camera is probed via a
+        # scene whose primary alias points at that camera, with the
+        # ``_emboviz_probe_camera`` metadata key set so user-annotation
+        # connectors (JSON / COCO / Callable) can resolve the right
+        # per-camera entry.
         per_cam_detection: dict = {}
         per_cam_original: dict = {}
         for cam in cameras:
@@ -219,6 +260,11 @@ class MemorizationDiagnostic(Diagnostic):
                 probe_scene = scene.with_image(cam_image, camera="primary")
             else:
                 probe_scene = scene.with_image(cam_image, camera=cam)
+            # Tag the probe so connectors see which camera we're querying.
+            # ``Scene`` is frozen, so we re-create with augmented metadata.
+            tagged_meta = dict(probe_scene.metadata)
+            tagged_meta["_emboviz_probe_camera"] = cam
+            probe_scene = replace(probe_scene, metadata=tagged_meta)
             detection = self.detector(probe_scene)
             per_cam_detection[cam] = detection
             if detection is None:
