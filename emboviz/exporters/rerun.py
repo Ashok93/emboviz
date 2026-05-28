@@ -267,15 +267,36 @@ def export_rerun(
         import rerun.blueprint as rrb
     except ImportError as e:
         raise ImportError(
-            "Rerun export requires the `rerun-sdk` package (>=0.23). "
-            "Install with: uv pip install 'rerun-sdk>=0.23'"
+            "Rerun export requires the `rerun-sdk` package (>=0.22). "
+            "Install with: uv pip install 'rerun-sdk>=0.22'"
         ) from e
 
-    if not hasattr(rr, "RecordingStream") or not hasattr(rr, "set_time"):
+    if not hasattr(rr, "RecordingStream"):
         raise RuntimeError(
-            "rerun-sdk too old. Install >=0.23: uv pip install 'rerun-sdk>=0.23'"
+            "rerun-sdk too old. Install >=0.22: uv pip install 'rerun-sdk>=0.22'"
         )
-    Scalars = rr.Scalars
+
+    # rerun-sdk 0.23 renamed Scalar → Scalars (plural) and unified the
+    # per-axis ``set_time_sequence`` / ``set_time_seconds`` calls into a
+    # single ``set_time(name, *, sequence|duration)``. We support both
+    # so the [oft] extra (which transitively pins lerobot 0.3.2 →
+    # rerun-sdk<0.23) and the other extras (which can use latest) both
+    # produce identical .rrd files.
+    Scalars = getattr(rr, "Scalars", None) or rr.Scalar
+    _has_unified_set_time = hasattr(rr, "set_time")
+
+    def _set_time(name: str, *, sequence=None, duration=None) -> None:
+        if _has_unified_set_time:
+            if sequence is not None:
+                rr.set_time(name, sequence=sequence, recording=rec)
+            elif duration is not None:
+                rr.set_time(name, duration=duration, recording=rec)
+            return
+        # rerun-sdk 0.22 path: separate setter per axis kind.
+        if sequence is not None:
+            rr.set_time_sequence(name, sequence, recording=rec)
+        elif duration is not None:
+            rr.set_time_seconds(name, duration, recording=rec)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,8 +347,8 @@ def export_rerun(
     # ── 1. Per-frame camera streams + overlays ────────────────────────────
     for i, scene in enumerate(trajectory.frames):
         frame_idx = trajectory.frame_indices[i]
-        rr.set_time("frame_time", duration=i / fps, recording=rec)
-        rr.set_time("frame_index", sequence=frame_idx, recording=rec)
+        _set_time("frame_time", duration=i / fps)
+        _set_time("frame_index", sequence=frame_idx)
 
         scene_cameras = set(scene.observations.images.keys())
         cam_hw: dict[str, tuple[int, int]] = {}
@@ -454,10 +475,8 @@ def export_rerun(
     # the current-frame Finding markdown (cursor-driven on the dashboard).
     for axis, traj_result in per_axis_results.items():
         for i, r in enumerate(traj_result.per_frame):
-            rr.set_time("frame_time", duration=i / fps, recording=rec)
-            rr.set_time(
-                "frame_index", sequence=traj_result.frame_indices[i], recording=rec,
-            )
+            _set_time("frame_time", duration=i / fps)
+            _set_time("frame_index", sequence=traj_result.frame_indices[i])
             score = r.scalar_score
             if score == score:  # not NaN
                 rr.log(

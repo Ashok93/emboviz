@@ -44,13 +44,23 @@ dependencies = [
     # tabular / scientific dataset readers
     "h5py>=3.10",
     # interactive Rerun export (always-on; .rrd is the headline artifact).
-    # We target the latest stable API (0.23 unified set_time + renamed
-    # Scalar → Scalars; 0.23 also exposed RecordingStream as the public
-    # constructor). emboviz/exporters/rerun.py uses that API.
-    "rerun-sdk>=0.23",
+    # We support both 0.22 (with rr.Scalar singular + rr.set_time_sequence)
+    # and 0.23+ (with rr.Scalars plural + unified rr.set_time). The
+    # ``[oft]`` extra transitively pins lerobot 0.3.2 (forced by
+    # openvla-oft's torchvision==0.17.0 pin), and lerobot 0.3.2 requires
+    # rerun-sdk<0.23. So pinning >=0.23 here would make ``pip install
+    # emboviz[oft]`` literally unsolvable. emboviz/exporters/rerun.py
+    # detects the version and uses the appropriate API.
+    "rerun-sdk>=0.22",
     # video / image media
     "imageio>=2.34",
     "imageio-ffmpeg>=0.4.9",
+    # SAM 3 sidecar client transport + mask decoder. httpx is pure-Python
+    # (no torch/transformers leak into adapter venvs), pycocotools is
+    # used both for COCO RLE mask decoding from the sidecar AND by the
+    # CocoAnnotationConnector for user-supplied per-frame annotations.
+    "httpx>=0.27",
+    "pycocotools>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -73,7 +83,10 @@ dependencies = [
 # scripts/setup/<NN>_install_<model>_venv.sh dev recipe.
 
 openvla = [
-    "torch>=2.2,<2.13",
+    # torch <2.10 caps below the cu13-only 2.12 wheel that breaks on
+    # CUDA 12.x drivers (every cloud A40/A6000/A100 in 2026). Default
+    # PyPI wheels for torch 2.7-2.9 work on any CUDA 11.8+ driver.
+    "torch>=2.2,<2.10",
     "torchvision>=0.17",
     "transformers>=4.40,<4.50",   # OpenVLA modeling code targets <4.50
     "accelerate>=0.30",
@@ -128,7 +141,8 @@ pi0 = [
 ]
 
 gr00t = [
-    "torch>=2.2,<2.13",
+    # torch <2.10 caps below the cu13-only 2.12 wheel — see openvla extra.
+    "torch>=2.2,<2.10",
     "transformers>=4.57,<4.60",   # Qwen3-VL needs >=4.57
     "accelerate>=0.30",
     "peft>=0.11",

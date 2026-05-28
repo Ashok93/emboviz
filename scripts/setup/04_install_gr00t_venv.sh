@@ -1,62 +1,49 @@
 #!/usr/bin/env bash
-# GR00T-N1.7 venv via NVIDIA's Isaac-GR00T. The cloned repo includes
-# demo_data/droid_sample (3 demo episodes). Pin transformers==4.57.3 —
-# newer versions broke GroundingDINO API; older versions break Qwen3-VL.
+# GR00T adapter — dev pod recipe.
 #
-# Why ``--no-deps`` for the gr00t package itself:
-#   gr00t's pyproject lists flash-attn as a required dep. flash-attn's
-#   build setup imports torch BEFORE pip has installed it (build isolation
-#   ships an empty env), so the build fails with ModuleNotFoundError.
-#   We don't actually USE flash-attn — the emboviz gr00t adapter forces
-#   eager attention for the extraction path and SDPA otherwise — so we
-#   install gr00t without its deps and bring the runtime deps we need
-#   in explicitly below.
+# Same shape as the user-facing path documented in README:
+#
+#     uv venv .venv-gr00t --python 3.11
+#     uv pip install 'emboviz[gr00t]'
+#     emboviz install-gr00t      # one-shot wrapper for NVIDIA's gr00t
+#                                # (NOT on PyPI; flash-attn build-isolation
+#                                # bug needs --no-deps install)
+#
+# Per CLAUDE.md "Dev path is the user path": NO version pins here. The
+# ``[gr00t]`` extra owns transformers / torch / lerobot. The
+# ``emboviz install-gr00t`` CLI owns the gr00t git+ install with
+# --no-deps.
+#
+# We also pull the Isaac-GR00T repo's git-lfs blobs into a known location
+# so the dataset adapter's demo_data/droid_sample (3 sample episodes) is
+# usable. A USER who installed gr00t via pip and wants droid_sample does
+# the same clone manually; documented in README.
 set -euo pipefail
 source /root/.bashrc.emboviz
 
+# Pull the upstream repo for demo_data/droid_sample. The gr00t Python
+# package itself is installed by ``emboviz install-gr00t`` below from
+# the same git URL (--no-deps).
 REPO=/root/repos/Isaac-GR00T
-echo "[gr00t] cloning NVIDIA/Isaac-GR00T + pulling git-lfs blobs"
 if [ ! -d "$REPO" ]; then
     git clone https://github.com/NVIDIA/Isaac-GR00T.git "$REPO"
 fi
-# demo_data/droid_sample ships as git-lfs pointer files. Without this
-# pull they are 131-byte stubs and the dataset adapter fails to read
-# the parquets. Bootstrap installed git-lfs system-wide.
 ( cd "$REPO" && git lfs install --skip-smudge --local && git lfs pull )
 
 VENV=/root/venvs/gr00t
-echo "[gr00t] creating venv at $VENV (Python 3.11 — gr00t pyproject requires it)"
 uv venv "$VENV" --python 3.11
+uv pip install --python "$VENV/bin/python" -e "/root/emboviz[gr00t]"
 
-cd "$REPO"
-
-echo "[gr00t] installing torch + transformers pin FIRST so subsequent"
-echo "        editable installs that import torch at build time succeed"
-uv pip install --python "$VENV/bin/python" \
-    "torch==2.12.0" \
-    "transformers==4.57.3"
-
-echo "[gr00t] installing gr00t package (--no-deps to skip flash-attn build)"
-uv pip install --python "$VENV/bin/python" --no-deps -e .
-
-echo "[gr00t] runtime deps that gr00t code actually uses at run time"
-uv pip install --python "$VENV/bin/python" \
-    accelerate peft pandas av decord torchcodec albumentations \
-    diffusers einops huggingface-hub safetensors tokenizers \
-    sentencepiece tqdm pillow numpy scipy timm dm-tree tyro \
-    lmdb msgpack msgpack-numpy termcolor omegaconf jsonlines \
-    gymnasium kornia opencv-python-headless
-
-echo "[gr00t] installing emboviz (editable)"
-uv pip install --python "$VENV/bin/python" -e /root/emboviz/
+echo "[gr00t] running 'emboviz install-gr00t' (installs gr00t with --no-deps)"
+"$VENV/bin/emboviz" install-gr00t
 
 echo "[gr00t] sanity import"
 "$VENV/bin/python" -c "
 import torch, transformers, gr00t, emboviz
-print('  torch       ', torch.__version__)
+print('  torch       ', torch.__version__, '  cuda_avail=', torch.cuda.is_available())
 print('  transformers', transformers.__version__)
 print('  gr00t       ', gr00t.__file__)
 print('  emboviz     ', emboviz.__file__)
 "
 echo "[gr00t] DONE — $VENV/bin/python ready"
-echo "[gr00t] Note: first inference downloads nvidia/GR00T-N1.7-3B (~6 GB) + nvidia/Cosmos-Reason2-2B (gated, needs HF_TOKEN)"
+echo "[gr00t] Note: first inference downloads nvidia/GR00T-N1.7-3B (~6 GB) + Cosmos-Reason2-2B (gated, needs HF_TOKEN)"

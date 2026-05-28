@@ -102,6 +102,32 @@ uv run emboviz analyze \
     --output ./report
 ```
 
+### SAM 3 sidecar (memorization diagnostic — one-time, shared by every model)
+
+The memorization diagnostic masks the manipulated object with SAM 3 (Meta's
+text-to-mask model, [released Nov 2025](https://github.com/facebookresearch/sam3)).
+SAM 3 needs **Python 3.12** and **transformers ≥ 4.56**, which conflict
+with every VLA adapter's pins. So SAM 3 runs in its own venv and serves
+detections to whichever adapter venv you're using over HTTP. Set it up
+**once per machine** — every adapter venv reuses it.
+
+```bash
+uv venv .venv-sam3 --python 3.12
+.venv-sam3/bin/pip install emboviz-sam3
+.venv-sam3/bin/emboviz-sam3 serve --preload &
+# (first run downloads facebook/sam3 — gated, needs HF_TOKEN — ~3.4 GB)
+```
+
+The sidecar listens on `127.0.0.1:8311` by default. Override with
+`EMBOVIZ_SAM3_URL=http://...` if you run it on another host or port.
+
+Once the sidecar is up, every `emboviz analyze` call defaults to SAM 3.
+If the sidecar isn't running you get a clear error pointing at this
+command. To skip the memorization diagnostic entirely, pass
+`--detector gd-sam` (falls back to GroundingDINO + SAM in-process; older
+but works without the sidecar) or `--target-annotations <path>` (your
+own per-frame bbox/mask file).
+
 ### Bring your own data
 
 The per-model quickstarts above use `--dataset <alias>` for the canonical

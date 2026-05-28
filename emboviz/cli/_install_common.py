@@ -84,3 +84,5 @@ def _ensure_pip(python: str, label: str) -> None:
             "could not bootstrap pip in this venv, and `uv` is not on PATH. "
             "Install uv (https://docs.astral.sh/uv/) or activate a venv that has pip."
         )
+
+

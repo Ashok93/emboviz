@@ -620,33 +620,43 @@ def load_annotation_connector(path: str | Path) -> TargetDetector:
 # ----------------------------------------------------------------------
 
 class SAM3Detector:
-    """Zero-shot open-vocabulary target detection via Meta's SAM 3.
+    """Zero-shot open-vocabulary target detection via Meta's SAM 3 (HTTP client).
 
-    SAM 3 (Meta AI, 2025) is a single model that accepts a text phrase and
-    segments every instance of that concept in an image. It replaces the
-    two-stage GroundingDINO + SAM 2 pipeline with one forward pass:
-        text → boxes + masks.
+    SAM 3 (Meta AI, [released Nov 2025](https://github.com/facebookresearch/sam3))
+    is a single model that takes a text phrase and segments every
+    instance of that concept in an image:
 
-    Reference: Meta blog "SAM 3.1" and the
-    `facebookresearch/sam3 <https://github.com/facebookresearch/sam3>`_
-    repo. Performance: SAM 3 doubles cgF1 vs OWLv2 on open-vocabulary
-    SA-Co and outperforms GroundingDINO, LLMDet, DINO-X, Gemini 2.5 Pro
-    on the standard open-vocab seg benchmarks.
+        text → boxes + masks (one forward pass).
 
-    Why this is the default over the GD+SAM combo:
-      • One model + one forward pass — fewer dependencies, lower latency,
-        lower VRAM than the two-stage pipeline.
-      • Native concept-aware text prompting (no taxonomy, no noun extraction).
+    Architecture: this class is an HTTP client. The actual SAM 3 model
+    runs in a SEPARATE Python 3.12 venv (the ``emboviz-sam3`` sidecar at
+    ``sam3_service/``) and exposes ``POST /detect`` over localhost.
+
+    Why a sidecar: SAM 3 requires Python 3.12+ and
+    ``transformers >= 4.56``. None of the four VLA adapter venvs
+    (OpenVLA on Python 3.10 + transformers 4.49, OFT on a vendored
+    transformers fork, π0 on Python 3.11 + transformers 4.53, GR00T on
+    Python 3.11 + transformers 4.57) can host those constraints
+    alongside their pinned adapter deps. Isolating SAM 3 in its own
+    process is the only architecture that works for every adapter.
+
+    Why this is the default over GD+SAM:
+      • One model + one forward pass on the server side.
+      • Native concept-aware text prompting (no noun extraction).
       • Better discrimination on close concepts via the presence-token.
+      • The server is shared across multiple runs — model loads once,
+        not per-runner-launch.
 
-    Required dependency: ``transformers >= 4.50`` (the version that
-    integrated SAM 3). The model checkpoint is fetched from HuggingFace
-    on first use (``facebook/sam3``). If the local transformers version
-    does not expose SAM 3 we raise loudly with the exact upgrade command
-    and point at ``GroundingDINOSAMDetector`` as the maintained fallback.
+    Client deps (this side): only ``httpx`` and ``pycocotools``. No
+    torch, no transformers. The detector POSTs the primary camera's
+    image bytes + the target phrase and parses a JSON response with
+    COCO-RLE-encoded masks.
 
     Usage::
 
+        # First, start the sidecar (one-time per session):
+        #   /root/venvs/sam3/bin/emboviz-sam3 serve --preload
+        # Then in the adapter venv:
         det = SAM3Detector(target_text="the mug")
         detection = det(scene)
         if detection is not None:
@@ -654,32 +664,38 @@ class SAM3Detector:
             box  = detection.bbox         # (x0,y0,x1,y1)
     """
 
-    DEFAULT_REPO = "facebook/sam3"
+    DEFAULT_URL = "http://127.0.0.1:8311"
 
     def __init__(
         self,
         target_text: str,
-        repo: str = DEFAULT_REPO,
+        base_url: Optional[str] = None,
         score_threshold: float = 0.30,
         mask_threshold: float = 0.50,
+        timeout: float = 120.0,
         device: str = "cuda",
     ):
         """Args:
-            target_text: REQUIRED. The phrase to localize — e.g. ``"the mug"``,
-                ``"the lid"``, ``"the welding torch"``, ``"the red pipe on
-                the left"``. Memorization is a USER-SCOPED test (which
-                object do you want to check the policy isn't ignoring?);
-                we never guess.
-            repo: HF repo for the SAM 3 checkpoint. Default
-                ``facebook/sam3``. Override to a finetuned SAM 3 if you
-                have one.
+            target_text: REQUIRED. The phrase to localize — e.g.
+                ``"the mug"``, ``"the lid"``, ``"the welding torch"``,
+                ``"the red pipe on the left"``. Memorization is a
+                USER-SCOPED test (which object do you want to check the
+                policy isn't ignoring?); we never guess.
+            base_url: URL of the running ``emboviz-sam3`` sidecar.
+                Default: read from ``EMBOVIZ_SAM3_URL`` env var, else
+                ``http://127.0.0.1:8311``.
             score_threshold: detections with the top instance's score
                 below this are returned as ``None`` (the diagnostic then
-                skips that frame with a clear reason). 0.30 is the value
-                from the SAM 3 release notes for "high-precision" use.
+                skips that frame with a clear reason). 0.30 is the
+                "high-precision" cutoff from the SAM 3 release notes.
             mask_threshold: SAM 3 emits per-pixel mask logits; values
-                above this become foreground. 0.50 is the standard cutoff.
-            device: ``"cuda"`` or ``"cpu"`` — heavy on CPU, prefer GPU.
+                above this become foreground. 0.50 is standard.
+            timeout: per-request HTTP timeout in seconds. SAM 3 inference
+                is ~100-300 ms per image on H100/A6000; the first
+                request to a freshly-started server pays a ~30 s warmup
+                if ``--preload`` wasn't passed.
+            device: legacy kwarg kept for signature compatibility; the
+                sidecar picks its own device. Ignored on this side.
         """
         if target_text is None or not str(target_text).strip():
             raise ValueError(
@@ -691,50 +707,67 @@ class SAM3Detector:
                 "what their model is supposed to manipulate. Set "
                 "target_text=\"<your object>\" when constructing the detector."
             )
+        import os as _os
         self.target_text = str(target_text).strip()
-        self.repo = repo
+        self.base_url = (
+            base_url
+            or _os.environ.get("EMBOVIZ_SAM3_URL")
+            or self.DEFAULT_URL
+        ).rstrip("/")
         self.score_threshold = float(score_threshold)
         self.mask_threshold = float(mask_threshold)
+        self.timeout = float(timeout)
+        # Kept for signature compatibility — the sidecar picks its own
+        # device.
         self.device = device
-        self._processor = None
-        self._model = None
+        self._client = None
+        self._health_checked = False
 
-    def _ensure_loaded(self) -> None:
-        if self._model is not None:
-            return
+    # -- low-level HTTP helpers ----------------------------------------
+
+    def _http(self):
+        if self._client is not None:
+            return self._client
         try:
-            import torch  # noqa: F401  (used downstream in __call__)
-            from transformers import AutoModel, AutoProcessor
+            import httpx
         except ImportError as e:
             raise ImportError(
-                "SAM3Detector requires `transformers`. Install via your "
-                "model adapter's optional deps (e.g. uv pip install "
-                "transformers)."
+                "SAM3Detector requires `httpx` in the adapter venv. "
+                "Install via: uv pip install httpx"
             ) from e
+        self._client = httpx.Client(
+            base_url=self.base_url, timeout=self.timeout,
+        )
+        return self._client
+
+    def _check_health(self) -> None:
+        """First-call probe: confirm the sidecar is reachable and emit a
+        clear, actionable error if it isn't. We do not auto-spawn the
+        sidecar — it has its own venv and HF cache and the user should
+        be in control of when the 850M-param model loads."""
+        if self._health_checked:
+            return
         try:
-            self._processor = AutoProcessor.from_pretrained(self.repo)
-            self._model = (
-                AutoModel.from_pretrained(self.repo).to(self.device).eval()
-            )
-        except (OSError, ValueError, KeyError) as e:
+            r = self._http().get("/health")
+            r.raise_for_status()
+        except Exception as e:
             raise RuntimeError(
-                f"SAM3Detector could not load '{self.repo}' via "
-                f"transformers AutoModel/AutoProcessor: "
-                f"{type(e).__name__}: {e}\n\n"
-                "Two common causes:\n"
-                "  1. Your transformers version predates SAM 3 (needs "
-                "transformers >= 4.50). Upgrade: uv pip install -U "
-                "'transformers>=4.50'.\n"
-                "  2. The checkpoint isn't downloaded yet. The first call "
-                "fetches it from HuggingFace (gated; you may need to "
-                "accept the model card).\n\n"
-                "If you need to keep moving without SAM 3, use the "
-                "GroundingDINOSAMDetector fallback explicitly."
+                f"SAM3Detector cannot reach the SAM 3 sidecar at "
+                f"{self.base_url}: {type(e).__name__}: {e}\n\n"
+                "Start the sidecar (in its own Python 3.12 venv):\n"
+                "    /root/venvs/sam3/bin/emboviz-sam3 serve --preload\n\n"
+                "Or override the URL via EMBOVIZ_SAM3_URL=http://...\n\n"
+                "If the sidecar isn't installed, run:\n"
+                "    bash /root/emboviz/scripts/setup/05_install_sam3_venv.sh\n\n"
+                "If you need to keep moving without SAM 3, pass\n"
+                "    --detector gd-sam\n"
+                "to fall back to GroundingDINO + SAM."
             ) from e
+        self._health_checked = True
+
+    # -- public detector contract --------------------------------------
 
     def __call__(self, scene: Scene) -> Optional[TargetDetection]:
-        import torch
-
         if "primary" not in scene.observations.images:
             raise ValueError(
                 "SAM3Detector expects a 'primary' camera in the scene "
@@ -742,106 +775,90 @@ class SAM3Detector:
                 "a probe scene that aliases the camera you want to inspect "
                 "under the name 'primary'."
             )
-        self._ensure_loaded()
-        assert self._model is not None and self._processor is not None
-
+        self._check_health()
         pil = scene.observations.images["primary"].data
-        # Some processors accept text as a list of strings, others as a
-        # single string. The SAM 3 processor expects a flat phrase; we
-        # don't pluralize.
-        inputs = self._processor(
-            images=pil, text=self.target_text, return_tensors="pt",
-        )
-        # Move every tensor in the BatchFeature to the target device.
-        inputs = {
-            k: (v.to(self.device) if hasattr(v, "to") else v)
-            for k, v in inputs.items()
+
+        # Encode image as PNG bytes once. We pick PNG over JPEG because
+        # JPEG lossy compression can change detection slightly; PNG is
+        # lossless and SAM 3 server-side decoding cost is negligible
+        # compared to the inference itself.
+        import io as _io
+        buf = _io.BytesIO()
+        pil.save(buf, format="PNG")
+        img_bytes = buf.getvalue()
+
+        files = {"image": ("frame.png", img_bytes, "image/png")}
+        data = {
+            "target_text":     self.target_text,
+            "score_threshold": str(self.score_threshold),
+            "mask_threshold":  str(self.mask_threshold),
         }
-        with torch.inference_mode():
-            outputs = self._model(**inputs)
-        # SAM 3 exposes per-instance scores + boxes + mask logits. We use
-        # the processor's post-processing helper so future changes to the
-        # head don't break us; we surface its result keys explicitly.
-        target_sizes = torch.tensor([pil.size[::-1]], device=self.device)
-        if not hasattr(self._processor, "post_process_instance_segmentation"):
+        r = self._http().post("/detect", files=files, data=data)
+        if r.status_code >= 400:
             raise RuntimeError(
-                "Loaded SAM 3 processor does not expose "
-                "post_process_instance_segmentation. Either your "
-                "transformers version is newer than this code expected, "
-                "or the loaded checkpoint isn't a SAM 3 segmentation "
-                "model. We refuse to guess the output decoder."
+                f"SAM3Detector /detect returned HTTP {r.status_code}: "
+                f"{r.text[:500]}"
             )
-        results = self._processor.post_process_instance_segmentation(
-            outputs,
-            threshold=self.score_threshold,
-            mask_threshold=self.mask_threshold,
-            target_sizes=target_sizes,
-        )
-        if not results:
+        body = r.json()
+        instances = body.get("instances") or []
+        if not instances:
             return None
-        out = results[0]
-        # The post-processor returns per-instance masks, scores, and labels.
-        # Different transformer releases name these slightly differently
-        # (``masks`` vs ``segmentation``, ``scores`` vs ``confidences``);
-        # we accept both rather than guess.
-        if "masks" in out:
-            masks = out["masks"]
-        elif "segmentation" in out:
-            masks = out["segmentation"]
-        else:
-            raise RuntimeError(
-                f"SAM 3 post-processor output has no 'masks' or "
-                f"'segmentation' key; got keys {list(out)}. The "
-                "transformers SAM 3 output schema may have changed."
-            )
-        scores = out.get("scores", out.get("confidences"))
-        if scores is None:
-            raise RuntimeError(
-                f"SAM 3 post-processor output has no 'scores' or "
-                f"'confidences' key; got keys {list(out)}."
-            )
-        masks_np: np.ndarray
-        if hasattr(masks, "cpu"):
-            masks_np = masks.cpu().numpy().astype(bool)
-        else:
-            masks_np = np.asarray(masks).astype(bool)
-        if masks_np.ndim == 2:
-            masks_np = masks_np[None]
-        if masks_np.shape[0] == 0:
-            return None
-        scores_np = (
-            scores.cpu().numpy()
-            if hasattr(scores, "cpu")
-            else np.asarray(scores)
-        ).astype(float)
-        keep = [
-            int(i) for i in range(len(scores_np))
-            if float(scores_np[i]) >= self.score_threshold
+        return self._build_detection(instances, body)
+
+    def _build_detection(
+        self, instances: list[dict], body: dict,
+    ) -> TargetDetection:
+        """Decode the COCO-RLE-encoded server response into a TargetDetection.
+
+        Instances arrive sorted highest-score-first (per the server).
+        We union all masks above ``score_threshold`` and report each
+        instance's bbox + score for transparency.
+        """
+        from pycocotools import mask as coco_mask
+        kept = [
+            i for i in instances
+            if float(i.get("score", 0.0)) >= self.score_threshold
         ]
-        if not keep:
-            return None
-        # Build per-instance bboxes from the masks (more reliable than
-        # whatever the head may have returned, since post_process_*
-        # variants don't always emit boxes).
+        if not kept:
+            return None  # type: ignore[return-value]
         inst_boxes: list[tuple[int, int, int, int]] = []
         inst_scores: list[float] = []
         union: Optional[np.ndarray] = None
-        for i in keep:
-            m = masks_np[i]
+        for inst in kept:
+            mask_obj = inst.get("mask") or {}
+            counts = mask_obj.get("counts")
+            size = mask_obj.get("size")
+            if not (counts and isinstance(size, list) and len(size) == 2):
+                continue
+            rle = {
+                "counts": counts.encode("latin-1") if isinstance(counts, str) else counts,
+                "size":   [int(size[0]), int(size[1])],
+            }
+            m = coco_mask.decode(rle).astype(bool)
+            if m.ndim == 3:
+                m = m[..., 0]
             if not m.any():
                 continue
-            ys, xs = np.where(m)
-            inst_boxes.append((int(xs.min()), int(ys.min()),
-                               int(xs.max()), int(ys.max())))
-            inst_scores.append(float(scores_np[i]))
+            bx = inst.get("bbox") or []
+            if len(bx) == 4:
+                x0, y0, x1, y1 = (int(v) for v in bx)
+            else:
+                ys, xs = np.where(m)
+                x0, y0 = int(xs.min()), int(ys.min())
+                x1, y1 = int(xs.max()), int(ys.max())
+            inst_boxes.append((x0, y0, x1, y1))
+            inst_scores.append(float(inst.get("score", 0.0)))
             union = m if union is None else (union | m)
         if union is None or not union.any():
-            return None
+            return None  # type: ignore[return-value]
         ys, xs = np.where(union)
-        union_bbox = (int(xs.min()), int(ys.min()),
-                      int(xs.max()), int(ys.max()))
+        union_bbox = (
+            int(xs.min()), int(ys.min()),
+            int(xs.max()), int(ys.max()),
+        )
         n = len(inst_boxes)
-        label = self.target_text if n == 1 else f"{self.target_text} ×{n}"
+        target_text = str(body.get("label", self.target_text))
+        label = target_text if n == 1 else f"{target_text} ×{n}"
         return TargetDetection(
             bbox=union_bbox,
             mask=union,
