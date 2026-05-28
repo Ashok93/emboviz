@@ -124,7 +124,12 @@ def _resolve(spec: str, kwargs_json: str = ""):
     if spec.startswith("adapter:"):
         from emboviz.adapters import connect
         name = spec.split(":", 1)[1]
-        handle = connect(name)
+        # ``--model-kwargs`` (parsed into ``kwargs`` above) are the user's
+        # per-run constructor overrides — most importantly THEIR
+        # fine-tuned ``checkpoint``. They're merged over the spec's
+        # ``default_actor_kwargs`` and forwarded into the worker at spawn
+        # time, so the worker loads the user's model, not the demo default.
+        handle = connect(name, actor_kwargs=kwargs or None)
         # We return the client only. The Popen handle (if we spawned)
         # is intentionally left attached to the running worker so the
         # next CLI invocation in the same session re-uses it. The OS

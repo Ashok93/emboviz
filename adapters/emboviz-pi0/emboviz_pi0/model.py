@@ -38,8 +38,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
-from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
+from emboviz_wire import ActionResult, AttentionMaps, Scene, TokenSelector
+from emboviz_wire import Capability, RequiredInputs, VLAModel
 
 
 # Default checkpoint URI prefix from openpi's published checkpoints
@@ -219,20 +219,23 @@ class Pi0Adapter(VLAModel):
     """Wraps `openpi`'s trained policy as a VLAModel.
 
     Construction:
-        Pi0Adapter()                                        # pi0_fast_droid default
         Pi0Adapter(config_name="pi0_libero")
         Pi0Adapter(config_name="pi05_droid",
                    observation_builder=my_custom_builder,
                    required_inputs=my_custom_inputs)
 
-    For known platforms (DROID/ALOHA/LIBERO) the builder + required-inputs
-    are picked automatically. For a custom platform pass both explicitly —
-    we do not fall back to DROID silently.
+    ``config_name`` is REQUIRED — there is no silent default. It selects
+    both the openpi checkpoint AND the platform (DROID/ALOHA/LIBERO),
+    which determine the exact cameras and state shape consumed. A silent
+    default here is a wrong-model bug (it previously defaulted to
+    ``pi0_fast_droid``, quietly loading the DROID platform on non-DROID
+    data). For known platforms the builder + required-inputs are picked
+    from config_name; for a custom platform pass both explicitly.
     """
 
     def __init__(
         self,
-        config_name: str = "pi0_fast_droid",
+        config_name: Optional[str] = None,
         checkpoint_uri: Optional[str] = None,
         observation_builder: Optional[Callable[[Scene], dict]] = None,
         required_inputs: Optional[RequiredInputs] = None,
@@ -260,6 +263,16 @@ class Pi0Adapter(VLAModel):
                 Convert your JAX checkpoint once with
                 ``examples/convert_jax_model_to_pytorch.py`` from openpi.
         """
+        if not config_name:
+            raise ValueError(
+                "Pi0Adapter requires an explicit config_name (e.g. "
+                "'pi0_libero', 'pi05_droid', 'pi0_aloha_sim') — there is NO "
+                "silent default. Set it in --model-kwargs or your run "
+                "config's model.kwargs. (It selects both the checkpoint and "
+                "the platform's required cameras/state; defaulting it would "
+                "silently run the wrong model on your data.)"
+            )
+
         try:
             from openpi.policies import policy_config as _policy_config
             from openpi.shared import download
@@ -479,7 +492,7 @@ class Pi0Adapter(VLAModel):
             once by openpi inside ``policy.infer``.
         """
         if not self.use_pytorch:
-            from emboviz.models.protocol import NotSupported
+            from emboviz_wire import NotSupported
             raise NotSupported(
                 "Pi0Adapter.extract_attention requires use_pytorch=True. "
                 "The JAX inference path is JIT-compiled and doesn't expose "
@@ -691,10 +704,10 @@ class Pi0Adapter(VLAModel):
         steps, no head-mean baked in, no calibration — raw attention.
         """
         if not self.use_pytorch:
-            from emboviz.models.protocol import NotSupported
+            from emboviz_wire import NotSupported
             raise NotSupported("extract_attention_trace requires use_pytorch=True.")
         import torch
-        from emboviz.core.types import AttentionTrace
+        from emboviz_wire import AttentionTrace
 
         reason = self._required_inputs.validate(scene)
         if reason is not None:

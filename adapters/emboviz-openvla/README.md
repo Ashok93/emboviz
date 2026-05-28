@@ -24,14 +24,10 @@ emboviz install-openvla
 ## Use
 
 ```bash
-emboviz analyze \
-    --model openvla \
-    --dataset bridge \
-    --episodes 537 \
-    --mask-query "the cloth" \
-    --diagnostics all \
-    --output ./report
+emboviz analyze --config configs/openvla-bridge.yaml
 ```
 
-The diagnostic suite calls into the Ray actor that lives inside the
-isolated venv; the model never imports into your main environment.
+The run is described entirely by the config (model + checkpoint, dataset
+mapping, diagnostics). Copy the template and set `model.kwargs.hf_repo` to
+your own fine-tune. The diagnostic suite runs the model in the isolated ZMQ
+worker venv; it never imports into your main environment.

@@ -1,0 +1,50 @@
+# emboviz run config — OpenVLA-7B on BridgeV2.
+#
+#   emboviz analyze --config configs/openvla-bridge.yaml
+#
+# To diagnose YOUR OpenVLA fine-tune on YOUR data: copy this file, set
+# model.kwargs.checkpoint to your checkpoint, point dataset.path at your
+# dataset, and fix the camera / convention bindings below.
+
+model:
+  adapter: openvla                       # the installed emboviz adapter
+  kwargs:                                # constructor overrides (merged over the adapter defaults)
+    hf_repo: openvla/openvla-7b          # <-- your fine-tuned checkpoint (HF repo or local dir)
+    unnorm_key: bridge_orig              # action de-normalization stats key
+
+dataset:
+  format: lerobot                        # lerobot | hdf5 | rlds | mcap | rerun
+  path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id, or a local dir
+
+  # model's logical camera role  ->  this dataset's actual image key.
+  # OpenVLA consumes a single exterior view ("primary"). (Bridge also ships
+  # image_1/2/3 — add them here only if you want them in the scene.)
+  cameras:
+    primary: observation.images.image_0
+
+  state:
+    key: observation.state               # dim + per-dim names are read from the data
+    convention: ee_pose                  # [x, y, z, roll, pitch, yaw, gripper, ...] — NOT in the format, you state it
+
+  action:
+    key: action
+
+  gripper:                               # optional — omit to leave the gripper value inside the state vector
+    source: 6                            # index (or a per-dim name) of the gripper within the state vector
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks                          # natural-language instruction comes from meta/tasks.jsonl
+
+analysis:
+  episodes: "537"                        # "7" / "0,3,7" / "0-5" / "all"
+  frame_start: 20
+  n_frames: 4
+  frame_stride: 1
+  mask_query: "the cloth"                # memorization target — an object in THIS episode's scene
+  detector: sam3                         # sam3 | gd-sam
+  diagnostics: all                       # or a list: [memorization, modality, sensitivity, chunk, attention]
+
+output: ./report/openvla-bridge

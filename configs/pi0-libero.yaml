@@ -1,0 +1,47 @@
+# emboviz run config — Physical Intelligence π0 on physical-intelligence/libero.
+#
+#   emboviz analyze --config configs/pi0-libero.yaml
+
+model:
+  adapter: pi0
+  kwargs:
+    config_name: pi0_libero        # REQUIRED — selects checkpoint + platform (no silent default)
+    # checkpoint_uri: /path/to/your/pi0_finetune   # your fine-tune; omit -> openpi's published pi0_libero
+
+dataset:
+  format: lerobot
+  path: physical-intelligence/libero
+
+  # physical-intelligence/libero uses BARE keys (no "observation." prefix) and
+  # the role on the LEFT is what π0 asks for ("primary", "wrist_left"). This is
+  # exactly the binding that decouples the model's camera names from the
+  # dataset's — set the role names to match your model's required cameras.
+  cameras:                         # π0's LIBERO platform requires roles {primary, wrist}
+    primary: image
+    wrist:   wrist_image
+
+  state:
+    key: state                     # bare key (not observation.state)
+    convention: ee_pose
+
+  action:
+    key: actions                   # NOTE: plural, openpi naming
+
+  gripper:
+    source: 6
+    kind: parallel_jaw
+    units: m
+    range: [-0.04, 0.04]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"
+  frame_start: 20
+  n_frames: 4
+  mask_query: "the white mug"      # matches ep0: "put the white mug on the left plate ..."
+  detector: sam3
+  diagnostics: all
+
+output: ./report/pi0-libero

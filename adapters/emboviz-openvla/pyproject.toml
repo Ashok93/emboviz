@@ -17,7 +17,7 @@ requires-python = ">=3.10,<3.13"
 # checkpoint code) lives in ``AdapterSpec.runtime_pip`` and ships into
 # ``~/.emboviz/venvs/openvla/`` via ``emboviz install-openvla``.
 dependencies = [
-    "emboviz>=0.3",
+    "emboviz-wire>=0.3",
     "numpy>=1.26",
 ]
 

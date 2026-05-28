@@ -22,11 +22,7 @@ emboviz install-gr00t
 ```bash
 emboviz-gr00t serve &
 
-emboviz analyze \
-    --model gr00t \
-    --dataset droid-sample \
-    --episodes 0 \
-    --mask-query "the green block" \
-    --diagnostics all \
-    --output ./report
+emboviz analyze --config configs/gr00t-droid-sample.yaml
 ```
+
+Copy the template and set `model.kwargs.model_path` to your own fine-tune.

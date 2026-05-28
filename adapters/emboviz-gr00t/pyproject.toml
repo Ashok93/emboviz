@@ -7,7 +7,7 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<3.13"
 
 dependencies = [
-    "emboviz>=0.3",
+    "emboviz-wire>=0.3",
     "numpy>=1.26",
 ]
 

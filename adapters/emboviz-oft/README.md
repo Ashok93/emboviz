@@ -18,11 +18,7 @@ emboviz install-oft
 ## Use
 
 ```bash
-emboviz analyze \
-    --model oft \
-    --dataset libero-spatial \
-    --episodes 42 \
-    --mask-query "the black bowl" \
-    --diagnostics all \
-    --output ./report
+emboviz analyze --config configs/oft-libero-spatial.yaml
 ```
+
+Copy the template and set `model.kwargs.checkpoint` to your own fine-tune.

@@ -5,8 +5,9 @@ independent long-lived ZMQ worker. Production / cloud deployments
 manage these workers externally (systemd unit, docker compose,
 Kubernetes Deployment) and core just connects to the known endpoint.
 For local-development convenience we also support **opportunistic
-auto-spawn**: if the user invokes ``emboviz analyze --model openvla``
-and no worker is already running, we ``subprocess.Popen`` the
+auto-spawn**: if the user invokes ``emboviz analyze --config <file>``
+whose ``model.adapter`` names an adapter with no worker already
+running, we ``subprocess.Popen`` the
 adapter's ``server`` entry-point in its runtime venv and wait until
 it answers ``ping``. The spawned worker stays running between CLI
 invocations, so the model only cold-loads once per session.
@@ -18,6 +19,7 @@ diagnostics, CLI commands) just sees endpoints.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -121,7 +123,65 @@ def _editable_install_path(dist_name: str) -> Optional[Path]:
     return None
 
 
-def _rewrite_pip_for_dev(runtime_pip: tuple[str, ...]) -> list[str]:
+def repos_root() -> Path:
+    """Where adapter-side git checkouts live. Override with
+    ``EMBOVIZ_REPOS_DIR`` for shared / fast-filesystem setups."""
+    override = os.environ.get("EMBOVIZ_REPOS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".emboviz" / "repos"
+
+
+def _materialise_git_clones(
+    runtime_pip: tuple[str, ...] | list[str],
+) -> list[str]:
+    """Replace ``<name> @ git+https://...`` entries with ``-e <local>``
+    after cloning the repo to ``repos_root()/<repo-name>``. Other
+    requirement strings pass through unchanged.
+
+    Idempotent: an existing clone is reused (``git fetch + checkout``);
+    a missing one is cloned from scratch. We pin to whatever the URL
+    fragment specifies (``@<ref>``) so reruns get the same code.
+    """
+    out: list[str] = []
+    for req in runtime_pip:
+        parsed = _parse_named_git_requirement(req)
+        if parsed is None:
+            out.append(req)
+            continue
+        name, url, ref = parsed
+        repo_name = url.rstrip("/").split("/")[-1].removesuffix(".git")
+        local = repos_root() / repo_name
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if not local.exists():
+            subprocess.run(["git", "clone", url, str(local)], check=True)
+        if ref:
+            subprocess.run(["git", "-C", str(local), "fetch", "--quiet"], check=True)
+            subprocess.run(["git", "-C", str(local), "checkout", ref], check=True)
+        out.append("-e")
+        out.append(str(local))
+    return out
+
+
+def _parse_named_git_requirement(req: str) -> Optional[tuple[str, str, str]]:
+    """Decompose ``<name> @ git+https://<host>/<owner>/<repo>(.git)?@<ref>?``
+    into ``(name, url, ref)``. Returns None for anything that doesn't
+    match that exact shape so other requirement strings pass through
+    untouched."""
+    if " @ git+" not in req:
+        return None
+    name, _, url = req.partition(" @ git+")
+    name = name.strip()
+    url = url.strip()
+    ref = ""
+    if "@" in url and not url.startswith("git@"):
+        # split on the LAST @ — leaves room for URLs that contain @ in
+        # the auth part (rare for our case).
+        url, _, ref = url.rpartition("@")
+    return (name, url, ref)
+
+
+def _rewrite_pip_for_dev(runtime_pip: tuple[str, ...] | list[str]) -> list[str]:
     """Replace ``emboviz`` / ``emboviz-<x>`` deps with their local
     editable paths if installed editable in the current venv.
 
@@ -163,7 +223,7 @@ def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
         uv pip install emboviz-<name>     # adapter shim
         emboviz install-<name>            # this function (heavy deps)
         emboviz-<name> serve              # start the worker
-        emboviz analyze --model <name>    # connect
+        emboviz analyze --config <file>   # connect (config's model.adapter = <name>)
 
     Shells out to ``uv venv`` and ``uv pip install`` — exact same
     commands the README documents — so dev and user paths are
@@ -195,8 +255,21 @@ def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
         env=env,
     )
 
+    # Second pass: any --no-deps installs. For each requirement that
+    # looks like ``<name> @ git+https://<host>/<owner>/<repo>...``, we
+    # clone the repo to ``~/.emboviz/repos/<repo>`` first and replace
+    # the requirement with ``-e <clone_path>``. This works around a uv
+    # constraint: uv strictly parses transitive git deps, and NVIDIA's
+    # Isaac-GR00T pyproject pins ``torchcodec`` via a ``file://...wheel``
+    # URL inside its own repo. When we install via ``-e <clone>`` that
+    # file:// ref is just a local-to-local path which uv accepts; when
+    # we install via ``git+`` it's a transitive git ref pointing at a
+    # file, which uv refuses. Cloning once gives every adapter a stable
+    # checkout under ``~/.emboviz/repos/`` we can also reuse for the
+    # adapter's ``demo_data`` etc.
     if spec.runtime_pip_no_deps:
-        no_deps_requirements = _rewrite_pip_for_dev(spec.runtime_pip_no_deps)
+        no_deps_requirements = _materialise_git_clones(spec.runtime_pip_no_deps)
+        no_deps_requirements = _rewrite_pip_for_dev(no_deps_requirements)
         subprocess.run(
             [
                 "uv", "pip", "install", "--python", str(py),
@@ -258,13 +331,23 @@ def _is_alive(endpoint: str, *, timeout_ms: int = 1500) -> bool:
         c.close()
 
 
-def _spawn_worker(spec: AdapterSpec, endpoint: str) -> subprocess.Popen:
+def _spawn_worker(
+    spec: AdapterSpec, endpoint: str,
+    actor_kwargs: Optional[dict] = None,
+) -> subprocess.Popen:
     """Start the adapter's worker process in its isolated runtime venv.
 
     Tries the ``[project.scripts]`` console entry-point first (e.g.
     ``emboviz-openvla`` on the venv's PATH). Falls back to ``python -m
     <server_module>``. The output is appended to
     ``~/.emboviz/logs/<name>.log`` so users can ``tail -f`` it.
+
+    ``actor_kwargs`` are per-run constructor overrides (e.g. a user's
+    fine-tuned ``checkpoint``). They are merged ON TOP of the spec's
+    declared ``default_actor_kwargs`` and forwarded to the worker via
+    ``serve --kwargs <json>``, which hands them to the model
+    constructor. This is the single mechanism by which a user points an
+    adapter at THEIR checkpoint instead of the spec default.
     """
     venv_bin = venv_python(spec.name).parent
 
@@ -274,6 +357,10 @@ def _spawn_worker(spec: AdapterSpec, endpoint: str) -> subprocess.Popen:
     else:
         cmd = [str(venv_python(spec.name)), "-m", spec.server_module]
 
+    # The worker's CLI is a Click group whose ``serve`` subcommand binds
+    # the socket — same shape as ``vllm serve`` / ``ollama serve``.
+    cmd.append("serve")
+
     # ipc:// endpoints carry a path we hand to --sock; tcp:// endpoints
     # take --tcp host:port.
     if endpoint.startswith("ipc://"):
@@ -282,6 +369,17 @@ def _spawn_worker(spec: AdapterSpec, endpoint: str) -> subprocess.Popen:
         cmd += ["--tcp", endpoint[len("tcp://"):]]
     else:
         raise ValueError(f"unsupported endpoint scheme: {endpoint!r}")
+
+    # Construction kwargs: the spec's declared defaults overlaid with any
+    # per-run overrides (a user's fine-tuned checkpoint, alternate
+    # unnorm_key, etc.). Forwarded to the worker, which merges them over
+    # its own serve() defaults and hands them to the model constructor.
+    merged_kwargs = {
+        **(getattr(spec, "default_actor_kwargs", None) or {}),
+        **(actor_kwargs or {}),
+    }
+    if merged_kwargs:
+        cmd += ["--kwargs", json.dumps(merged_kwargs)]
 
     env = dict(os.environ)
     env.update(spec.runtime_env_vars)
@@ -378,6 +476,7 @@ def _ensure_runtime_venv(
 def connect(
     name: str,
     *,
+    actor_kwargs: Optional[dict] = None,
     auto_spawn: bool = True,
     auto_install: bool = True,
     timeout_s: int = 600,
@@ -409,6 +508,25 @@ def connect(
 
     # ── 1. Already alive ────────────────────────────────────────────
     if _is_alive(endpoint):
+        # A warm worker carries whatever construction kwargs it was
+        # spawned with. If the caller is requesting specific per-run
+        # kwargs (e.g. their own --model-kwargs checkpoint), we must NOT
+        # silently attach to a worker that may hold a different model —
+        # that would diagnose the wrong checkpoint. Refuse with a clear
+        # remediation. (No actor_kwargs → attaching to the warm worker
+        # is exactly the intended fast path.)
+        if actor_kwargs:
+            raise RuntimeError(
+                f"a '{name}' worker is already running at {endpoint}, "
+                f"loaded with its own configuration. Refusing to route "
+                f"this run's model-kwargs {actor_kwargs!r} to it — it may "
+                f"hold a different checkpoint, and sending your data to "
+                f"the wrong model would be a silent-wrong-answer bug. "
+                f"Stop the running worker first (kill the "
+                f"`emboviz-{name} serve` process, or remove "
+                f"{endpoint[len('ipc://'):] if endpoint.startswith('ipc://') else endpoint}), "
+                f"then re-run so a fresh worker loads with your kwargs."
+            )
         client = ZMQAdapterClient(name=name, endpoint=endpoint)
         return WorkerHandle(
             name=name, endpoint=endpoint, client=client, spawned=False,
@@ -433,7 +551,7 @@ def connect(
             "or pass --auto-spawn (default) to let emboviz launch one."
         )
 
-    proc = _spawn_worker(spec, endpoint)
+    proc = _spawn_worker(spec, endpoint, actor_kwargs=actor_kwargs)
     try:
         _wait_for_ready(endpoint, proc, timeout_s=timeout_s)
     except Exception:

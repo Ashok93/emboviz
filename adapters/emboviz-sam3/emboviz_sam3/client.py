@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from emboviz.adapters import RpcClient
+from emboviz_wire import RpcClient
 
 
 class Sam3Client(RpcClient):

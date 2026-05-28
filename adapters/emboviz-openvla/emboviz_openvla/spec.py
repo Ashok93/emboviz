@@ -15,7 +15,7 @@ the user's main venv to read SPEC. No torch, no transformers.
 
 from __future__ import annotations
 
-from emboviz.adapters import AdapterSpec
+from emboviz_wire import AdapterSpec
 
 
 SPEC = AdapterSpec(
@@ -49,7 +49,7 @@ SPEC = AdapterSpec(
         "torchcodec>=0.5",
         "av>=14",
         "pandas>=2.0",
-        "emboviz",
+        "emboviz-wire",
         "emboviz-openvla",
     ),
     default_actor_kwargs={

@@ -16,7 +16,7 @@ requires-python = ">=3.10,<3.13"
 # ``AdapterSpec.runtime_pip`` and installs into
 # ``~/.emboviz/venvs/sam3/`` via ``emboviz install-sam3``.
 dependencies = [
-    "emboviz>=0.3",
+    "emboviz-wire>=0.3",
     "numpy>=1.26",
 ]
 

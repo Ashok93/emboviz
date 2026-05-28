@@ -21,14 +21,10 @@ emboviz install-pi0
 # Start the worker (stays warm between analyze runs):
 emboviz-pi0 serve &
 
-emboviz analyze \
-    --model pi0 \
-    --dataset pi-libero \
-    --episodes 0 \
-    --mask-query "the mug" \
-    --diagnostics all \
-    --output ./report
+emboviz analyze --config configs/pi0-libero.yaml
 ```
+
+Copy the template and set `model.kwargs.checkpoint_uri` to your own fine-tune.
 
 Note: the first inference after install triggers checkpoint download
 + Triton autotune (~5–10 minutes). Subsequent runs are fast.

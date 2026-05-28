@@ -11,7 +11,7 @@ runtime, so ``flash-attn`` is never actually invoked.
 
 from __future__ import annotations
 
-from emboviz.adapters import AdapterSpec
+from emboviz_wire import AdapterSpec
 
 
 SPEC = AdapterSpec(
@@ -30,7 +30,7 @@ SPEC = AdapterSpec(
         "decord>=0.6",
         "pandas>=2.0",
         "lerobot>=0.3,<0.5",
-        "emboviz",
+        "emboviz-wire",
         "emboviz-gr00t",
     ),
     # NVIDIA's gr00t package: installed with --no-deps so pip skips

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 
 def main() -> None:
-    from emboviz.adapters import serve
+    from emboviz_wire import serve
     from emboviz_sam3.handler import Sam3DetectorHandler
 
     serve(

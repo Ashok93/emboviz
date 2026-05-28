@@ -11,7 +11,7 @@ requires-python = ">=3.10,<3.13"
 # (neither is on PyPI), so this shim has nothing heavy to install
 # in the user's main venv.
 dependencies = [
-    "emboviz>=0.3",
+    "emboviz-wire>=0.3",
     "numpy>=1.26",
 ]
 

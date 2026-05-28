@@ -14,7 +14,7 @@ because the ZMQ wire is bytes and cross-Python-version safe.
 
 from __future__ import annotations
 
-from emboviz.adapters import AdapterSpec
+from emboviz_wire import AdapterSpec
 
 
 SPEC = AdapterSpec(
@@ -22,6 +22,13 @@ SPEC = AdapterSpec(
     server_module="emboviz_sam3.server",
     runtime_pip=(
         "torch>=2.7,<2.10",
+        # SAM 3's processor uses ``Sam3VideoProcessor`` which is
+        # backed by torchvision IO ops. Without torchvision installed,
+        # ``AutoProcessor.from_pretrained("facebook/sam3")`` fails at
+        # import time. The image processor itself also gates on the
+        # torchvision-only path now (see
+        # ``IMAGE_PROCESSOR_MAPPING_NAMES["sam3"] = {torchvision: ...}``).
+        "torchvision>=0.22",
         "transformers>=4.56",
         "accelerate>=1.0",
         "safetensors>=0.5",
@@ -31,7 +38,7 @@ SPEC = AdapterSpec(
         # Core (carries pyzmq + msgpack + msgpack-numpy + the
         # adapter base classes) and this shim. The lifecycle layer
         # rewrites both to ``-e <local_path>`` in dev mode.
-        "emboviz",
+        "emboviz-wire",
         "emboviz-sam3",
     ),
     default_actor_kwargs={

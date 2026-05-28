@@ -18,6 +18,7 @@ GripperKind = Literal[
 
 GripperUnits = Literal[
     "unit",             # normalized [0, 1] (the default for OpenVLA-style)
+    "m",                # meters (parallel-jaw finger width, SI — e.g. Panda ±0.04 m)
     "mm",               # millimeters (parallel-jaw width)
     "rad",              # radians (rotary grippers, finger joints)
     "binary",           # 0.0 or 1.0

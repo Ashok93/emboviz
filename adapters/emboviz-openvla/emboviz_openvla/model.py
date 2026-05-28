@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import (
+from emboviz_wire import (
     ActionResult,
     AttentionMaps,
     FFNActivations,
@@ -26,7 +26,7 @@ from emboviz.core.types import (
     Scene,
     TokenSelector,
 )
-from emboviz.models.protocol import (
+from emboviz_wire import (
     Capability,
     NotSupported,
     RequiredInputs,
@@ -83,11 +83,18 @@ class OpenVLAAdapter(VLAModel):
 
     def __init__(
         self,
-        hf_repo: str = HF_REPO_DEFAULT,
+        hf_repo: str = "",
         unnorm_key: str = DEFAULT_UNNORM_KEY,
         device: str = "cuda",
         attn_implementation: str = "eager",  # eager-attn keeps gradients
     ):
+        if not hf_repo:
+            raise ValueError(
+                "OpenVLAAdapter requires an explicit hf_repo (e.g. "
+                "'openvla/openvla-7b' or your fine-tune) — no silent "
+                "default. Set it in --model-kwargs / the run config's "
+                "model.kwargs."
+            )
         import torch
         from transformers import AutoModelForVision2Seq, AutoProcessor
 

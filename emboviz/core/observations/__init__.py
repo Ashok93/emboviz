@@ -1,30 +1,9 @@
-"""Typed observation classes — one per sensor modality.
+"""Compatibility shim — moved to `emboviz_wire.observations`.
 
-Each modality is its own frozen dataclass carrying its raw data plus the
-metadata that makes the data unambiguous (units, conventions, frame).
-This kills a category of silent-wrong-answer bugs where a joint-angle
-vector ends up fed to a model expecting end-effector pose, or a gripper
-value in mm ends up interpreted as unit-normalized.
-
-The runtime shape of each modality is intentionally small; richer
-per-team metadata (joint names, gripper kind specifics, action-dim
-layout) lives in `emboviz.core.profile.RobotProfile`.
+The implementation now lives in the standalone `emboviz-wire` package
+(the minimal ZMQ connector + shared wire contracts that model worker
+venvs install). This module re-exports it so existing
+`emboviz.core.observations` imports keep working in the emboviz host venv. New code should
+import from `emboviz_wire.observations` directly.
 """
-
-from emboviz.core.observations.action_history import ActionHistory
-from emboviz.core.observations.depth import DepthMap
-from emboviz.core.observations.force import ForceTorque
-from emboviz.core.observations.gripper import GripperState
-from emboviz.core.observations.image import RGBImage
-from emboviz.core.observations.state import Proprioception
-from emboviz.core.observations.tactile import TactileReading
-
-__all__ = [
-    "ActionHistory",
-    "DepthMap",
-    "ForceTorque",
-    "GripperState",
-    "RGBImage",
-    "Proprioception",
-    "TactileReading",
-]
+from emboviz_wire.observations import *  # noqa: F401,F403

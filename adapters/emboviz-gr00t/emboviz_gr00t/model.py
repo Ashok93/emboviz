@@ -22,27 +22,34 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
-from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
+from emboviz_wire import ActionResult, AttentionMaps, Scene, TokenSelector
+from emboviz_wire import Capability, RequiredInputs, VLAModel
 
 
-# Sensible default embodiment for tabletop manipulation rollouts. Teams
-# with their own embodiment override via the `embodiment_tag` arg.
-DEFAULT_EMBODIMENT = "OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
-DEFAULT_MODEL_PATH = "nvidia/GR00T-N1.7-3B"
+# Demo values (the shipped GR00T-N1.7 checkpoint + DROID embodiment).
+# These are documentation only — they are NOT constructor defaults: a
+# silent default here would load the wrong model on the wrong embodiment.
+# The adapter spec's default_actor_kwargs carries them explicitly, and a
+# user's fine-tune overrides via the run config's model.kwargs.
+DEMO_EMBODIMENT = "OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
+DEMO_MODEL_PATH = "nvidia/GR00T-N1.7-3B"
 
 
 class Gr00tAdapter(VLAModel):
     """Wraps `gr00t.policy.Gr00tPolicy` as an Emboviz `VLAModel`.
 
     Construction:
-        Gr00tAdapter()                                          # default checkpoint + embodiment
-        Gr00tAdapter(model_path="nvidia/GR00T-N1-2B")
-        Gr00tAdapter(embodiment_tag="GR1", camera_mapping={"primary": "video.ego_view"})
+        Gr00tAdapter(model_path="nvidia/GR00T-N1.7-3B",
+                     embodiment_tag="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT")
+        Gr00tAdapter(model_path="...", embodiment_tag="GR1",
+                     camera_mapping={"primary": "video.ego_view"})
 
-    `camera_mapping` translates our Scene camera names into GR00T's
-    embodiment-specific video keys. By default we route our `"primary"`
-    into the first declared video key of the selected embodiment.
+    ``model_path`` and ``embodiment_tag`` are REQUIRED — there is no
+    silent default. The embodiment selects how state/action are
+    interpreted, so defaulting it is a wrong-model bug. ``camera_mapping``
+    translates our Scene camera names into GR00T's embodiment-specific
+    video keys; it auto-maps only when the embodiment declares exactly
+    one video key (otherwise it is required).
     """
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
@@ -69,11 +76,26 @@ class Gr00tAdapter(VLAModel):
 
     def __init__(
         self,
-        model_path: str = DEFAULT_MODEL_PATH,
-        embodiment_tag: str = DEFAULT_EMBODIMENT,
+        model_path: Optional[str] = None,
+        embodiment_tag: Optional[str] = None,
         device: str = "cuda:0",
         camera_mapping: Optional[dict[str, str]] = None,
     ):
+        if not model_path:
+            raise ValueError(
+                "Gr00tAdapter requires an explicit model_path (e.g. "
+                "'nvidia/GR00T-N1.7-3B' or your fine-tune) — no silent "
+                "default. Set it in --model-kwargs / the run config's "
+                "model.kwargs."
+            )
+        if not embodiment_tag:
+            raise ValueError(
+                "Gr00tAdapter requires an explicit embodiment_tag (e.g. "
+                "'OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT') — no silent "
+                "default. The embodiment determines how state/action are "
+                "interpreted; defaulting it would run the wrong model."
+            )
+
         try:
             from gr00t.data.embodiment_tags import EmbodimentTag
             from gr00t.policy import Gr00tPolicy
@@ -485,7 +507,7 @@ class Gr00tAdapter(VLAModel):
         denoise steps and toggle heads. No averaging over steps, no head-mean.
         """
         import torch
-        from emboviz.core.types import AttentionTrace
+        from emboviz_wire import AttentionTrace
 
         reason = self.required_inputs.validate(scene)
         if reason is not None:

@@ -29,8 +29,8 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
-from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
+from emboviz_wire import ActionResult, AttentionMaps, Scene, TokenSelector
+from emboviz_wire import Capability, RequiredInputs, VLAModel
 
 
 _DEFAULT_REPO = "moojink/openvla-7b-oft-finetuned-libero-spatial"
@@ -64,7 +64,7 @@ class OpenVLAOFTAdapter(VLAModel):
 
     def __init__(
         self,
-        checkpoint: str = _DEFAULT_REPO,
+        checkpoint: str = "",
         unnorm_key: str = "libero_spatial_no_noops",
         num_images: int = 2,
         use_proprio: bool = True,
@@ -73,6 +73,13 @@ class OpenVLAOFTAdapter(VLAModel):
         center_crop: bool = True,
         wrist_camera: str = "wrist",
     ):
+        if not checkpoint:
+            raise ValueError(
+                "OpenVLAOFTAdapter requires an explicit checkpoint (e.g. "
+                "'moojink/openvla-7b-oft-finetuned-libero-spatial' or your "
+                "fine-tune) — no silent default. Set it in --model-kwargs / "
+                "the run config's model.kwargs."
+            )
         self.wrist_camera = wrist_camera
         self.num_images = num_images
         try:

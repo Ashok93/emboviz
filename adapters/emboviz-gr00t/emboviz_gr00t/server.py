@@ -14,7 +14,7 @@ from __future__ import annotations
 
 
 def main() -> None:
-    from emboviz.adapters import VLAModelHandler, serve
+    from emboviz_wire import VLAModelHandler, serve
     from emboviz_gr00t.model import Gr00tAdapter
 
     def factory(**kwargs):

@@ -19,7 +19,7 @@ people who only want JAX inference don't pay the convert cost.
 
 from __future__ import annotations
 
-from emboviz.adapters import AdapterSpec
+from emboviz_wire import AdapterSpec
 
 
 SPEC = AdapterSpec(
@@ -38,14 +38,20 @@ SPEC = AdapterSpec(
         # carries GIT_LFS_SKIP_SMUDGE=1 in env so the transitive
         # lerobot checkout doesn't try to smudge missing fixtures.
         "openpi @ git+https://github.com/Physical-Intelligence/openpi.git",
-        "emboviz",
+        "emboviz-wire",
         "emboviz-pi0",
     ),
     runtime_env_vars={"GIT_LFS_SKIP_SMUDGE": "1"},
+    # MUST match Pi0Adapter.__init__ exactly — these are now forwarded to
+    # the worker at spawn (lifecycle passes default_actor_kwargs as
+    # --kwargs). The old {checkpoint, device} keys were NOT real params
+    # (the constructor takes ``checkpoint_uri``, and has no ``device``
+    # arg) and would crash the worker. config_name selects checkpoint +
+    # platform; checkpoint_uri stays None → openpi's published GCS
+    # checkpoint for the config. A user's fine-tune overrides via the run
+    # config's model.kwargs.checkpoint_uri.
     default_actor_kwargs={
         "config_name": "pi0_libero",
-        "checkpoint":  None,           # default to GCS-resolved per config
-        "device":      "cuda",
     },
     description="Physical Intelligence π0 / π0.5 (Pi family) via openpi.",
     requires_python="3.11",

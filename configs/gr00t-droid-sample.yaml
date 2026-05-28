@@ -1,0 +1,47 @@
+# emboviz run config — NVIDIA GR00T-N1.7 on the shipped DROID demo.
+#
+#   emboviz analyze --config configs/gr00t-droid-sample.yaml
+#
+# This points at the 3-episode demo NVIDIA ships inside Isaac-GR00T. For YOUR
+# GR00T fine-tune: set model.kwargs.checkpoint and dataset.path to your data.
+
+model:
+  adapter: gr00t
+  kwargs:
+    model_path: nvidia/GR00T-N1.7-3B               # REQUIRED — your fine-tune or the base checkpoint
+    embodiment_tag: OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT   # REQUIRED — selects state/action interpretation
+    device: "cuda:0"
+
+dataset:
+  format: lerobot
+  path: /root/repos/Isaac-GR00T/demo_data/droid_sample   # local dir (LeRobot layout)
+
+  cameras:                          # GR00T-DROID uses exterior_1 + wrist
+    primary:    exterior_image_1_left
+    wrist_left: wrist_image_left
+
+  state:
+    key: observation.state          # 17-dim: eef_9d (0:9) + gripper (9) + joint (10:17)
+    convention: ee_pose
+
+  action:
+    key: action
+
+  gripper:
+    source: 9                       # gripper_position segment within the 17-dim state
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks                     # DROID is teleop; ~20% of episodes are unlabeled — pick a labeled one
+
+analysis:
+  episodes: "0"
+  frame_start: 0
+  n_frames: 4
+  mask_query: "the object"          # EDIT to an object in your chosen episode's instruction
+  detector: sam3
+  diagnostics: all
+
+output: ./report/gr00t-droid-sample

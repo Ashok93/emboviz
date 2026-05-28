@@ -75,7 +75,7 @@ uv venv --python 3.11
 uv pip install emboviz emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
 ```
 
-That's it. The first time you run `emboviz analyze --model <name>`,
+That's it. The first time you run `emboviz analyze --config <file>`,
 emboviz transparently:
 
 1. **Materialises** the adapter's runtime venv at `~/.emboviz/venvs/<name>`
@@ -106,92 +106,76 @@ emboviz convert-pi0 pi0_libero
 
 ### Run an analysis
 
-```bash
-emboviz analyze \
-    --model openvla --dataset bridge \
-    --episodes 0,1,2 --mask-query "the spoon" \
-    --output ./report
-```
-
-Substitute `oft` / `pi0` / `gr00t` for `openvla` to swap models. The
-`--mask-query` phrase is what SAM 3 will localize for the memorization
-diagnostic; pick the object you actually care about the policy paying
-attention to (`"the cloth"`, `"the welding torch"`, ...).
-
-### Picking which diagnostics to run
+One run is described by **one config file** — model, dataset mapping, and
+analysis parameters all in one place. No CLI flag soup. Shipped templates
+live under `configs/` (one per model on its canonical dataset):
 
 ```bash
-# Default: all diagnostics
-emboviz analyze --model openvla --dataset bridge --mask-query "the spoon" --output ./r
-
-# Just two
-emboviz analyze ... --diagnostics memorization,attention
-
-# Everything except chunk consistency
-emboviz analyze ... --diagnostics all,-chunk
-# Equivalent:
-emboviz analyze ... --skip-diagnostics chunk
-
-# Short or full names work
---diagnostics memorization,attention_drift   # short + full mixed is OK
---diagnostics vision.scene_sensitivity       # full canonical
+emboviz analyze --config configs/openvla-bridge.yaml
+emboviz analyze --config pi0-libero            # by shipped-template name
+emboviz analyze --config my-run.yaml --dry-run # cost estimate, no GPU spend
 ```
 
-Diagnostics: `memorization` (`vision.memorization`), `modality` (`input.modality_dropout`),
+`--dry-run` is the only flag besides `--config`; everything else lives in
+the config.
+
+### Bring your own model + dataset
+
+Copy the template closest to your setup and edit it:
+
+```bash
+cp configs/openvla-bridge.yaml configs/my-run.yaml
+$EDITOR configs/my-run.yaml
+emboviz analyze --config configs/my-run.yaml
+```
+
+A config looks like this (abridged — see `configs/README.md` for the full
+field reference):
+
+```yaml
+model:
+  adapter: openvla                 # installed adapter: openvla | oft | pi0 | gr00t
+  kwargs:
+    hf_repo: your-org/your-finetune # YOUR checkpoint (HF id or local dir)
+    unnorm_key: bridge_orig
+
+dataset:
+  format: lerobot                  # lerobot | hdf5 | rlds  (the 3 self-describing formats)
+  path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id, local dir, h5 file, or TFDS builder name
+  cameras:
+    primary: observation.images.image_0      # model camera role -> dataset key
+  state:
+    key: observation.state
+    convention: ee_pose            # joint_angles | ee_pose | ... (the format never encodes this)
+  action: {key: action}
+  gripper: {source: 6, kind: parallel_jaw, units: unit, range: [0.0, 1.0]}
+  instruction: {from: tasks}
+
+analysis:
+  episodes: "537"                  # "7" / "0,3,7" / "0-5" / "all"
+  mask_query: "the cloth"          # object SAM 3 localizes for the memorization diagnostic
+  detector: sam3                   # sam3 | gd-sam
+  diagnostics: all                 # or a list: [memorization, attention]
+
+output: ./report/my-run
+```
+
+The schema is **identical for all three input formats** (`lerobot` / `hdf5`
+/ `rlds`) — only the reader behind each `key` changes. The dataset's own
+schema (dims, per-dim names) is read from the format itself (`meta/info.json`
+/ HDF5 array shapes / the TFDS feature spec); you only declare what the
+format *can't* encode (which camera is `primary`, the state convention, the
+gripper spec). For `rlds`, `dataset.path` is the TFDS builder name with
+optional `extra: {data_dir, split}`.
+
+> Rerun `.rrd` and MCAP/rosbag2 are recording / debugging-viz formats, not
+> dataset inputs — they are intentionally not config-accepted.
+
+**Diagnostics** (`analysis.diagnostics`): `all`, an explicit list
+(`[memorization, attention]`), or `all,-chunk` to subtract. Names —
+`memorization` (`vision.memorization`), `modality` (`input.modality_dropout`),
 `sensitivity` (`vision.scene_sensitivity`), `chunk` (`internal.chunk_consistency`),
-`attention` (`internal.attention_drift`).
-
-### Bring your own data
-
-The per-model quickstarts above use `--dataset <alias>` for the canonical
-training datasets we pre-shipped (`bridge`, `libero-spatial`, `pi-libero`,
-`droid-sample`, ...). For your own dataset or your own deployment recording,
-point emboviz at it directly with `--dataset-format <fmt>` + `--dataset-path <path>`:
-
-```bash
-# Local HDF5 file (Robomimic / ALOHA / NVIDIA Isaac Lab Mimic)
-uv run emboviz analyze --model pi0 \
-    --dataset-format hdf5 --dataset-path /data/my_demos.hdf5 \
-    --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb", "wrist": "robot0_eye_in_hand_rgb"}, "instruction": "pick up the mug"}' \
-    --episodes 0 --mask-query "the white mug" --output ./report
-
-# RLDS / Open-X-Embodiment (needs `uv pip install 'emboviz[rlds]'`)
-uv run emboviz analyze --model gr00t \
-    --dataset-format rlds --dataset-path /tfds \
-    --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \
-    --episodes 0,1 --mask-query "the green block" --output ./report
-
-# MCAP deployment recording from ROS 2 / NVIDIA Isaac SIM
-uv run emboviz analyze --model oft \
-    --dataset-format mcap --dataset-path /logs/rollout_2026_05_26.mcap \
-    --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \
-    --episodes 0 --mask-query "the black bowl" --output ./report
-
-# Rerun .rrd deployment recording
-uv run emboviz analyze --model openvla \
-    --dataset-format rerun-rrd --dataset-path /logs/rollout.rrd \
-    --episodes 0 --mask-query "the spoon" --output ./report
-```
-
-Each format's adapter requires a small set of mapping kwargs (which
-HDF5 group / RLDS field / ROS topic holds each camera, the state, the
-action) — pass them via `--dataset-kwargs '<JSON>'`. See
-`emboviz.datasets.hdf5:HDF5EpisodeSource`,
-`emboviz.datasets.rlds:RLDSEpisodeSource`, etc. for the full signature.
-
-**For your own LeRobot v2/v3 dataset:** use one of the pre-shipped
-aliases (`bridge`, `libero-spatial`, `droid-sample`, ...) if your robot
-matches a pre-shipped `RobotProfile`. For a different robot, subclass
-`emboviz.datasets.lerobot:LeRobotEpisodeSource` (~10 lines — see
-`emboviz/datasets/lerobot_bridge.py` for the template), then pass
-`--dataset emboviz.your_module:YourSource`. LeRobot adapters need
-a `RobotProfile` object (action axes, gripper convention) that can't
-be expressed in JSON, so they don't fit the generic
-`--dataset-format` flow.
-
-Run `uv run emboviz list-datasets` to see every supported format on the
-current install (✓ = installed, · = needs an extra) with the exact
-`uv pip install` line for any missing one.
+`attention` (`internal.attention_drift`); short or full both accepted.
 
 ### What you get back, per episode
 
@@ -249,15 +233,16 @@ Custom robots: write a ~30-line `RobotProfile` and drop it in `emboviz/profiles/
 
 ### Data formats
 
-| Format | Ingest | Export | Selector |
+| Format | Ingest | Export | Config `dataset.format` |
 |---|---|---|---|
-| LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | ✅ | — | `--dataset-format lerobot` |
-| HuggingFace `datasets` (generic) | ✅ | — | `--dataset-format hf` |
-| HDF5 (Robomimic, ALOHA, NVIDIA Isaac Lab Mimic) | ✅ | — | `--dataset-format hdf5` |
-| RLDS / TFDS (Open-X-Embodiment, RT-X, Octo) | ✅ (extra: `rlds`) | — | `--dataset-format rlds` |
-| MCAP (ROS 2, NVIDIA Isaac SIM) | ✅ | — | `--dataset-format mcap` |
-| Rerun `.rrd` | ✅ | ✅ **(killer feature)** | `--dataset-format rerun-rrd` |
-| ROS bag (native) | 📅 roadmap | — | — |
+| LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | ✅ | — | `lerobot` |
+| HDF5 (Robomimic, ALOHA, NVIDIA Isaac Lab Mimic) | ✅ | — | `hdf5` |
+| RLDS / TFDS (Open-X-Embodiment, RT-X, Octo) | ✅ (extra: `rlds`) | — | `rlds` |
+| Rerun `.rrd` | — | ✅ **(killer feature)** | — (viz output, not a dataset input) |
+
+The three ingest formats are the self-describing "saved episode" formats:
+emboviz reads dims/per-dim names from each format's own schema. Rerun `.rrd`
+and MCAP/rosbag2 are recording / debugging-viz formats, not dataset inputs.
 
 ---
 

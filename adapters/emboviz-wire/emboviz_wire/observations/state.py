@@ -28,7 +28,7 @@ class Proprioception:
     forgets to check is fail-loud rather than fail-silent.
 
     Per-joint names, segment layouts, and dim semantics live on the
-    optional `emboviz.core.profile.RobotProfile.state` — that's where
+    optional `emboviz_wire.profile.RobotProfile.state` — that's where
     richer per-team metadata belongs.
     """
 

@@ -41,7 +41,24 @@ from PIL import Image
 
 log = logging.getLogger("emboviz_sam3")
 
-DEFAULT_MODEL_ID = "facebook/sam3"
+# Default checkpoint: an ungated, community-distilled SAM 3 LiteText
+# variant (500M params, MobileCLIP text encoder) that uses the same
+# SAM 3 processor + post-processing API. Picking it as the default
+# means the adapter works out of the box without an HF access request.
+#
+# We use the ``yonigozlan/`` mirror specifically because it ships
+# a fully-formed ``preprocessor_config.json`` (with
+# ``image_processor_type`` set) so :func:`AutoProcessor.from_pretrained`
+# loads cleanly — the alternate ``vil-uob/sam3-litetext-s0`` mirror
+# is missing that field and crashes the auto-loader.
+#
+# Users with approved access to Meta's full SAM 3 checkpoint can opt
+# in via:
+#
+#     EMBOVIZ_SAM3_MODEL_ID=facebook/sam3 emboviz-sam3 serve
+#
+# or by constructing the detector with model_id="facebook/sam3".
+DEFAULT_MODEL_ID = "yonigozlan/sam3-litetext-s0"
 
 
 class Sam3Detector:
@@ -59,6 +76,9 @@ class Sam3Detector:
         device_map: str = "auto",
         preload: bool = True,
     ):
+        # Resolution order: explicit kwarg → env var → default. The
+        # default is an ungated SAM 3-compatible distillation so a
+        # fresh install needs no HF access request.
         self.model_id = model_id or os.environ.get(
             "EMBOVIZ_SAM3_MODEL_ID", DEFAULT_MODEL_ID,
         )
@@ -91,10 +111,44 @@ class Sam3Detector:
 
             log.info("loading SAM 3 (%s) — this can take ~30 s on first run",
                      self.model_id)
+            # Load the concrete IMAGE-level classes ``Sam3Model`` +
+            # ``Sam3Processor`` explicitly — NOT ``AutoModel`` /
+            # ``AutoProcessor``.
+            #
+            # The published ``facebook/sam3`` repo is the *video*
+            # checkpoint: its config is ``Sam3VideoConfig`` and its
+            # declared ``processor_class`` is ``Sam3VideoProcessor``. So
+            # ``AutoModel`` / ``AutoProcessor`` resolve to the VIDEO
+            # model + processor, whose ``__call__`` takes no ``text=``
+            # argument — a text prompt then falls through to the image
+            # processor kwargs and raises ``Sam3ImageProcessorKwargs.
+            # __init__() got an unexpected keyword argument 'text'``.
+            #
+            # The documented API for image text→mask segmentation
+            # (transformers SAM3 model docs) is the explicit pair:
+            #     model     = Sam3Model.from_pretrained("facebook/sam3")
+            #     processor = Sam3Processor.from_pretrained("facebook/sam3")
+            #     inputs    = processor(images=img, text="...", ...)
+            #     outputs   = model(**inputs)
+            #     processor.post_process_instance_segmentation(outputs, ...)
+            # ``Sam3Model`` loads the DETR detector held in the video
+            # config's ``detector_config`` (a ``Sam3Config``) — the
+            # open-vocabulary image detector SAM 3 exposes.
             self._processor = Sam3Processor.from_pretrained(self.model_id)
-            self._model = Sam3Model.from_pretrained(
-                self.model_id, device_map=self._device_map,
-            )
+            self._model = Sam3Model.from_pretrained(self.model_id)
+            # Place the model explicitly with ``.to(device)`` — the
+            # documented SAM 3 pattern
+            # (``Sam3Model.from_pretrained(...).to(device)``). We do NOT
+            # use accelerate's ``device_map="auto"``: for this single
+            # ~840M detector accelerate was leaving the whole model on
+            # CPU even with 30+ GB of free GPU, turning each detection
+            # into a ~140 s CPU forward instead of a sub-second GPU one.
+            # SAM 3 fits on one GPU; there is nothing to shard.
+            if self._device_map in (None, "auto"):
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                device = self._device_map
+            self._model = self._model.to(device)
             self._model.eval()
             self._device = str(next(self._model.parameters()).device)
             log.info("SAM 3 ready on device=%s", self._device)

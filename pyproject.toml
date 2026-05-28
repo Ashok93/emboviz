@@ -22,6 +22,14 @@ requires-python = ">=3.10,<3.13"
 # versions are independent of core's — the wire is bytes, not pickle.
 # ──────────────────────────────────────────────────────────────────────
 dependencies = [
+    # The minimal ZMQ connector + shared wire contracts (Scene,
+    # ActionResult, VLAModel, the msgpack codec, the serve loop). This
+    # is the ONE package shared with model worker venvs; emboviz core
+    # re-exports its types via thin shims under emboviz.core.* /
+    # emboviz.adapters.* so existing imports keep working. Everything
+    # below is HOST-only (datasets / diagnostics / viz / export) and
+    # never reaches a worker venv.
+    "emboviz-wire>=0.3",
     # plumbing — pure-Python or fast-imported data wrangling
     "numpy>=1.26",
     "scipy>=1.11",
@@ -30,6 +38,7 @@ dependencies = [
     "tqdm>=4.66",
     "click>=8.1",
     "pydantic>=2.7",
+    "PyYAML>=6.0",          # run-config files (emboviz analyze --config)
     "huggingface_hub>=0.24",
     # report rendering
     "matplotlib>=3.8",
@@ -40,10 +49,13 @@ dependencies = [
     "mcap-protobuf-support>=0.5",
     # tabular / scientific dataset readers
     "h5py>=3.10",
-    # interactive Rerun export. Supports both 0.22 (Scalar singular) and
-    # 0.23+ (Scalars + unified set_time) via a small compat shim in
-    # exporters/rerun.py.
-    "rerun-sdk>=0.22",
+    # interactive Rerun export. exporters/rerun.py uses the modern
+    # RecordingStream(application_id=..., recording_id=...) constructor
+    # (the 0.22 constructor took only a positional app-id and no
+    # recording_id, raising TypeError on the kwargs we pass). Pin >=0.32
+    # — the current series a fresh `uv pip install` resolves to — so the
+    # installed rerun always matches the API we call.
+    "rerun-sdk>=0.32",
     # video / image media
     "imageio>=2.34",
     "imageio-ffmpeg>=0.4.9",

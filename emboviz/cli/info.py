@@ -34,26 +34,14 @@ _LEGACY_INPROC_MODELS: dict[str, str] = {
     "lerobot": "Stock LeRobotDataset policy (CPU OK).",
 }
 
-_DATASET_EXTRAS: dict[str, tuple[str, str]] = {
-    "bridge":           ("BridgeV2 (lerobot v2.0)",                       "lerobot"),
-    "libero-spatial":   ("LIBERO-spatial (lerobot)",                      "lerobot"),
-    "libero-object":    ("LIBERO-object (lerobot)",                       "lerobot"),
-    "libero-goal":      ("LIBERO-goal (lerobot)",                         "lerobot"),
-    "libero-10":        ("LIBERO-10 (lerobot)",                           "lerobot"),
-    "pi-libero":        ("Physical Intelligence's LIBERO conversion",     "lerobot"),
-    "droid-100":        ("DROID 100-episode subset (lerobot)",            "lerobot"),
-    "droid-full":       ("DROID 1.0.1 full (76K episodes; lerobot)",      "lerobot"),
-    "droid-sample":     ("droid_sample (3 demo episodes; needs gr00t)",   ""),
-    "aloha-transfer":   ("ALOHA sim transfer cube (lerobot)",             "lerobot"),
-    "aloha-insertion":  ("ALOHA sim insertion (lerobot)",                 "lerobot"),
-}
-
-
+# The three self-describing dataset input formats (config `dataset.format`).
+# emboviz reads each format's own schema (info.json / array shapes / TFDS
+# feature spec) — these are the only `dataset.format` values a run config
+# accepts. (Rerun/MCAP are recording-viz formats, not dataset inputs.)
 _DATASET_FORMAT_EXTRAS: dict[str, tuple[str, str]] = {
-    "hdf5":         ("Robomimic / ALOHA / Isaac Lab Mimic HDF5",          ""),
-    "rlds":         ("RLDS / TFDS (Open-X-Embodiment, RT-X, ...)",        "rlds"),
-    "mcap":         ("MCAP deployment recording (ROS 2 / Isaac SIM)",     ""),
-    "rerun-rrd":    ("Rerun .rrd deployment recording",                   ""),
+    "lerobot":  ("LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF)", "lerobot"),
+    "hdf5":     ("Robomimic / ALOHA / Isaac Lab Mimic HDF5",                  ""),
+    "rlds":     ("RLDS / TFDS (Open-X-Embodiment, RT-X, Octo)",              "rlds"),
 }
 
 
@@ -110,28 +98,26 @@ def list_models_cmd() -> None:
         click.echo(f"  ✓ {name:<10} {desc}")
 
     click.echo()
-    click.echo("Use: emboviz analyze --model <alias> ...")
+    click.echo("Use: emboviz analyze --config <file>   (templates under configs/)")
 
 
 @click.command("list-datasets")
 def list_datasets_cmd() -> None:
-    """Show the dataset / recording adapters this install can read."""
-    click.echo("Pre-shipped dataset aliases (use: --dataset <alias>):")
-    for alias, (desc, extra) in _DATASET_EXTRAS.items():
-        ok = _dataset_extra_installed(extra)
-        mark = "✓" if ok else "·"
-        hint = "" if (ok or not extra) else f"  (install with: uv pip install 'emboviz[{extra}]')"
-        click.echo(f"  {mark} {alias:<18} {desc}{hint}")
-    click.echo()
-    click.echo("Generic data formats (use: --dataset-format <fmt> --dataset-path <path>):")
+    """Show the dataset input formats this install can read.
+
+    A run config's ``dataset.format`` is one of these three self-describing
+    formats; emboviz reads dims/per-dim names from each format's own schema.
+    """
+    click.echo("Dataset input formats (config `dataset.format`):")
     for fmt, (desc, extra) in _DATASET_FORMAT_EXTRAS.items():
         ok = _dataset_extra_installed(extra) if extra else True
         mark = "✓" if ok else "·"
         hint = "" if ok else f"  (install with: uv pip install 'emboviz[{extra}]')"
-        click.echo(f"  {mark} {fmt:<14} {desc}{hint}")
+        click.echo(f"  {mark} {fmt:<10} {desc}{hint}")
     click.echo()
-    click.echo("Pass adapter-specific options (camera_keys, builder_name, topic_map, ...)")
-    click.echo("via --dataset-kwargs '<JSON>'.")
+    click.echo("Each config maps camera roles / state convention / gripper for its")
+    click.echo("format uniformly. See configs/ for ready-made model+dataset templates,")
+    click.echo("and configs/README.md for the full field reference.")
 
 
 @click.command("version")

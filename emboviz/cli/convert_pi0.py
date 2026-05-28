@@ -136,8 +136,7 @@ def convert_pi0_cmd(
     \b
         # In a venv where ``emboviz[pi0]`` is installed
         emboviz convert-pi0 pi0_libero
-        emboviz analyze --model pi0 --dataset pi-libero \\
-            --episodes 0 --target "the white mug" --output ./report
+        emboviz analyze --config pi0-libero
     """
     openpi_root = _openpi_root()
     if openpi_root is None:
@@ -218,6 +217,11 @@ def convert_pi0_cmd(
 
     click.echo(f"[convert-pi0] DONE → {out_dir}")
     click.echo(
-        f"\nNext: emboviz analyze --model pi0 "
-        f"--model-kwargs '{{\"config_name\": \"{config_name}\", \"use_pytorch\": true}}' ..."
+        f"\nNext: in your run config set model.kwargs to use this PyTorch "
+        f"backend, then run `emboviz analyze --config <file>`:\n"
+        f"    model:\n"
+        f"      adapter: pi0\n"
+        f"      kwargs:\n"
+        f"        config_name: {config_name}\n"
+        f"        use_pytorch: true"
     )
