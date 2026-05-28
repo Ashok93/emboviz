@@ -350,58 +350,54 @@ class AttentionMaps:
         camera: Optional[str] = None,
         *,
         layer_range_fraction: Optional[tuple[float, float]] = None,
-        sink_top_pct: Optional[float] = None,
     ) -> tuple[np.ndarray, dict]:
-        """Sink-filtered, mid-layer-restricted per-camera attention heatmap.
+        """Layer-adaptive per-camera attention heatmap — the user-facing
+        "where is the model looking?" map.
 
-        This is the **user-facing "where is the model looking?" map.** It
-        applies two literature-backed filters whose parameters come from
-        the per-adapter attention_profile (declared in each adapter's
-        source file with a literature citation):
+        Method (layer-adaptive last-token attention, arXiv:2602.04304;
+        "How Multimodal LLMs Solve Image Tasks", arXiv:2508.20279):
 
-          1. **Layer range filter**: average only over a fraction of
-             the model's transformer layers (typically the middle half).
-             Per *How Multimodal LLMs Solve Image Tasks*
-             (arXiv:2508.20279) and the LLaVA stage analysis, early
-             layers do token-grouping (sinks dominate), late layers do
-             prediction summarization, and the middle holds the visual-
-             grounding heads. The exact fraction is per-backbone (LLaMA
-             vs Gemma vs Qwen3-VL each have different stage structure).
+          1. **Restrict to a candidate layer range.** Average over heads
+             within a fraction of the model's transformer layers
+             (typically the middle band). Early layers do token-grouping
+             (attention sinks dominate), late layers do prediction
+             summarization, and the middle holds the visual-grounding
+             heads. The exact fraction is per-backbone (LLaMA vs Gemma vs
+             Qwen3-VL each have a different stage structure) and comes
+             from the adapter's ``attention_profile``.
 
-          2. **Sink masking**: zero out the top ``sink_top_pct`` of
-             attention cells AFTER averaging. The percentage is
-             literature-derived per backbone:
-               • LLaMA (OpenVLA, OFT): 0% (no spatial sinks per LLaVA
-                 stage paper).
-               • PaliGemma/Gemma-2B (π0): ~5% (moderate Gemma sinks per
-                 attention-sink literature).
-               • Qwen3-VL/Cosmos-Reason2 (GR00T): ~10% (strong RoPE
-                 right-edge sinks per Qwen3-VL Issue #2047 and
-                 arXiv:2510.08510 "To Sink or Not to Sink").
+          2. **Pick the single best layer from the data.** Within that
+             candidate range, select the one layer whose head-mean
+             attention is most concentrated on the image INTERIOR (where
+             objects are) rather than the border ring (where the
+             positional / RoPE sink sits). This replaces per-cell sink
+             masking: the grounding signal lives in one mid-stack layer,
+             so we choose it by interior concentration instead of masking
+             a fixed top-fraction of cells.
 
-        Defaults come from ``metadata["attention_profile"]`` populated
-        by the adapter. Callers can override via kwargs but should
-        ONLY do so to test variations — the adapter's declared values
-        ARE the literature-backed recommendation.
+        Only ``layer_range_fraction`` is parameterised; it defaults to
+        ``metadata["attention_profile"]["recommended_layer_range_fraction"]``
+        populated by the adapter. Callers override only to test
+        variations — the adapter's declared value IS the literature-backed
+        recommendation.
 
         Args:
             camera: which camera (same semantics as ``image_weights``).
             layer_range_fraction: ``(frac_start, frac_end)`` in [0, 1]
                 — fraction of total layers to use. ``None`` reads from
-                adapter's attention_profile.
-            sink_top_pct: fraction of top cells to mask as sinks.
-                ``None`` reads from adapter's attention_profile.
+                the adapter's attention_profile.
 
         Returns:
             ``(heatmap, debug)`` where ``heatmap`` is the (side, side)
-            cleaned attention map and ``debug`` is a dict with the
-            literature citation, layer range used, number of sink
-            positions masked, etc.
+            cleaned attention map and ``debug`` records the selected
+            layer, candidate range, interior concentration, and the
+            adapter's literature citation.
 
         Raises:
-            ValueError: if no attention_profile is in metadata AND no
-                override kwargs are passed — refusing to fabricate
-                defaults that aren't grounded in this model's literature.
+            ValueError: if no ``recommended_layer_range_fraction`` is in
+                metadata's attention_profile AND no override is passed —
+                refusing to fabricate a layer range that isn't grounded
+                in this model's literature.
         """
         raw = self.image_weights(camera)   # (L, H, side, side)
         L, H, side, _ = raw.shape
@@ -417,19 +413,9 @@ class AttentionMaps:
                     "``recommended_layer_range_fraction`` in metadata's "
                     "attention_profile, and no override passed. Every "
                     "adapter must declare its model's recommended layer "
-                    "range based on the model's literature — see "
-                    "emboviz/models/openvla.py's ATTENTION_PROFILE for "
-                    "the template. Refusing to fabricate a default."
-                )
-        if sink_top_pct is None:
-            sink_top_pct = profile.get("sink_top_pct_to_mask")
-            if sink_top_pct is None:
-                raise ValueError(
-                    "AttentionMaps.image_weights_clean: no "
-                    "``sink_top_pct_to_mask`` in metadata's "
-                    "attention_profile, and no override passed. The "
-                    "adapter must declare its model's sink-masking "
-                    "fraction from that model's literature."
+                    "range based on the model's literature — see each "
+                    "adapter's ATTENTION_PROFILE for the template. "
+                    "Refusing to fabricate a default."
                 )
 
         frac_start, frac_end = layer_range_fraction
@@ -438,11 +424,6 @@ class AttentionMaps:
                 f"image_weights_clean: layer_range_fraction "
                 f"{layer_range_fraction} invalid; expected "
                 "0.0 <= start < end <= 1.0."
-            )
-        if not (0.0 <= sink_top_pct < 1.0):
-            raise ValueError(
-                f"image_weights_clean: sink_top_pct {sink_top_pct} "
-                "invalid; expected 0.0 <= pct < 1.0."
             )
 
         start = int(round(frac_start * L))

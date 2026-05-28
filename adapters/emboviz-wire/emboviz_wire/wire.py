@@ -150,6 +150,33 @@ def _dec_action_history(d: Optional[dict]):
                          timesteps_back=d.get("timesteps_back", d["actions"].shape[0]))
 
 
+def _enc_force(ft) -> Optional[dict]:
+    if ft is None:
+        return None
+    return {"wrench": np.asarray(ft.wrench), "frame": ft.frame, "units": ft.units}
+
+
+def _dec_force(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.observations import ForceTorque
+    return ForceTorque(wrench=d["wrench"], frame=d.get("frame", "ee"),
+                       units=d.get("units", "N_Nm"))
+
+
+def _enc_tactile(tac) -> Optional[dict]:
+    if tac is None:
+        return None
+    return {"data": np.asarray(tac.data), "sensor_id": tac.sensor_id}
+
+
+def _dec_tactile(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.observations import TactileReading
+    return TactileReading(data=d["data"], sensor_id=d.get("sensor_id", "primary"))
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Scene  ↔  dict
 # ─────────────────────────────────────────────────────────────────────
@@ -163,6 +190,8 @@ def encode_scene(scene) -> dict:
         "gripper": _enc_gripper(obs.gripper),
         "action_history": _enc_action_history(obs.action_history),
         "depth": ({c: _enc_depth(dm) for c, dm in obs.depth.items()} if obs.depth else None),
+        "force_torque": _enc_force(obs.force_torque),
+        "tactile": _enc_tactile(obs.tactile),
         "extras": dict(obs.extras) if obs.extras else {},
         "instruction": scene.instruction,
         "scene_id": scene.scene_id,
@@ -183,6 +212,8 @@ def decode_scene(d: dict):
         gripper=_dec_gripper(d.get("gripper")),
         action_history=_dec_action_history(d.get("action_history")),
         depth=({c: _dec_depth(dm) for c, dm in d["depth"].items()} if d.get("depth") else None),
+        force_torque=_dec_force(d.get("force_torque")),
+        tactile=_dec_tactile(d.get("tactile")),
         extras=d.get("extras") or {},
     )
     return Scene(

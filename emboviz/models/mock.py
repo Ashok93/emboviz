@@ -185,7 +185,6 @@ class MockVLA(VLAModel):
             metadata={
                 "attention_profile": {
                     "recommended_layer_range_fraction": (0.25, 0.75),
-                    "sink_top_pct_to_mask": 0.0,
                     "literature_citation": "mock VLA — synthetic attention",
                 },
             },

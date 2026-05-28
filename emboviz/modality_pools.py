@@ -241,6 +241,7 @@ def build_modality_pool(
     """
     # ---- pool-to-disk cache (Layer B) --------------------------------
     cache_path: Optional[Path] = None
+    cache_load_failure: Optional[str] = None
     if cache_dir:
         key = _pool_cache_key(
             dataset, current_episode, declared_modalities,
@@ -255,12 +256,10 @@ def build_modality_pool(
                     cached.metadata["loaded_from_cache"] = str(cache_path)
                     return cached
             except Exception as e:
-                # Cache corrupt or pickle-incompatible — log to metadata
-                # and rebuild. We do NOT silently swallow this; the
-                # rebuilt pool will record the cache miss reason.
-                _cache_load_failure = f"{type(e).__name__}: {e}"
-            else:
-                _cache_load_failure = None
+                # Cache corrupt or pickle-incompatible — record the reason
+                # (surfaced on the rebuilt pool below) and rebuild. We do
+                # NOT silently swallow it.
+                cache_load_failure = f"{type(e).__name__}: {e}"
 
     rng = np.random.default_rng(seed)
 
@@ -284,6 +283,10 @@ def build_modality_pool(
     pool.metadata["n_available"]      = int(len(other_episodes))
     pool.metadata["skipped_episodes"] = {}     # ep_idx → reason
     pool.metadata["per_modality_skips"] = {}   # modality → count of skipped frames
+    if cache_load_failure is not None:
+        # A stale/corrupt cache file was found and could not be loaded; we
+        # rebuilt from scratch. Surface the reason rather than hiding it.
+        pool.metadata["cache_load_error"] = cache_load_failure
 
     want_state    = bool(declared_modalities.get("state"))
     want_gripper  = bool(declared_modalities.get("gripper"))
@@ -299,11 +302,16 @@ def build_modality_pool(
     # any large dataset. The adapter caches by frozen-tuple of indices,
     # so this also makes repeated rebuilds free.
     episodes_dict: dict[int, list] = {}
-    try:
-        episodes_dict = dataset.load_episodes(chosen_ints)
-    except AttributeError:
-        # Adapter doesn't implement batched load — fall back to per-ep,
-        # tolerating per-episode failures.
+    batched_load = getattr(dataset, "load_episodes", None)
+    if callable(batched_load):
+        # Adapter implements batched load — let any real error inside it
+        # propagate (the runner catches it and skips modality dropout with
+        # the reason). We only gate on the METHOD's presence here, never
+        # catch AttributeError around the call (that would mask an
+        # AttributeError raised *inside* load_episodes as "no batched load").
+        episodes_dict = batched_load(chosen_ints)
+    else:
+        # No batched load — per-episode, tolerating per-episode failures.
         for ep_idx in chosen_ints:
             try:
                 episodes_dict[ep_idx] = dataset.load_trajectory(ep_idx).frames

@@ -67,7 +67,6 @@ class Gr00tAdapter(VLAModel):
     # kept layers; grounding sits in the late kept layers.
     ATTENTION_PROFILE = {
         "recommended_layer_range_fraction": (0.5, 1.0),
-        "sink_top_pct_to_mask": 0.0,
         "literature_citation":
             "Canonical VLM 'last attention': last text token → image tokens, "
             "mean over mid-late layers + heads (LLaVA/Qwen-VL attention "

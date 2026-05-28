@@ -358,10 +358,6 @@ class Pi0Adapter(VLAModel):
     #     signal on the rest.
     ATTENTION_PROFILE = {
         "recommended_layer_range_fraction": (0.25, 0.85),
-        # Localization-head selection (arXiv:2503.06287) isolates the few
-        # grounding heads; with it, blanket sink-cell masking is unnecessary
-        # and not used by the paper. Keep at 0.
-        "sink_top_pct_to_mask": 0.0,
         "localization_heads_topk": 3,
         "localization_smooth_sigma": 1.0,
         "exclude_first_n_layers": 2,

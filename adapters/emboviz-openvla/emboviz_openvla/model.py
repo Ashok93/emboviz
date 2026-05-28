@@ -67,11 +67,9 @@ class OpenVLAAdapter(VLAModel):
         # layers do prediction summarization. Middle half = literature-
         # backed default for spatial attention extraction.
         "recommended_layer_range_fraction": (0.25, 0.75),
-        # LLaMA-2 7B does not exhibit strong spatial attention sinks on
-        # image patches per the LLaVA stage paper — the documented sink
-        # is the BOS *text* token (not image positions). For the
-        # image-patch heatmap we therefore mask 0% of image cells.
-        "sink_top_pct_to_mask": 0.0,
+        # (LLaMA-2 7B has no documented image-patch spatial sinks — the
+        # documented sink is the BOS *text* token, not image positions —
+        # so the layer-adaptive map needs no per-cell sink masking here.)
         "literature_citation":
             "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
             "(arXiv:2508.20279) — visual grounding in mid-layers. "
