@@ -106,3 +106,5 @@ story_outputs/
 # Internal planning / strategy notes (not for the public repo)
 # ──────────────────────────────────────────────────────────────────────
 PLAN.md
+WORK_LOG.md
+/from_vm/
