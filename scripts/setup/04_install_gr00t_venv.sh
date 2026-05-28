@@ -1,49 +1,40 @@
 #!/usr/bin/env bash
-# GR00T adapter — dev pod recipe.
+# GR00T-N1.7 adapter — dev pod recipe.
 #
-# Same shape as the user-facing path documented in README:
+# Mirrors the user-path exactly (per README):
 #
-#     uv venv .venv-gr00t --python 3.11
-#     uv pip install 'emboviz[gr00t]'
-#     emboviz install-gr00t      # one-shot wrapper for NVIDIA's gr00t
-#                                # (NOT on PyPI; flash-attn build-isolation
-#                                # bug needs --no-deps install)
+#     uv pip install emboviz emboviz-gr00t
+#     emboviz install-gr00t        # handles --no-deps for gr00t package
 #
-# Per CLAUDE.md "Dev path is the user path": NO version pins here. The
-# ``[gr00t]`` extra owns transformers / torch / lerobot. The
-# ``emboviz install-gr00t`` CLI owns the gr00t git+ install with
-# --no-deps.
+# The ``emboviz install-gr00t`` command's second-pass ``--no-deps``
+# install of NVIDIA's gr00t package sidesteps its broken flash-attn
+# build dep (whose setup.py imports torch before pip has installed it,
+# which fails under build isolation). The adapter falls back to SDPA
+# at runtime so flash-attn is never invoked.
 #
-# We also pull the Isaac-GR00T repo's git-lfs blobs into a known location
-# so the dataset adapter's demo_data/droid_sample (3 sample episodes) is
-# usable. A USER who installed gr00t via pip and wants droid_sample does
-# the same clone manually; documented in README.
+# We also clone the Isaac-GR00T repo for its ``demo_data/droid_sample``
+# (3 sample episodes) — a USER who installed gr00t via pip and wants
+# droid_sample does the same clone manually; documented in README.
 set -euo pipefail
 source /root/.bashrc.emboviz
 
-# Pull the upstream repo for demo_data/droid_sample. The gr00t Python
-# package itself is installed by ``emboviz install-gr00t`` below from
-# the same git URL (--no-deps).
+# Pull the upstream repo for demo_data/droid_sample.
 REPO=/root/repos/Isaac-GR00T
 if [ ! -d "$REPO" ]; then
     git clone https://github.com/NVIDIA/Isaac-GR00T.git "$REPO"
 fi
 ( cd "$REPO" && git lfs install --skip-smudge --local && git lfs pull )
 
-VENV=/root/venvs/gr00t
-uv venv "$VENV" --python 3.11
-uv pip install --python "$VENV/bin/python" -e "/root/emboviz[gr00t]"
+MAIN_VENV=/root/.venv-emboviz
+ADAPTER=gr00t
 
-echo "[gr00t] running 'emboviz install-gr00t' (installs gr00t with --no-deps)"
-"$VENV/bin/emboviz" install-gr00t
+uv venv "$MAIN_VENV" --python 3.11
+uv pip install --python "$MAIN_VENV/bin/python" \
+    -e /root/emboviz \
+    -e /root/emboviz/adapters/emboviz-$ADAPTER
 
-echo "[gr00t] sanity import"
-"$VENV/bin/python" -c "
-import torch, transformers, gr00t, emboviz
-print('  torch       ', torch.__version__, '  cuda_avail=', torch.cuda.is_available())
-print('  transformers', transformers.__version__)
-print('  gr00t       ', gr00t.__file__)
-print('  emboviz     ', emboviz.__file__)
-"
-echo "[gr00t] DONE — $VENV/bin/python ready"
-echo "[gr00t] Note: first inference downloads nvidia/GR00T-N1.7-3B (~6 GB) + Cosmos-Reason2-2B (gated, needs HF_TOKEN)"
+EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-$ADAPTER --force
+
+echo "[$ADAPTER] DONE"
+echo "Start the worker:"
+echo "    /root/venvs/$ADAPTER/bin/emboviz-$ADAPTER serve &"

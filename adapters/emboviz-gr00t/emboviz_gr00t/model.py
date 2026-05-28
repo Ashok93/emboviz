@@ -24,7 +24,6 @@ import numpy as np
 
 from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
 from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
-from emboviz.models.registry import register_model
 
 
 # Sensible default embodiment for tabletop manipulation rollouts. Teams
@@ -33,8 +32,6 @@ DEFAULT_EMBODIMENT = "OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
 DEFAULT_MODEL_PATH = "nvidia/GR00T-N1.7-3B"
 
 
-@register_model("gr00t")
-@register_model("gr00t-n1")
 class Gr00tAdapter(VLAModel):
     """Wraps `gr00t.policy.Gr00tPolicy` as an Emboviz `VLAModel`.
 

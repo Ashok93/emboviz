@@ -121,9 +121,10 @@ def _resolve_model_spec(model: str) -> str:
         f"  Installed adapters (entry-point): {available_adapters or '(none)'}\n"
         f"  Legacy aliases:                   {legacy}\n"
         f"  Power-user form:                  --model <module>:<Class>\n"
-        f"  To add '{model}' as a Ray-actor adapter, run:\n"
+        f"  To add '{model}' as a ZMQ-worker adapter, run:\n"
         f"      uv pip install emboviz-{model}\n"
-        f"      emboviz install-{model}"
+        f"      emboviz install-{model}\n"
+        f"      emboviz-{model} serve &"
     )
 
 
@@ -137,6 +138,93 @@ def _resolve_dataset_spec(dataset: str) -> str:
         + ", ".join(sorted(_DATASET_ALIASES))
         + ". For generic local data, use --dataset-format + --dataset-path."
     )
+
+
+# ────────── Diagnostic selection ─────────────────────────────────────
+#
+# The diagnostic suite exposes the following axes (canonical short
+# names + full axis names). Both work as ``--diagnostics`` and
+# ``--skip-diagnostics`` values.
+
+DIAGNOSTIC_SHORT_NAMES: dict[str, str] = {
+    "memorization":    "vision.memorization",
+    "modality":        "input.modality_dropout",
+    "modality_dropout":"input.modality_dropout",
+    "sensitivity":     "vision.scene_sensitivity",
+    "scene_sensitivity":"vision.scene_sensitivity",
+    "chunk":           "internal.chunk_consistency",
+    "chunk_consistency":"internal.chunk_consistency",
+    "attention":       "internal.attention_drift",
+    "attention_drift": "internal.attention_drift",
+}
+
+ALL_DIAGNOSTICS: frozenset[str] = frozenset({
+    "vision.memorization",
+    "input.modality_dropout",
+    "vision.scene_sensitivity",
+    "internal.chunk_consistency",
+    "internal.attention_drift",
+})
+
+
+def _canon_diagnostic(token: str) -> str:
+    """Map a user-supplied diagnostic name to its canonical axis name.
+
+    Accepts both the short name (``"memorization"``) and the full axis
+    name (``"vision.memorization"``). Raises with the full known list
+    if the user typed something we don't recognise.
+    """
+    t = token.strip().lower()
+    if not t:
+        raise click.UsageError("empty diagnostic name in --diagnostics / --skip-diagnostics")
+    if t in ALL_DIAGNOSTICS:
+        return t
+    if t in DIAGNOSTIC_SHORT_NAMES:
+        return DIAGNOSTIC_SHORT_NAMES[t]
+    known = sorted(ALL_DIAGNOSTICS | set(DIAGNOSTIC_SHORT_NAMES))
+    raise click.UsageError(
+        f"Unknown diagnostic '{token}'. We only support these names: {known}"
+    )
+
+
+def _resolve_diagnostics(
+    diagnostics_spec: str, skip_spec: str,
+) -> frozenset[str]:
+    """Combine ``--diagnostics`` + ``--skip-diagnostics`` into the
+    final enabled set.
+
+    ``--diagnostics`` accepts:
+      • ``"all"``                       — every diagnostic
+      • ``"X,Y,Z"``                     — an explicit include list
+      • ``"all,-X"``                    — all minus X
+      • ``"X,Y,-Z"``                    — include X and Y, then drop Z
+
+    ``--skip-diagnostics`` is always an additional block list. Both
+    flags can be combined freely. Unknown names raise.
+    """
+    diagnostics_spec = (diagnostics_spec or "all").strip()
+    skip_spec = (skip_spec or "").strip()
+
+    enabled: set[str] = set()
+    if diagnostics_spec:
+        for raw in diagnostics_spec.split(","):
+            token = raw.strip().lower()
+            if not token:
+                continue
+            if token == "all":
+                enabled |= set(ALL_DIAGNOSTICS)
+            elif token.startswith("-"):
+                enabled.discard(_canon_diagnostic(token[1:]))
+            else:
+                enabled.add(_canon_diagnostic(token))
+
+    if skip_spec:
+        for raw in skip_spec.split(","):
+            token = raw.strip().lower()
+            if token:
+                enabled.discard(_canon_diagnostic(token))
+
+    return frozenset(enabled)
 
 
 def _resolve_dataset_from_args(
@@ -240,12 +328,15 @@ def _resolve_dataset_from_args(
               help="Stride between sampled frames in the window. "
                    "Default 1 = every frame. Set to 5 or 10 to "
                    "subsample long episodes.")
-@click.option("--target", "target_text", default="",
-              help="Target object phrase (e.g. 'the red cup') passed to "
-                   "the text-prompted detector (SAM 3 by default; --detector "
-                   "gd-sam for the legacy GroundingDINO+SAM combo). If empty "
-                   "and --target-annotations is also empty, memorization is "
-                   "skipped.")
+@click.option("--mask-query", "mask_query", default="",
+              help="Object phrase (e.g. 'the red cup') passed to the "
+                   "text-prompted detector (SAM 3 by default; --detector "
+                   "gd-sam for the legacy GroundingDINO+SAM combo). "
+                   "If empty and --target-annotations is also empty, "
+                   "memorization is skipped with a clear reason.")
+@click.option("--target", "target_compat", default="",
+              help="DEPRECATED — old name for --mask-query, kept so "
+                   "existing scripts keep working. Prefer --mask-query.")
 @click.option("--target-annotations", "target_annotations", default="",
               type=click.Path(),
               help="Per-frame target-annotation file (JSON or COCO). When "
@@ -259,6 +350,17 @@ def _resolve_dataset_from_args(
                    "model, faster, native concept prompting. 'gd-sam' — "
                    "legacy GroundingDINO + SAM combo, kept as a maintained "
                    "fallback. Ignored when --target-annotations is set.")
+@click.option("--diagnostics", "diagnostics_spec", default="all",
+              help="Which diagnostics to run. Forms: 'all' / "
+                   "'memorization,attention' / 'all,-chunk' / 'X,Y,-Z'. "
+                   "Short or full axis names accepted (memorization | "
+                   "vision.memorization, attention | internal.attention_drift, "
+                   "modality | input.modality_dropout, sensitivity | "
+                   "vision.scene_sensitivity, chunk | internal.chunk_consistency).")
+@click.option("--skip-diagnostics", "skip_diagnostics_spec", default="",
+              help="Comma-separated block list applied AFTER --diagnostics. "
+                   "Equivalent to ',-<name>' on --diagnostics; use whichever "
+                   "feels clearer.")
 @click.option("--output", "out_dir", type=click.Path(), required=True,
               help="Output directory. Per-episode subdirs + aggregate "
                    "report are written here.")
@@ -284,7 +386,9 @@ def analyze_cmd(
     dataset_format: Optional[str], dataset_path: Optional[str],
     dataset_kwargs_json: str,
     episodes_spec: str, frame_start: int, n_frames: int, frame_stride: int,
-    target_text: str, target_annotations: str, detector: str,
+    mask_query: str, target_compat: str,
+    target_annotations: str, detector: str,
+    diagnostics_spec: str, skip_diagnostics_spec: str,
     out_dir: str,
     sensitivity_grid_side: int,
     modality_pool_size: int, modality_k_samples: int,
@@ -298,7 +402,7 @@ def analyze_cmd(
     \b
         # Pre-shipped dataset (LeRobot / Bridge), all frames of episode 0
         emboviz analyze --model openvla --dataset bridge --episodes 0 \\
-            --target "the spoon" --output ./report
+            --mask-query "the spoon" --output ./report
 
     \b
         # Local HDF5 file (Robomimic / ALOHA / Isaac Lab Mimic). The
@@ -307,27 +411,27 @@ def analyze_cmd(
         emboviz analyze --model pi0 \\
             --dataset-format hdf5 --dataset-path /data/demos.hdf5 \\
             --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb"}, "instruction": "pick up the mug"}' \\
-            --episodes 0 --target "the white mug" --output ./report
+            --episodes 0 --mask-query "the white mug" --output ./report
 
     \b
         # RLDS / TFDS (needs `uv pip install 'emboviz[rlds]'`)
         emboviz analyze --model gr00t \\
             --dataset-format rlds --dataset-path /tfds \\
             --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \\
-            --episodes 0,1 --target "the green block" --output ./report
+            --episodes 0,1 --mask-query "the green block" --output ./report
 
     \b
         # MCAP deployment recording (ROS 2 / Isaac SIM)
         emboviz analyze --model gr00t \\
             --dataset-format mcap --dataset-path /logs/rollout.mcap \\
             --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \\
-            --episodes 0 --target "the green block" --output ./report
+            --episodes 0 --mask-query "the green block" --output ./report
 
     \b
         # All episodes (use with caution on big datasets)
         emboviz analyze --model pi0 --dataset pi-libero \\
             --episodes all --frame-stride 10 \\
-            --target "the white mug" --output ./report
+            --mask-query "the white mug" --output ./report
     """
     from emboviz._internal.multi_episode import (
         EpisodeReport,
@@ -347,6 +451,30 @@ def analyze_cmd(
     )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+
+    # Reconcile --mask-query (canonical) with --target (deprecated).
+    # Both cannot be set to different values; if both are set, --mask-query wins.
+    if target_compat and mask_query and target_compat != mask_query:
+        raise click.UsageError(
+            "Both --mask-query and the deprecated --target were provided "
+            "with different values. Use only --mask-query."
+        )
+    if target_compat and not mask_query:
+        click.echo(
+            "[analyze] DEPRECATION: --target is the old name for "
+            "--mask-query; please switch.", err=True,
+        )
+        mask_query = target_compat
+
+    enabled_diagnostics = _resolve_diagnostics(diagnostics_spec, skip_diagnostics_spec)
+    if not enabled_diagnostics:
+        raise click.UsageError(
+            "--diagnostics / --skip-diagnostics resolved to an empty set; "
+            "nothing to run."
+        )
+    click.echo(
+        f"[analyze] diagnostics enabled: {sorted(enabled_diagnostics)}"
+    )
 
     # Resolve --episodes. For "all" we need the dataset's episode count.
     n_available: Optional[int] = None
@@ -392,9 +520,10 @@ def analyze_cmd(
             modality_k_samples=modality_k_samples,
             modality_pool_seed=modality_pool_seed,
             modality_pool_cache_dir=modality_pool_cache_dir,
-            target_text=target_text,
+            target_text=mask_query,
             target_annotations=target_annotations,
             detector=detector,
+            enabled_diagnostics=enabled_diagnostics,
             show_imitation=show_imitation,
             dry_run=dry_run,
         )

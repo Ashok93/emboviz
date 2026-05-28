@@ -40,7 +40,6 @@ import numpy as np
 
 from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
 from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
-from emboviz.models.registry import register_model
 
 
 # Default checkpoint URI prefix from openpi's published checkpoints
@@ -216,8 +215,6 @@ def _resolve_platform(config_name: str) -> str:
     )
 
 
-@register_model("pi0")
-@register_model("pi05")
 class Pi0Adapter(VLAModel):
     """Wraps `openpi`'s trained policy as a VLAModel.
 

@@ -1,0 +1,31 @@
+[project]
+name = "emboviz-sam3"
+version = "0.3.0"
+description = "Meta SAM 3 text→mask detector for emboviz — runs in its own isolated Python 3.12 venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# THIN SHIM that goes in the user's MAIN venv. Carries zero heavy
+# deps — its only job is to advertise an AdapterSpec via entry points
+# (so ``emboviz install-sam3`` knows what to install) and ship a small
+# Sam3Client that core's perturbers can import without pulling torch
+# into the main venv.
+#
+# The heavy stuff (torch, transformers >= 4.56) lives in
+# ``AdapterSpec.runtime_pip`` and installs into
+# ``~/.emboviz/venvs/sam3/`` via ``emboviz install-sam3``.
+dependencies = [
+    "emboviz>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+sam3 = "emboviz_sam3.spec:SPEC"
+
+[project.scripts]
+emboviz-sam3 = "emboviz_sam3.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

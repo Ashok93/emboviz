@@ -11,13 +11,15 @@ requires-python = ">=3.10,<3.13"
 # Each VLA adapter is a separate package (emboviz-openvla, emboviz-oft,
 # emboviz-pi0, emboviz-gr00t, emboviz-sam3). The user installs core
 # plus whichever adapters they actually want. Heavy/conflicting deps
-# (torch, transformers per model, lerobot 0.3.x, etc.) live in their
-# adapter's Ray-managed runtime_env — never in the user's main venv.
+# (torch, transformers per model, lerobot 0.3.x, etc.) live in the
+# adapter's isolated runtime venv — never in the user's main venv.
 #
-# This is why dependency hell never happens to a user of this package:
-# core has no torch, no transformers, no lerobot, no model-specific
-# anything. Adding a new VLA family (ACT, Diffusion Policy, RT-X, RDT)
-# = publish a new emboviz-<adapter> package. Core never changes.
+# Core ↔ adapter IPC is ZeroMQ over Unix domain sockets, with msgpack
+# (and msgpack-numpy for tensors) as the wire format. ZMQ is what vLLM
+# uses for EngineCore IPC and what Jupyter has used since 2014; both
+# are direct category matches for "two ML processes talking with
+# tensor-shaped payloads, multi-Python-version safe". Adapter Python
+# versions are independent of core's — the wire is bytes, not pickle.
 # ──────────────────────────────────────────────────────────────────────
 dependencies = [
     # plumbing — pure-Python or fast-imported data wrangling
@@ -48,13 +50,16 @@ dependencies = [
     # COCO RLE mask decoder (used by both the SAM 3 client and the
     # CocoAnnotationConnector for user-supplied per-frame annotations).
     "pycocotools>=2.0",
-    # ── Ray for per-adapter actor isolation ─────────────────────────
-    # Each adapter is a Ray actor spawned with runtime_env={"py_executable":
-    # "/path/to/isolated/venv/bin/python"}. The actor process loads its
-    # adapter's heavy deps; core never touches them. Tensors flow
-    # through Ray's Plasma object store (zero-copy for numpy arrays via
-    # pickle protocol 5). Ray's Apache-2.0 and battle-tested at scale.
-    "ray[default]>=2.40",
+    # ── IPC for per-adapter isolated worker processes ─────────────
+    # ZeroMQ (pyzmq) is the messaging library; we use DEALER (client) +
+    # ROUTER (server) over ``ipc://`` Unix domain sockets for local IPC,
+    # falling back to ``tcp://`` automatically on Windows. msgpack is
+    # the wire serializer; msgpack-numpy patches it to handle numpy
+    # arrays natively (zero encoding/decoding cost beyond a memcpy).
+    # Both deps are tiny (~3 MB combined), import-fast, and ABI-stable.
+    "pyzmq>=26",
+    "msgpack>=1.0",
+    "msgpack-numpy>=0.4.8",
 ]
 
 [project.optional-dependencies]
@@ -81,7 +86,7 @@ dev = [
 # distributions (emboviz-openvla, emboviz-oft, etc.) the user installs
 # alongside emboviz. This eliminates every cross-adapter dep conflict
 # we ever hit, because each adapter's heavy deps live in its own
-# Ray-managed runtime venv, never in the user's main env.
+# isolated runtime venv, never in the user's main env.
 
 [project.scripts]
 emboviz = "emboviz.cli:main"
@@ -89,8 +94,9 @@ emboviz = "emboviz.cli:main"
 [project.entry-points."emboviz.adapters"]
 # Adapter packages register themselves here so emboviz can auto-discover
 # what's installed. Each entry maps a CLI name (e.g. "openvla") to the
-# fully-qualified module:Class of the adapter spec. The spec class
-# declares: runtime_env, actor class, default config.
+# fully-qualified ``module:attr`` path of the adapter's AdapterSpec
+# instance. The spec declares: runtime venv Python version, runtime
+# pip deps, env vars, server entry-point command, default kwargs.
 #
 # This dict is INTENTIONALLY EMPTY in core — each adapter package adds
 # its own entry via its own pyproject [project.entry-points...] block.

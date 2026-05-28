@@ -1,42 +1,67 @@
-"""The adapter subsystem — every VLA backend talks through Ray actors.
+"""The adapter subsystem — every backend talks through ZeroMQ workers.
 
 emboviz core has **no model dependencies** (no torch, no transformers,
-no lerobot). Each VLA family lives in its own pip-installable adapter
-package (``emboviz-openvla``, ``emboviz-oft``, ``emboviz-pi0``,
-``emboviz-gr00t``, ``emboviz-sam3``) whose heavy deps install into an
-isolated venv on first use.
+no lerobot). Each backend (VLA family, perception model, ...) lives in
+its own pip-installable adapter package (``emboviz-openvla``,
+``emboviz-oft``, ``emboviz-pi0``, ``emboviz-gr00t``, ``emboviz-sam3``)
+whose heavy deps install into an isolated venv on first use.
 
-When a diagnostic asks for ``model.predict(scene)``:
+When the CLI asks for ``model.predict(scene)``:
 
-1. The CLI consults :func:`emboviz.adapters.registry.find_adapter` to
-   resolve a CLI alias (``"openvla"``) → :class:`AdapterSpec` declared
-   by the matching adapter package's entry point.
-2. :func:`emboviz.adapters.lifecycle.connect` spawns or attaches to a
-   Ray actor running the adapter's actor class in its isolated venv
-   (``runtime_env={"py_executable": "/path/to/venv/bin/python"}``).
-3. :class:`emboviz.adapters.client.RayVLAClient` wraps the Ray handle
-   in a :class:`emboviz.models.protocol.VLAModel`-compatible facade so
-   diagnostics never know they're talking to another process.
+1. The registry resolves a CLI alias (``"openvla"``) →
+   :class:`AdapterSpec` declared by the matching adapter package's
+   entry point.
+2. The lifecycle layer either attaches to a user-started worker on its
+   known endpoint, or spawns one in the adapter's runtime venv via
+   ``subprocess.Popen`` and waits until it answers ``ping``.
+3. The :class:`ZMQAdapterClient` (or, for SAM3 and friends, a sibling
+   :class:`RpcClient` subclass shipped by that adapter) wraps the live
+   ZMQ DEALER socket in a Python-side facade so callers never know
+   they're talking to another process.
 
-This is the only architecture in which we can offer
-``emboviz-openvla`` and ``emboviz-oft`` together — their pinned
-transformers / lerobot versions are mutually incompatible at the venv
-level. Each adapter's runtime venv is walled off.
+Adapter authors don't subclass the protocol — they ship a small
+**Service Handler** class whose ``methods`` property enumerates which
+wire-method names are exposed and how each maps to model methods. The
+server loop dispatches via that dict; unknown method names raise
+explicitly. For VLA adapters we provide the ready-made
+:class:`VLAModelHandler` that lists every VLAModel protocol method.
 """
 
+from emboviz.adapters.client import (
+    AdapterRpcError,
+    RpcClient,
+    ZMQAdapterClient,
+    default_endpoint,
+)
+from emboviz.adapters.lifecycle import (
+    WorkerHandle,
+    connect,
+    install_venv,
+    shutdown,
+    venv_path,
+    venv_python,
+    venv_root,
+)
 from emboviz.adapters.protocol import AdapterSpec
 from emboviz.adapters.registry import find_adapter, list_adapters
-from emboviz.adapters.lifecycle import connect, shutdown, install_venv
-from emboviz.adapters.client import RayVLAClient
-from emboviz.adapters.actor_base import BaseAdapterActor
+from emboviz.adapters.server_base import ServiceHandler, VLAModelHandler, serve
 
 __all__ = [
+    "AdapterRpcError",
     "AdapterSpec",
-    "BaseAdapterActor",
-    "RayVLAClient",
-    "find_adapter",
-    "list_adapters",
+    "RpcClient",
+    "ServiceHandler",
+    "VLAModelHandler",
+    "WorkerHandle",
+    "ZMQAdapterClient",
     "connect",
-    "shutdown",
+    "default_endpoint",
+    "find_adapter",
     "install_venv",
+    "list_adapters",
+    "serve",
+    "shutdown",
+    "venv_path",
+    "venv_python",
+    "venv_root",
 ]

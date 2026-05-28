@@ -620,7 +620,7 @@ def load_annotation_connector(path: str | Path) -> TargetDetector:
 # ----------------------------------------------------------------------
 
 class SAM3Detector:
-    """Zero-shot open-vocabulary target detection via Meta's SAM 3 (HTTP client).
+    """Zero-shot open-vocabulary target detection via Meta's SAM 3 (ZMQ client).
 
     SAM 3 (Meta AI, [released Nov 2025](https://github.com/facebookresearch/sam3))
     is a single model that takes a text phrase and segments every
@@ -628,35 +628,31 @@ class SAM3Detector:
 
         text → boxes + masks (one forward pass).
 
-    Architecture: this class is an HTTP client. The actual SAM 3 model
-    runs in a SEPARATE Python 3.12 venv (the ``emboviz-sam3`` sidecar at
-    ``sam3_service/``) and exposes ``POST /detect`` over localhost.
+    Architecture: this class is a thin wrapper around
+    :class:`emboviz_sam3.client.Sam3Client`. The actual SAM 3 model
+    runs in a SEPARATE Python 3.12 venv (the ``emboviz-sam3`` adapter
+    worker) and answers ZMQ ``detect`` requests over a Unix socket.
 
-    Why a sidecar: SAM 3 requires Python 3.12+ and
+    Why an isolated worker: SAM 3 requires Python 3.12+ and
     ``transformers >= 4.56``. None of the four VLA adapter venvs
     (OpenVLA on Python 3.10 + transformers 4.49, OFT on a vendored
     transformers fork, π0 on Python 3.11 + transformers 4.53, GR00T on
     Python 3.11 + transformers 4.57) can host those constraints
-    alongside their pinned adapter deps. Isolating SAM 3 in its own
-    process is the only architecture that works for every adapter.
+    alongside their pinned adapter deps. ZMQ's wire (bytes / msgpack)
+    is Python-version-agnostic so SAM 3 can stay on 3.12 forever.
 
     Why this is the default over GD+SAM:
-      • One model + one forward pass on the server side.
+      • One model + one forward pass on the worker side.
       • Native concept-aware text prompting (no noun extraction).
       • Better discrimination on close concepts via the presence-token.
-      • The server is shared across multiple runs — model loads once,
+      • The worker is shared across multiple runs — model loads once,
         not per-runner-launch.
-
-    Client deps (this side): only ``httpx`` and ``pycocotools``. No
-    torch, no transformers. The detector POSTs the primary camera's
-    image bytes + the target phrase and parses a JSON response with
-    COCO-RLE-encoded masks.
 
     Usage::
 
-        # First, start the sidecar (one-time per session):
-        #   /root/venvs/sam3/bin/emboviz-sam3 serve --preload
-        # Then in the adapter venv:
+        # First, start the worker (one-time per session):
+        #   ~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve
+        # Then in the calling code:
         det = SAM3Detector(target_text="the mug")
         detection = det(scene)
         if detection is not None:
@@ -664,12 +660,10 @@ class SAM3Detector:
             box  = detection.bbox         # (x0,y0,x1,y1)
     """
 
-    DEFAULT_URL = "http://127.0.0.1:8311"
-
     def __init__(
         self,
         target_text: str,
-        base_url: Optional[str] = None,
+        endpoint: Optional[str] = None,
         score_threshold: float = 0.30,
         mask_threshold: float = 0.50,
         timeout: float = 120.0,
@@ -679,23 +673,24 @@ class SAM3Detector:
             target_text: REQUIRED. The phrase to localize — e.g.
                 ``"the mug"``, ``"the lid"``, ``"the welding torch"``,
                 ``"the red pipe on the left"``. Memorization is a
-                USER-SCOPED test (which object do you want to check the
-                policy isn't ignoring?); we never guess.
-            base_url: URL of the running ``emboviz-sam3`` sidecar.
-                Default: read from ``EMBOVIZ_SAM3_URL`` env var, else
-                ``http://127.0.0.1:8311``.
+                USER-SCOPED test (which object do you want to check
+                the policy isn't ignoring?); we never guess.
+            endpoint: ZMQ endpoint of the running ``emboviz-sam3``
+                worker. Default: read from ``EMBOVIZ_SAM3_ENDPOINT``
+                env var, else ``ipc://~/.emboviz/sockets/sam3.sock``.
             score_threshold: detections with the top instance's score
-                below this are returned as ``None`` (the diagnostic then
-                skips that frame with a clear reason). 0.30 is the
-                "high-precision" cutoff from the SAM 3 release notes.
+                below this are returned as ``None`` (the diagnostic
+                then skips that frame with a clear reason). 0.30 is
+                the "high-precision" cutoff from the SAM 3 release
+                notes.
             mask_threshold: SAM 3 emits per-pixel mask logits; values
                 above this become foreground. 0.50 is standard.
-            timeout: per-request HTTP timeout in seconds. SAM 3 inference
+            timeout: per-request RPC timeout in seconds. SAM 3 inference
                 is ~100-300 ms per image on H100/A6000; the first
-                request to a freshly-started server pays a ~30 s warmup
-                if ``--preload`` wasn't passed.
+                request to a freshly-started worker pays a ~30 s warmup
+                unless the worker was started with ``--preload``.
             device: legacy kwarg kept for signature compatibility; the
-                sidecar picks its own device. Ignored on this side.
+                worker picks its own device. Ignored on this side.
         """
         if target_text is None or not str(target_text).strip():
             raise ValueError(
@@ -707,62 +702,60 @@ class SAM3Detector:
                 "what their model is supposed to manipulate. Set "
                 "target_text=\"<your object>\" when constructing the detector."
             )
-        import os as _os
         self.target_text = str(target_text).strip()
-        self.base_url = (
-            base_url
-            or _os.environ.get("EMBOVIZ_SAM3_URL")
-            or self.DEFAULT_URL
-        ).rstrip("/")
+        self.endpoint = endpoint
         self.score_threshold = float(score_threshold)
         self.mask_threshold = float(mask_threshold)
         self.timeout = float(timeout)
-        # Kept for signature compatibility — the sidecar picks its own
+        # Kept for signature compatibility — the worker picks its own
         # device.
         self.device = device
         self._client = None
         self._health_checked = False
 
-    # -- low-level HTTP helpers ----------------------------------------
+    # -- low-level ZMQ helpers -----------------------------------------
 
-    def _http(self):
+    def _zmq(self):
         if self._client is not None:
             return self._client
         try:
-            import httpx
+            from emboviz_sam3.client import Sam3Client
         except ImportError as e:
             raise ImportError(
-                "SAM3Detector requires `httpx` in the adapter venv. "
-                "Install via: uv pip install httpx"
+                "SAM3Detector requires the ``emboviz-sam3`` adapter "
+                "package to be installed (it ships the typed RPC client "
+                "alongside the worker code). Install via:\n"
+                "    uv pip install emboviz-sam3"
             ) from e
-        self._client = httpx.Client(
-            base_url=self.base_url, timeout=self.timeout,
+        self._client = Sam3Client(
+            endpoint=self.endpoint,
+            timeout_ms=int(self.timeout * 1000),
         )
         return self._client
 
     def _check_health(self) -> None:
-        """First-call probe: confirm the sidecar is reachable and emit a
+        """First-call probe: confirm the worker is reachable and emit a
         clear, actionable error if it isn't. We do not auto-spawn the
-        sidecar — it has its own venv and HF cache and the user should
+        worker — it has its own venv and HF cache and the user should
         be in control of when the 850M-param model loads."""
         if self._health_checked:
             return
-        try:
-            r = self._http().get("/health")
-            r.raise_for_status()
-        except Exception as e:
+        client = self._zmq()
+        if not client.ping(timeout_ms=2000):
             raise RuntimeError(
-                f"SAM3Detector cannot reach the SAM 3 sidecar at "
-                f"{self.base_url}: {type(e).__name__}: {e}\n\n"
-                "Start the sidecar (in its own Python 3.12 venv):\n"
-                "    /root/venvs/sam3/bin/emboviz-sam3 serve --preload\n\n"
-                "Or override the URL via EMBOVIZ_SAM3_URL=http://...\n\n"
-                "If the sidecar isn't installed, run:\n"
-                "    bash /root/emboviz/scripts/setup/05_install_sam3_venv.sh\n\n"
+                f"SAM3Detector cannot reach the SAM 3 worker at "
+                f"{client._endpoint}.\n\n"
+                "Start the worker (in its own Python 3.12 venv):\n"
+                "    ~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve\n\n"
+                "Or override the endpoint via "
+                "EMBOVIZ_SAM3_ENDPOINT=ipc://... or tcp://...\n\n"
+                "If the worker isn't installed, run:\n"
+                "    uv pip install emboviz-sam3\n"
+                "    emboviz install-sam3\n\n"
                 "If you need to keep moving without SAM 3, pass\n"
                 "    --detector gd-sam\n"
                 "to fall back to GroundingDINO + SAM."
-            ) from e
+            )
         self._health_checked = True
 
     # -- public detector contract --------------------------------------
@@ -778,28 +771,21 @@ class SAM3Detector:
         self._check_health()
         pil = scene.observations.images["primary"].data
 
-        # Encode image as PNG bytes once. We pick PNG over JPEG because
-        # JPEG lossy compression can change detection slightly; PNG is
-        # lossless and SAM 3 server-side decoding cost is negligible
-        # compared to the inference itself.
+        # Encode image as PNG bytes once. PNG over JPEG because lossy
+        # compression can shift detection slightly; PNG is lossless
+        # and SAM 3 worker-side decoding cost is negligible compared
+        # to the inference itself.
         import io as _io
         buf = _io.BytesIO()
         pil.save(buf, format="PNG")
         img_bytes = buf.getvalue()
 
-        files = {"image": ("frame.png", img_bytes, "image/png")}
-        data = {
-            "target_text":     self.target_text,
-            "score_threshold": str(self.score_threshold),
-            "mask_threshold":  str(self.mask_threshold),
-        }
-        r = self._http().post("/detect", files=files, data=data)
-        if r.status_code >= 400:
-            raise RuntimeError(
-                f"SAM3Detector /detect returned HTTP {r.status_code}: "
-                f"{r.text[:500]}"
-            )
-        body = r.json()
+        body = self._zmq().detect(
+            image_bytes=img_bytes,
+            target_text=self.target_text,
+            score_threshold=self.score_threshold,
+            mask_threshold=self.mask_threshold,
+        )
         instances = body.get("instances") or []
         if not instances:
             return None
@@ -808,13 +794,13 @@ class SAM3Detector:
     def _build_detection(
         self, instances: list[dict], body: dict,
     ) -> TargetDetection:
-        """Decode the COCO-RLE-encoded server response into a TargetDetection.
+        """Union the per-instance masks (already raw uint8 ndarrays
+        from the wire) into a single :class:`TargetDetection`.
 
-        Instances arrive sorted highest-score-first (per the server).
-        We union all masks above ``score_threshold`` and report each
-        instance's bbox + score for transparency.
+        Instances arrive sorted highest-score-first (per the worker).
+        We keep all above ``score_threshold`` and report each instance's
+        bbox + score for transparency.
         """
-        from pycocotools import mask as coco_mask
         kept = [
             i for i in instances
             if float(i.get("score", 0.0)) >= self.score_threshold
@@ -825,17 +811,11 @@ class SAM3Detector:
         inst_scores: list[float] = []
         union: Optional[np.ndarray] = None
         for inst in kept:
-            mask_obj = inst.get("mask") or {}
-            counts = mask_obj.get("counts")
-            size = mask_obj.get("size")
-            if not (counts and isinstance(size, list) and len(size) == 2):
+            m = inst.get("mask")
+            if m is None:
                 continue
-            rle = {
-                "counts": counts.encode("latin-1") if isinstance(counts, str) else counts,
-                "size":   [int(size[0]), int(size[1])],
-            }
-            m = coco_mask.decode(rle).astype(bool)
-            if m.ndim == 3:
+            m = np.asarray(m).astype(bool)
+            if m.ndim == 3 and m.shape[-1] == 1:
                 m = m[..., 0]
             if not m.any():
                 continue

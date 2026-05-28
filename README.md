@@ -37,96 +37,106 @@ We **surface signals**. You form conclusions. Debugger, not oracle.
 
 ## Quickstart
 
+### Architecture in one diagram
+
+```
+                                                ┌── ~/.emboviz/venvs/openvla
+                                                │   torch + transformers 4.49 + lerobot
+                                                │   + openvla checkpoint code
+                                                │   ↑ emboviz-openvla serve
+                                                ↑   (ZMQ ROUTER on /tmp/.../openvla.sock)
+~/.venv-emboviz   ────────  ZMQ DEALER  ──────  ↑
+(your main venv:                                ↑   each adapter runs in its OWN venv,
+ emboviz core +                                 ↑   on its OWN Python version, with its
+ emboviz-openvla,                               ↑   OWN torch/transformers/etc. pinned —
+ emboviz-oft, ...                               ↑   they never share dependencies.
+ — no torch)                                    │
+                                                ├── ~/.emboviz/venvs/pi0     (Python 3.11)
+                                                ├── ~/.emboviz/venvs/gr00t   (Python 3.11)
+                                                ├── ~/.emboviz/venvs/oft     (Python 3.11)
+                                                └── ~/.emboviz/venvs/sam3    (Python 3.12)
+```
+
+The wire is msgpack-framed ZeroMQ over a Unix socket. Bytes, not pickle —
+so each adapter can be on any Python version and the main venv can move
+forward whenever you want.
+
+### System deps
+
 One system dep on Linux: `sudo apt install ffmpeg` (Mac: `brew install ffmpeg`).
 That's the ONE thing pip can't handle for you — `lerobot` reads videos
 via `torchcodec` which needs FFmpeg system libraries.
 
-Then per model, three commands (each in its own venv — the model
-adapter extras are mutually exclusive because the upstream packages
-pin incompatible transformers / torch versions):
-
-### OpenVLA-7B (or any fine-tune of it) on Bridge / LIBERO / any LeRobot data
+### Install (per adapter you actually want)
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install "emboviz[openvla]"
-uv run emboviz analyze \
+# Main venv — emboviz core + adapter shims. No torch.
+uv venv --python 3.11
+uv pip install emboviz emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
+
+# One-time per adapter: materialise its runtime venv with all the
+# heavy model deps inside ~/.emboviz/venvs/<name>. The pinned
+# Python version, torch range, transformers version etc. all come
+# from the adapter's AdapterSpec — you don't have to know them.
+emboviz install-openvla
+emboviz install-oft
+emboviz install-pi0
+emboviz install-gr00t
+emboviz install-sam3      # SAM 3 text→mask detector for the memorization diagnostic
+
+# Optional: PyTorch backend conversion for π0's attention diagnostic.
+emboviz convert-pi0 pi0_libero
+```
+
+### Start the workers (each in its own background shell)
+
+```bash
+~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve &
+~/.emboviz/venvs/openvla/bin/emboviz-openvla serve &
+~/.emboviz/venvs/oft/bin/emboviz-oft serve &
+~/.emboviz/venvs/pi0/bin/emboviz-pi0 serve &
+~/.emboviz/venvs/gr00t/bin/emboviz-gr00t serve &
+```
+
+Workers stay running between analyze calls — the model only cold-loads
+once per session.
+
+### Run an analysis
+
+```bash
+emboviz analyze \
     --model openvla --dataset bridge \
-    --episodes 0,1,2 --target "the spoon" \
+    --episodes 0,1,2 --mask-query "the spoon" \
     --output ./report
 ```
 
-### OpenVLA-OFT on LIBERO
+Substitute `oft` / `pi0` / `gr00t` for `openvla` to swap models. The
+`--mask-query` phrase is what SAM 3 will localize for the memorization
+diagnostic; pick the object you actually care about the policy paying
+attention to (`"the cloth"`, `"the welding torch"`, ...).
+
+### Picking which diagnostics to run
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install "emboviz[oft]"     # pulls moojink fork + transformers patch automatically
-uv run emboviz analyze \
-    --model oft --dataset libero-spatial \
-    --episodes 0,1,2 --target "the black bowl" \
-    --output ./report
+# Default: all diagnostics
+emboviz analyze --model openvla --dataset bridge --mask-query "the spoon" --output ./r
+
+# Just two
+emboviz analyze ... --diagnostics memorization,attention
+
+# Everything except chunk consistency
+emboviz analyze ... --diagnostics all,-chunk
+# Equivalent:
+emboviz analyze ... --skip-diagnostics chunk
+
+# Short or full names work
+--diagnostics memorization,attention_drift   # short + full mixed is OK
+--diagnostics vision.scene_sensitivity       # full canonical
 ```
 
-### π0 / pi0_libero (Physical Intelligence)
-
-```bash
-uv venv && source .venv/bin/activate
-uv pip install "emboviz[pi0]"
-# openpi is git-only and its documented install REQUIRES
-# GIT_LFS_SKIP_SMUDGE=1 (it pins an old lerobot commit whose git-lfs test
-# fixtures are no longer fetchable). `install-pi0` sets that env var for
-# you — a plain transitive install would crash:
-uv run emboviz install-pi0
-# 4th command ONLY if you want the attention-extraction diagnostic
-# (the other 4 diagnostics work on the JAX checkpoint as-is):
-uv run emboviz convert-pi0 pi0_libero
-uv run emboviz analyze \
-    --model pi0 --dataset pi-libero \
-    --episodes 0,1,2 --target "the white mug" \
-    --output ./report
-```
-
-### GR00T-N1.7 (NVIDIA) on DROID or your LeRobot data
-
-```bash
-uv venv && source .venv/bin/activate
-uv pip install "emboviz[gr00t]"
-# Isaac-GR00T's flash-attn build dep fails under pip's standard build
-# isolation. ``install-gr00t`` does the `--no-deps` install (gr00t's
-# adapter falls back to SDPA / eager attention anyway):
-uv run emboviz install-gr00t
-uv run emboviz analyze \
-    --model gr00t \
-    --model-kwargs '{"camera_mapping": {"primary": "exterior_image_1_left", "wrist_left": "wrist_image_left"}}' \
-    --dataset droid-sample --episodes 1 --target "the blue block" \
-    --output ./report
-```
-
-### SAM 3 sidecar (memorization diagnostic — one-time, shared by every model)
-
-The memorization diagnostic masks the manipulated object with SAM 3 (Meta's
-text-to-mask model, [released Nov 2025](https://github.com/facebookresearch/sam3)).
-SAM 3 needs **Python 3.12** and **transformers ≥ 4.56**, which conflict
-with every VLA adapter's pins. So SAM 3 runs in its own venv and serves
-detections to whichever adapter venv you're using over HTTP. Set it up
-**once per machine** — every adapter venv reuses it.
-
-```bash
-uv venv .venv-sam3 --python 3.12
-.venv-sam3/bin/pip install emboviz-sam3
-.venv-sam3/bin/emboviz-sam3 serve --preload &
-# (first run downloads facebook/sam3 — gated, needs HF_TOKEN — ~3.4 GB)
-```
-
-The sidecar listens on `127.0.0.1:8311` by default. Override with
-`EMBOVIZ_SAM3_URL=http://...` if you run it on another host or port.
-
-Once the sidecar is up, every `emboviz analyze` call defaults to SAM 3.
-If the sidecar isn't running you get a clear error pointing at this
-command. To skip the memorization diagnostic entirely, pass
-`--detector gd-sam` (falls back to GroundingDINO + SAM in-process; older
-but works without the sidecar) or `--target-annotations <path>` (your
-own per-frame bbox/mask file).
+Diagnostics: `memorization` (`vision.memorization`), `modality` (`input.modality_dropout`),
+`sensitivity` (`vision.scene_sensitivity`), `chunk` (`internal.chunk_consistency`),
+`attention` (`internal.attention_drift`).
 
 ### Bring your own data
 
@@ -140,24 +150,24 @@ point emboviz at it directly with `--dataset-format <fmt>` + `--dataset-path <pa
 uv run emboviz analyze --model pi0 \
     --dataset-format hdf5 --dataset-path /data/my_demos.hdf5 \
     --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb", "wrist": "robot0_eye_in_hand_rgb"}, "instruction": "pick up the mug"}' \
-    --episodes 0 --target "the white mug" --output ./report
+    --episodes 0 --mask-query "the white mug" --output ./report
 
 # RLDS / Open-X-Embodiment (needs `uv pip install 'emboviz[rlds]'`)
 uv run emboviz analyze --model gr00t \
     --dataset-format rlds --dataset-path /tfds \
     --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \
-    --episodes 0,1 --target "the green block" --output ./report
+    --episodes 0,1 --mask-query "the green block" --output ./report
 
 # MCAP deployment recording from ROS 2 / NVIDIA Isaac SIM
 uv run emboviz analyze --model oft \
     --dataset-format mcap --dataset-path /logs/rollout_2026_05_26.mcap \
     --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \
-    --episodes 0 --target "the black bowl" --output ./report
+    --episodes 0 --mask-query "the black bowl" --output ./report
 
 # Rerun .rrd deployment recording
 uv run emboviz analyze --model openvla \
     --dataset-format rerun-rrd --dataset-path /logs/rollout.rrd \
-    --episodes 0 --target "the spoon" --output ./report
+    --episodes 0 --mask-query "the spoon" --output ./report
 ```
 
 Each format's adapter requires a small set of mapping kwargs (which

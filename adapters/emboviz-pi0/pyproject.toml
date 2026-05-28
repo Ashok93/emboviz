@@ -1,0 +1,28 @@
+[project]
+name = "emboviz-pi0"
+version = "0.3.0"
+description = "Physical Intelligence π0 / π0.5 adapter for emboviz — runs openpi in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    "emboviz>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+pi0 = "emboviz_pi0.spec:SPEC"
+
+[project.scripts]
+emboviz-pi0 = "emboviz_pi0.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# openpi is a direct git ref; hatch must accept direct references in
+# the metadata our spec advertises (even though the shim itself doesn't
+# pull openpi in).
+[tool.hatch.metadata]
+allow-direct-references = true

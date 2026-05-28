@@ -1,40 +1,30 @@
 #!/usr/bin/env bash
-# SAM 3 sidecar — dev pod recipe.
+# SAM 3 adapter — dev pod recipe.
 #
-# Same shape as the user-facing path documented in README:
+# Mirrors the user-path exactly (per README):
 #
-#     uv venv .venv-sam3 --python 3.12
-#     uv pip install emboviz-sam3
-#     emboviz-sam3 serve --preload &
+#     uv pip install emboviz emboviz-sam3
+#     emboviz install-sam3
 #
-# The sidecar is its own Python 3.12 venv because:
-#   - Official facebookresearch/sam3 needs Python 3.12+.
-#   - HF's Sam3Model integration needs transformers >= 4.56.
-#   - None of the four VLA adapter venvs (OpenVLA 3.10/4.49, OFT 3.10/
-#     vendored fork, π0 3.11/4.53, GR00T 3.11/4.57) can host those
-#     constraints alongside their pinned adapter deps.
-# Isolating SAM 3 in its own process lets every adapter share the same
-# default text→mask detector over HTTP.
-#
-# Per CLAUDE.md "Dev path is the user path": NO version pins here.
-# ``sam3_service/pyproject.toml`` owns the SAM 3 runtime deps.
+# The SAM 3 runtime venv is pinned to Python 3.12 (sam3 reference repo
+# requirement) and transformers >= 4.56 (added the ``Sam3Model``
+# integration). None of the four VLA adapter venvs can host those
+# constraints alongside their pinned adapter deps; ZMQ's bytes wire
+# is Python-version-agnostic so SAM 3 stays on 3.12 forever.
 set -euo pipefail
 source /root/.bashrc.emboviz
 
-VENV=/root/venvs/sam3
-uv venv "$VENV" --python 3.12
-uv pip install --python "$VENV/bin/python" -e "/root/emboviz/sam3_service/"
+MAIN_VENV=/root/.venv-emboviz
+ADAPTER=sam3
 
-echo "[sam3] sanity import"
-"$VENV/bin/python" -c "
-import torch, transformers
-print('  torch       ', torch.__version__, '  cuda_avail=', torch.cuda.is_available())
-print('  transformers', transformers.__version__)
-from transformers import Sam3Model, Sam3Processor
-print('  Sam3Model + Sam3Processor importable: OK')
-import emboviz_sam3
-print('  emboviz-sam3', emboviz_sam3.__version__)
-"
-echo "[sam3] DONE — start the server with:"
-echo "    $VENV/bin/emboviz-sam3 serve --preload"
-echo "[sam3] Note: first run downloads facebook/sam3 (~3.4 GB; gated, needs HF_TOKEN)"
+uv venv "$MAIN_VENV" --python 3.11
+uv pip install --python "$MAIN_VENV/bin/python" \
+    -e /root/emboviz \
+    -e /root/emboviz/adapters/emboviz-$ADAPTER
+
+EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-$ADAPTER --force
+
+echo "[$ADAPTER] DONE"
+echo "Start the worker (preloads SAM 3 — ~30 s first run):"
+echo "    /root/venvs/$ADAPTER/bin/emboviz-$ADAPTER serve &"
+echo "Note: first run downloads facebook/sam3 (~3.4 GB; gated, needs HF_TOKEN)"

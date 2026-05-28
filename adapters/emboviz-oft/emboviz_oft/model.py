@@ -31,14 +31,12 @@ import numpy as np
 
 from emboviz.core.types import ActionResult, AttentionMaps, Scene, TokenSelector
 from emboviz.models.protocol import Capability, RequiredInputs, VLAModel
-from emboviz.models.registry import register_model
 
 
 _DEFAULT_REPO = "moojink/openvla-7b-oft-finetuned-libero-spatial"
 _SPACE_TOKEN_ID = 29871   # Llama tokenizer's leading-space token
 
 
-@register_model("openvla-oft")
 class OpenVLAOFTAdapter(VLAModel):
     """Wraps the openvla-oft inference utilities as a VLAModel.
 

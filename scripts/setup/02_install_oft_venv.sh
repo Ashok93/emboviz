@@ -1,33 +1,23 @@
 #!/usr/bin/env bash
 # OpenVLA-OFT adapter — dev pod recipe.
 #
-# Same shape as the user-facing path documented in README:
+# Mirrors the user-path exactly (per README):
 #
-#     uv venv .venv-oft --python 3.10
-#     uv pip install 'emboviz[oft]'
-#
-# The ``[oft]`` extra resolves moojink's vendored transformers fork and
-# the openvla-oft package via PEP 508 ``pkg @ git+...`` direct refs, so
-# a plain ``uv pip install`` is enough — no manual ``git clone`` step.
-#
-# Per CLAUDE.md "Dev path is the user path": NO version pins here.
+#     uv pip install emboviz emboviz-oft
+#     emboviz install-oft
 set -euo pipefail
 source /root/.bashrc.emboviz
 
-VENV=/root/venvs/oft
-uv venv "$VENV" --python 3.10
-uv pip install --python "$VENV/bin/python" -e "/root/emboviz[oft]"
+MAIN_VENV=/root/.venv-emboviz
+ADAPTER=oft
 
-echo "[oft] sanity import"
-"$VENV/bin/python" -c "
-import torch, transformers, emboviz
-print('  torch       ', torch.__version__, '  cuda_avail=', torch.cuda.is_available())
-print('  transformers', transformers.__version__)
-print('  emboviz     ', emboviz.__file__)
-try:
-    import prismatic
-    print('  prismatic   ', prismatic.__file__)
-except Exception as e:
-    print('  prismatic import failed:', type(e).__name__, e)
-"
-echo "[oft] DONE — $VENV/bin/python ready"
+uv venv "$MAIN_VENV" --python 3.11
+uv pip install --python "$MAIN_VENV/bin/python" \
+    -e /root/emboviz \
+    -e /root/emboviz/adapters/emboviz-$ADAPTER
+
+EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-$ADAPTER --force
+
+echo "[$ADAPTER] DONE"
+echo "Start the worker:"
+echo "    /root/venvs/$ADAPTER/bin/emboviz-$ADAPTER serve &"

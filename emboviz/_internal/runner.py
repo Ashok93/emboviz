@@ -96,12 +96,12 @@ def _resolve(spec: str, kwargs_json: str = ""):
 
     Three forms are supported:
 
-      1. ``adapter:<name>`` — spawn a Ray actor for the installed
-         emboviz adapter package registered under ``<name>`` (e.g.
-         ``adapter:openvla``). Returns a :class:`RayVLAClient` that
-         implements the VLAModel protocol; the model runs in its
-         isolated runtime venv. Kwargs are forwarded to the actor's
-         ``__init__`` (merged on top of the adapter's defaults).
+      1. ``adapter:<name>`` — connect to (or auto-spawn) the ZeroMQ
+         worker for the installed emboviz adapter package registered
+         under ``<name>`` (e.g. ``adapter:openvla``). Returns the
+         live :class:`ZMQAdapterClient` (a VLAModel) — the actual
+         model lives in the adapter's isolated runtime venv on the
+         other side of a Unix socket.
 
       2. ``module.path:attr`` — call ``attr(**kwargs)``. Used by
          dataset adapters and the built-in mock / lerobot model.
@@ -111,15 +111,25 @@ def _resolve(spec: str, kwargs_json: str = ""):
          (now-deprecated) ``emboviz.models.registry:get_model:<name>``
          resolver path; kept for back-compat until the legacy in-
          process adapters are removed.
+
+    The ``kwargs_json`` blob for ``adapter:<name>`` is currently
+    ignored (the adapter's defaults are baked into its server
+    invocation). When per-call overrides are needed we'll surface
+    them through a separate ``EMBOVIZ_<NAME>_KWARGS`` env var that
+    the spawned server reads — keeps the RPC schema unchanged.
     """
     kwargs = json.loads(kwargs_json) if kwargs_json else {}
 
     # ── Form 1: adapter:<name> ──────────────────────────────────────
     if spec.startswith("adapter:"):
-        from emboviz.adapters import RayVLAClient, connect
+        from emboviz.adapters import connect
         name = spec.split(":", 1)[1]
-        handle = connect(name, actor_kwargs=kwargs)
-        return RayVLAClient(handle)
+        handle = connect(name)
+        # We return the client only. The Popen handle (if we spawned)
+        # is intentionally left attached to the running worker so the
+        # next CLI invocation in the same session re-uses it. The OS
+        # reaps it when the user kills the worker or the machine exits.
+        return handle.client
 
     parts = spec.split(":")
     module = importlib.import_module(parts[0])
@@ -278,6 +288,18 @@ def run_story(args) -> None:
     print(f"[runner] story={args.story_id}", flush=True)
     print(f"[runner] out_dir={out_dir}", flush=True)
 
+    # Diagnostic gating. The CLI resolves --diagnostics + --skip-diagnostics
+    # into ``args.enabled_diagnostics`` (a frozenset of canonical axis
+    # names like ``"vision.memorization"``). Older callers that don't set
+    # it default to "all enabled".
+    enabled = frozenset(getattr(args, "enabled_diagnostics", None) or {
+        "vision.memorization",
+        "input.modality_dropout",
+        "vision.scene_sensitivity",
+        "internal.chunk_consistency",
+        "internal.attention_drift",
+    })
+
     # --- 1. model + dataset ----------------------------------------------
     print(f"[1/7] load model: {args.model_builder} kwargs={args.model_kwargs_json}", flush=True)
     model = _resolve(args.model_builder, args.model_kwargs_json)
@@ -391,7 +413,11 @@ def run_story(args) -> None:
     # --- 5. Trajectory-level diagnostics (attention drift + chunk) -------
     trajectory_axes: dict = {}
 
-    if not (model.capabilities & Capability.ATTENTION):
+    if "internal.attention_drift" not in enabled:
+        not_applicable["internal.attention_drift"] = (
+            "disabled by --diagnostics / --skip-diagnostics"
+        )
+    elif not (model.capabilities & Capability.ATTENTION):
         not_applicable["internal.attention_drift"] = (
             f"model {model.model_id} does not expose Capability.ATTENTION"
         )
@@ -421,27 +447,36 @@ def run_story(args) -> None:
             print(f"      attention_drift: {drift.severity.value} "
                   f"({drift.scalar_score:.1f}px)", flush=True)
 
-    chunk = ChunkConsistencyDiagnostic(
-        calibration=calibration,
-    ).run_trajectory(model, trajectory, baselines=baselines)
-    if chunk.severity == Severity.UNKNOWN:
-        not_applicable["internal.chunk_consistency"] = chunk.explanation
+    if "internal.chunk_consistency" not in enabled:
+        not_applicable["internal.chunk_consistency"] = (
+            "disabled by --diagnostics / --skip-diagnostics"
+        )
     else:
-        trajectory_axes["internal.chunk_consistency"] = {
-            "severity":     chunk.severity.value,
-            "scalar_score": chunk.scalar_score,
-            "explanation":  chunk.explanation,
-            "raw_mean_delta": chunk.raw.get("raw_mean_delta"),
-        }
-        print(f"      chunk_consistency: {chunk.severity.value} "
-              f"(normalized mean_delta={chunk.scalar_score:.3f}, "
-              f"raw={chunk.raw['raw_mean_delta']:.3f})", flush=True)
+        chunk = ChunkConsistencyDiagnostic(
+            calibration=calibration,
+        ).run_trajectory(model, trajectory, baselines=baselines)
+        if chunk.severity == Severity.UNKNOWN:
+            not_applicable["internal.chunk_consistency"] = chunk.explanation
+        else:
+            trajectory_axes["internal.chunk_consistency"] = {
+                "severity":     chunk.severity.value,
+                "scalar_score": chunk.scalar_score,
+                "explanation":  chunk.explanation,
+                "raw_mean_delta": chunk.raw.get("raw_mean_delta"),
+            }
+            print(f"      chunk_consistency: {chunk.severity.value} "
+                  f"(normalized mean_delta={chunk.scalar_score:.3f}, "
+                  f"raw={chunk.raw['raw_mean_delta']:.3f})", flush=True)
 
     # --- 6. Per-frame diagnostics with shared baseline -------------------
     print(f"[6/7] per-frame diagnostics (shared baseline) ...", flush=True)
     per_axis: dict = {}
 
-    if cached_detector is not None:
+    if "vision.memorization" not in enabled:
+        not_applicable["vision.memorization"] = (
+            "disabled by --diagnostics / --skip-diagnostics"
+        )
+    elif cached_detector is not None:
         print(f"      memorization (per camera, calibrated) ...", flush=True)
         memo = TrajectoryDiagnostic(
             MemorizationDiagnostic(
@@ -457,37 +492,43 @@ def run_story(args) -> None:
     # diagnostic. The dataset's training data (or the user's eval pool)
     # is the right substitution distribution; we never fabricate
     # substitutes when the pool is empty.
-    print(f"      building modality dropout pool from other episodes ...", flush=True)
-    from emboviz.modality_pools import build_modality_pool
-    declared_mods = {
-        "state":          model.required_inputs.state,
-        "gripper":        model.required_inputs.gripper,
-        "action_history": model.required_inputs.action_history,
-        "instruction":    model.required_inputs.instruction,
-        "images":         sorted(model.required_inputs.cameras),
-    }
-    try:
-        pool = build_modality_pool(
-            dataset, current_episode=int(args.episode_idx),
-            declared_modalities=declared_mods,
-            n_samples=int(args.modality_pool_size),
-            seed=int(args.modality_pool_seed),
-            instruction_must_differ_from_task=trajectory.frames[0].instruction,
-            cache_dir=args.modality_pool_cache_dir,
-        )
-        print(f"      pool: episodes={pool.metadata.get('sampled_episodes')}",
-              flush=True)
-        for mod, ref in pool.ref_distance.items():
-            print(f"        ref_distance[{mod}] = {ref:.4f}", flush=True)
-    except Exception as e:
-        print(f"      modality pool BUILD FAILED ({type(e).__name__}: {e}) — "
-              "modality dropout SKIPPED.", flush=True)
+    pool = None
+    if "input.modality_dropout" not in enabled:
         not_applicable["input.modality_dropout"] = (
-            f"could not build a marginal-distribution pool from the "
-            f"dataset ({type(e).__name__}: {e}). The diagnostic refuses "
-            "to fabricate substitutes."
+            "disabled by --diagnostics / --skip-diagnostics"
         )
-        pool = None
+    else:
+        print(f"      building modality dropout pool from other episodes ...", flush=True)
+        from emboviz.modality_pools import build_modality_pool
+        declared_mods = {
+            "state":          model.required_inputs.state,
+            "gripper":        model.required_inputs.gripper,
+            "action_history": model.required_inputs.action_history,
+            "instruction":    model.required_inputs.instruction,
+            "images":         sorted(model.required_inputs.cameras),
+        }
+        try:
+            pool = build_modality_pool(
+                dataset, current_episode=int(args.episode_idx),
+                declared_modalities=declared_mods,
+                n_samples=int(args.modality_pool_size),
+                seed=int(args.modality_pool_seed),
+                instruction_must_differ_from_task=trajectory.frames[0].instruction,
+                cache_dir=args.modality_pool_cache_dir,
+            )
+            print(f"      pool: episodes={pool.metadata.get('sampled_episodes')}",
+                  flush=True)
+            for mod, ref in pool.ref_distance.items():
+                print(f"        ref_distance[{mod}] = {ref:.4f}", flush=True)
+        except Exception as e:
+            print(f"      modality pool BUILD FAILED ({type(e).__name__}: {e}) — "
+                  "modality dropout SKIPPED.", flush=True)
+            not_applicable["input.modality_dropout"] = (
+                f"could not build a marginal-distribution pool from the "
+                f"dataset ({type(e).__name__}: {e}). The diagnostic refuses "
+                "to fabricate substitutes."
+            )
+            pool = None
 
     if pool is not None:
         print(f"      modality dropout (K={args.modality_k_samples} per modality, "
@@ -505,17 +546,22 @@ def run_story(args) -> None:
             model, trajectory, baselines=baselines,
         )
 
-    print(f"      sensitivity map ({args.sensitivity_grid_side}x"
-          f"{args.sensitivity_grid_side}, per camera) ...", flush=True)
-    sm = TrajectoryDiagnostic(
-        SensitivityMapDiagnostic(
-            grid_side=args.sensitivity_grid_side, calibration=calibration,
-        ),
-        progress=True,
-    )
-    per_axis["vision.scene_sensitivity"] = sm.run(
-        model, trajectory, baselines=baselines,
-    )
+    if "vision.scene_sensitivity" not in enabled:
+        not_applicable["vision.scene_sensitivity"] = (
+            "disabled by --diagnostics / --skip-diagnostics"
+        )
+    else:
+        print(f"      sensitivity map ({args.sensitivity_grid_side}x"
+              f"{args.sensitivity_grid_side}, per camera) ...", flush=True)
+        sm = TrajectoryDiagnostic(
+            SensitivityMapDiagnostic(
+                grid_side=args.sensitivity_grid_side, calibration=calibration,
+            ),
+            progress=True,
+        )
+        per_axis["vision.scene_sensitivity"] = sm.run(
+            model, trajectory, baselines=baselines,
+        )
 
     # --- 7. prompt paraphrase on frame 0 ---------------------------------
     print(f"[7/7] prompt paraphrase on frame 0...", flush=True)

@@ -10,9 +10,9 @@ via entry points. This command reads that spec and:
      ``spec.runtime_pip`` requirements (torch + transformers +
      lerobot + the model checkpoint code) and the adapter's own
      env vars (``GIT_LFS_SKIP_SMUDGE`` for π0, etc.).
-  3. Runs a one-line ``python -c "from emboviz_<adapter>.model
-     import *"`` import sanity check so failures surface here
-     instead of mid-analyze.
+  3. Runs a one-line ``python -c "import <server_module>"`` sanity
+     check inside the runtime venv so failures surface here instead
+     of mid-analyze.
 
 Because the dev-path and user-path are the same (CLAUDE.md "Dev path
 is the user path"), the scripts/setup/0N_install_<name>_venv.sh dev
@@ -57,34 +57,41 @@ def _build_install_cmd(name: str, description: str) -> click.Command:
     )
     def _cmd(force: bool, check_import: bool) -> None:
         spec = find_adapter(name)
-        click.echo(f"[install-{name}] adapter spec: {spec.actor_import_path}")
+        click.echo(f"[install-{name}] adapter server: {spec.server_module}")
         click.echo(f"[install-{name}] runtime python: {spec.requires_python}")
         click.echo(
             f"[install-{name}] runtime pip ({len(spec.runtime_pip)}):"
         )
         for req in spec.runtime_pip:
             click.echo(f"    {req}")
+        if spec.runtime_pip_no_deps:
+            click.echo(
+                f"[install-{name}] runtime pip (--no-deps "
+                f"{len(spec.runtime_pip_no_deps)}):"
+            )
+            for req in spec.runtime_pip_no_deps:
+                click.echo(f"    {req}")
 
         path = install_venv(spec, force=force)
         click.echo(f"[install-{name}] venv ready: {path}")
 
         if check_import:
-            actor_module = spec.actor_import_path.split(":", 1)[0]
             check = (
-                f"import {actor_module} as m; "
-                "print('  actor module:', m.__name__)"
+                f"import {spec.server_module} as m; "
+                "print('  server module:', m.__name__)"
             )
             try:
                 py = venv_python(name)
-                subprocess.run(
-                    [str(py), "-c", check],
-                    check=True,
-                )
+                subprocess.run([str(py), "-c", check], check=True)
                 click.echo(f"[install-{name}] sanity import: OK")
+                click.echo(
+                    f"[install-{name}] start the worker with:\n"
+                    f"    {path}/bin/{spec.console_script} serve"
+                )
             except subprocess.CalledProcessError as e:
                 click.echo(
                     f"[install-{name}] sanity import FAILED ({e}). "
-                    f"The venv at {path} was created but the actor "
+                    f"The venv at {path} was created but the server "
                     "module didn't import — check the runtime_pip "
                     "in the adapter's spec.py.",
                     err=True,

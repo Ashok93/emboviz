@@ -1,0 +1,26 @@
+[project]
+name = "emboviz-gr00t"
+version = "0.3.0"
+description = "NVIDIA GR00T-N1.7 adapter for emboviz — runs the Qwen3-VL + diffusion expert in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    "emboviz>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+gr00t = "emboviz_gr00t.spec:SPEC"
+
+[project.scripts]
+emboviz-gr00t = "emboviz_gr00t.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# gr00t is a direct git ref (--no-deps install path).
+[tool.hatch.metadata]
+allow-direct-references = true
