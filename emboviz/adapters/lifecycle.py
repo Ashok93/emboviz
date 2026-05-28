@@ -327,20 +327,78 @@ def _wait_for_ready(endpoint: str, proc: Optional[subprocess.Popen],
     )
 
 
+def _runtime_venv_ready(name: str) -> bool:
+    """True iff the runtime venv at ``~/.emboviz/venvs/<name>`` exists
+    and its Python interpreter is callable. Cheap stat-only check."""
+    path = venv_path(name)
+    if not path.exists():
+        return False
+    py = path / "bin" / "python"
+    if py.exists():
+        return True
+    return (path / "Scripts" / "python.exe").exists()
+
+
+def _ensure_runtime_venv(
+    spec: AdapterSpec, *, quiet: bool = False,
+) -> Path:
+    """Create the adapter's runtime venv on demand if missing.
+
+    Visible progress: prints a one-line "[emboviz] setting up …" notice
+    BEFORE the slow install starts (~MB-to-GB pip download) so the
+    user knows what's happening. After the install completes the
+    function returns the venv path; the caller proceeds to spawn the
+    worker.
+
+    Idempotent: if the venv already looks ready, returns immediately
+    without re-running pip.
+    """
+    if _runtime_venv_ready(spec.name):
+        return venv_path(spec.name)
+
+    if not quiet:
+        import sys
+        py_size_hint = {
+            "openvla": "~6 GB",
+            "oft":     "~6 GB",
+            "pi0":     "~8 GB (downloads checkpoint + Triton autotune ~5-10 min on first inference)",
+            "gr00t":   "~7 GB",
+            "sam3":    "~5 GB (downloads facebook/sam3 ~3.4 GB; gated, needs HF_TOKEN)",
+        }.get(spec.name, "")
+        print(
+            f"[emboviz] first run for '{spec.name}' — materialising the "
+            f"runtime venv at {venv_path(spec.name)} "
+            f"{('(' + py_size_hint + ') ') if py_size_hint else ''}...",
+            file=sys.stderr, flush=True,
+        )
+    install_venv(spec, force=False)
+    return venv_path(spec.name)
+
+
 def connect(
     name: str,
     *,
     auto_spawn: bool = True,
+    auto_install: bool = True,
     timeout_s: int = 600,
 ) -> WorkerHandle:
-    """Return a :class:`WorkerHandle` for the named adapter.
+    """Return a live :class:`WorkerHandle` for the named adapter.
 
-    If a worker is already responding on the resolved endpoint (because
-    the user started it in another shell or a previous CLI run left it
-    running), we reuse it. Otherwise, if ``auto_spawn`` is True, we
-    ``subprocess.Popen`` the adapter's ``server`` entry-point in its
-    runtime venv and wait until it answers ``ping``. If ``auto_spawn``
-    is False, we raise with a friendly remediation.
+    Three states the caller can be in:
+
+      1. Worker already running and responsive at the resolved endpoint
+         (because a previous CLI invocation left it warm, or the user
+         started it manually) — we attach and return.
+      2. Worker not running but the adapter's runtime venv exists —
+         spawn the worker via ``subprocess.Popen`` and wait for it to
+         answer ``ping``.
+      3. Runtime venv doesn't exist yet — ``auto_install`` (default
+         True) creates it via :func:`install_venv`, then proceeds to
+         state 2. Visible progress is printed to stderr.
+
+    Pass ``auto_install=False`` or ``auto_spawn=False`` to require the
+    user to have already run ``emboviz install-<name>`` /
+    ``emboviz-<name> serve`` themselves.
 
     ``timeout_s`` bounds how long we wait for cold-load on first spawn —
     larger models (π0 with its Triton autotune cache cold) can take
@@ -349,10 +407,25 @@ def connect(
     spec = find_adapter(name)
     endpoint = default_endpoint(name)
 
+    # ── 1. Already alive ────────────────────────────────────────────
     if _is_alive(endpoint):
         client = ZMQAdapterClient(name=name, endpoint=endpoint)
-        return WorkerHandle(name=name, endpoint=endpoint, client=client, spawned=False)
+        return WorkerHandle(
+            name=name, endpoint=endpoint, client=client, spawned=False,
+        )
 
+    # ── 2. Ensure the runtime venv exists ───────────────────────────
+    if not _runtime_venv_ready(name):
+        if not auto_install:
+            raise RuntimeError(
+                f"runtime venv for adapter '{name}' is missing at "
+                f"{venv_path(name)}. Run `emboviz install-{name}` to "
+                "create it, or pass --auto-install (default) to let "
+                "emboviz set it up automatically."
+            )
+        _ensure_runtime_venv(spec)
+
+    # ── 3. Spawn the worker if not already running ──────────────────
     if not auto_spawn:
         raise RuntimeError(
             f"no worker reachable at {endpoint} for adapter '{name}'. "
@@ -372,7 +445,7 @@ def connect(
 
     client = ZMQAdapterClient(name=name, endpoint=endpoint)
     return WorkerHandle(
-        name=name, endpoint=endpoint, client=client, process=proc, spawned=True
+        name=name, endpoint=endpoint, client=client, process=proc, spawned=True,
     )
 
 

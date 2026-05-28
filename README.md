@@ -70,36 +70,39 @@ via `torchcodec` which needs FFmpeg system libraries.
 ### Install (per adapter you actually want)
 
 ```bash
-# Main venv — emboviz core + adapter shims. No torch.
+# Main venv — emboviz core + adapter shims. ~10 KB per shim; no torch.
 uv venv --python 3.11
 uv pip install emboviz emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
-
-# One-time per adapter: materialise its runtime venv with all the
-# heavy model deps inside ~/.emboviz/venvs/<name>. The pinned
-# Python version, torch range, transformers version etc. all come
-# from the adapter's AdapterSpec — you don't have to know them.
-emboviz install-openvla
-emboviz install-oft
-emboviz install-pi0
-emboviz install-gr00t
-emboviz install-sam3      # SAM 3 text→mask detector for the memorization diagnostic
-
-# Optional: PyTorch backend conversion for π0's attention diagnostic.
-emboviz convert-pi0 pi0_libero
 ```
 
-### Start the workers (each in its own background shell)
+That's it. The first time you run `emboviz analyze --model <name>`,
+emboviz transparently:
+
+1. **Materialises** the adapter's runtime venv at `~/.emboviz/venvs/<name>`
+   if it doesn't exist yet (the heavy install — torch, transformers,
+   lerobot, openpi, etc. — runs once, prints visible progress, and is
+   reused forever after).
+2. **Spawns** the ZeroMQ worker in the background if no warm one is
+   running yet, and waits for it to come up.
+3. **Runs** the analysis through the worker.
+
+You don't need to know which Python version each adapter pins, which
+git ref openpi needs, or which `--no-deps` quirk gr00t has — the
+adapter's `AdapterSpec` declares all of that and the lifecycle layer
+follows it.
+
+If you want to do the install step ahead of time (e.g. in CI, before a
+long benchmark run), the explicit subcommand is still available:
 
 ```bash
-~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve &
-~/.emboviz/venvs/openvla/bin/emboviz-openvla serve &
-~/.emboviz/venvs/oft/bin/emboviz-oft serve &
-~/.emboviz/venvs/pi0/bin/emboviz-pi0 serve &
-~/.emboviz/venvs/gr00t/bin/emboviz-gr00t serve &
+emboviz install-openvla    # explicit; same effect as the lazy path
 ```
 
-Workers stay running between analyze calls — the model only cold-loads
-once per session.
+### Optional: PyTorch backend for π0's attention diagnostic
+
+```bash
+emboviz convert-pi0 pi0_libero
+```
 
 ### Run an analysis
 
