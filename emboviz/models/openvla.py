@@ -20,9 +20,15 @@ from emboviz.core.types import (
     FFNActivations,
     HiddenStates,
     ImageLike,
+    Scene,
     TokenSelector,
 )
-from emboviz.models.protocol import Capability, NotSupported, VLAModel
+from emboviz.models.protocol import (
+    Capability,
+    NotSupported,
+    RequiredInputs,
+    VLAModel,
+)
 from emboviz.models.registry import register_model
 
 
@@ -47,6 +53,33 @@ class OpenVLAAdapter(VLAModel):
         | Capability.NEURON_ABLATION
         | Capability.ACTIVATION_PATCHING
     )
+
+    # Per-model attention-extraction profile, used by
+    # ``AttentionMaps.image_weights_clean()`` to apply the literature-
+    # backed default visualization for THIS backbone (instead of a
+    # one-size-fits-all heuristic). See the citation field for the
+    # source paper(s) that grounded each value.
+    ATTENTION_PROFILE = {
+        # LLaVA stage analysis ("How Multimodal LLMs Solve Image Tasks",
+        # arXiv:2508.20279) finds that LLaMA-based VLMs (LLaVA-1.5, OpenVLA
+        # via Llama-2 7B) have visual-grounding heads concentrated in
+        # mid-layers 8-23 of 32; early layers do token grouping, late
+        # layers do prediction summarization. Middle half = literature-
+        # backed default for spatial attention extraction.
+        "recommended_layer_range_fraction": (0.25, 0.75),
+        # LLaMA-2 7B does not exhibit strong spatial attention sinks on
+        # image patches per the LLaVA stage paper — the documented sink
+        # is the BOS *text* token (not image positions). For the
+        # image-patch heatmap we therefore mask 0% of image cells.
+        "sink_top_pct_to_mask": 0.0,
+        "literature_citation":
+            "Layer range: 'How Multimodal LLMs Solve Image Tasks' "
+            "(arXiv:2508.20279) — visual grounding in mid-layers. "
+            "Sink 0%: LLaMA-2 has no documented image-patch spatial "
+            "sinks; the BOS-token sink (Xiao et al. 'Efficient Streaming "
+            "Language Models with Attention Sinks', arXiv:2309.17453) "
+            "applies to text positions, not image patches.",
+    }
 
     def __init__(
         self,
@@ -75,10 +108,24 @@ class OpenVLAAdapter(VLAModel):
 
         # Cache invariants we'll need across diagnostics
         self._action_dim = int(self.model.get_action_dim(self.unnorm_key))
+        # action_scale is OPTIONAL — some checkpoints lack norm stats.
+        # If get_action_stats raises a known "no such norm stat" error
+        # we set action_scale to None with a warning so the user knows
+        # normalized_l2 metrics will fall back to plain L2. Any other
+        # error (e.g. malformed checkpoint) propagates.
+        import warnings as _warnings
         try:
             stats = self.model.get_action_stats(self.unnorm_key)
-            self._action_scale = (np.asarray(stats["q99"]) - np.asarray(stats["q01"])).astype(np.float32)
-        except Exception:
+            self._action_scale = (
+                np.asarray(stats["q99"]) - np.asarray(stats["q01"])
+            ).astype(np.float32)
+        except (KeyError, AttributeError, ValueError) as e:
+            _warnings.warn(
+                f"OpenVLA action_scale unavailable for unnorm_key="
+                f"'{self.unnorm_key}': {type(e).__name__}: {e}. "
+                "Normalized-L2 metrics will fall back to plain L2.",
+                stacklevel=2,
+            )
             self._action_scale = None
 
     # ---- identification ------------------------------------------------
@@ -90,6 +137,16 @@ class OpenVLAAdapter(VLAModel):
     @property
     def capabilities(self) -> Capability:
         return self._CAPS
+
+    @property
+    def required_inputs(self) -> RequiredInputs:
+        # OpenVLA-7B consumes one primary RGB camera + a text instruction.
+        # It ignores state/gripper/action_history — which is precisely why
+        # the state-side diagnostics are interesting on it.
+        return RequiredInputs(
+            cameras=frozenset({"primary"}),
+            instruction=True,
+        )
 
     @property
     def action_dim(self) -> int:
@@ -113,7 +170,20 @@ class OpenVLAAdapter(VLAModel):
 
     # ---- inference -----------------------------------------------------
 
-    def predict(self, image: ImageLike, instruction: str) -> ActionResult:
+    def _validated_inputs(self, scene: Scene) -> tuple:
+        """Validate the scene against required_inputs; return (image, instruction).
+
+        Centralises the strict-contract check so every public entrypoint
+        fails the same way on missing primary camera or empty instruction.
+        Never silently substitutes "".
+        """
+        reason = self.required_inputs.validate(scene)
+        if reason is not None:
+            raise ValueError(f"OpenVLAAdapter: {reason}")
+        return scene.observations.images["primary"].data, scene.instruction
+
+    def predict(self, scene: Scene) -> ActionResult:
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         action, tokens = self._generate_action(ids, pixel_values)
         return ActionResult(
@@ -129,10 +199,11 @@ class OpenVLAAdapter(VLAModel):
     # ---- attention extraction ------------------------------------------
 
     def extract_attention(
-        self, image: ImageLike, instruction: str, query: TokenSelector,
+        self, scene: Scene, query: TokenSelector,
     ) -> AttentionMaps:
         import torch
 
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -148,27 +219,36 @@ class OpenVLAAdapter(VLAModel):
         n_image = full_seq - text_seq
         grid_side = int(np.sqrt(n_image))
 
-        # Pull attention from the chosen query position to all keys; mean over heads kept separately.
+        # Query-position attention to all keys, per layer & head, with the
+        # CONTENT-INDEPENDENT attention-sink component removed: subtract the
+        # query-averaged attention so any token attended-to regardless of query
+        # (BOS/sink) cancels and the query-specific grounding survives. (Xiao
+        # et al. 2309.17453; near no-op for LLaMA, which has weak image sinks.)
         per_layer_per_head = []
         for layer_attn in outputs.attentions:
-            # layer_attn: (1, n_heads, seq, seq)
-            row = layer_attn[0, :, query_pos, :].float().cpu().numpy()
-            per_layer_per_head.append(row)
+            a = layer_attn[0]                               # (n_heads, seq, seq)
+            row = a[:, query_pos, :].float().cpu().numpy()  # (H, seq)
+            marg = a.float().mean(dim=1).cpu().numpy()      # (H, seq) query-averaged (sink)
+            per_layer_per_head.append(np.clip(row - marg, 0.0, None))
         weights = np.stack(per_layer_per_head, axis=0)  # (L, H, n_keys)
+        # OpenVLA is single-camera (the "primary" alias), single-tile. The
+        # image-token slice is one contiguous run starting at position 1.
         return AttentionMaps(
             weights=weights,
             query_position=int(query_pos),
             n_keys=full_seq,
-            image_token_range=(1, 1 + n_image),
-            image_grid_side=grid_side,
+            image_token_ranges={"primary": [(1, 1 + n_image)]},
+            image_grid_sides={"primary": grid_side},
+            metadata={"attention_profile": self.ATTENTION_PROFILE},
         )
 
     # ---- hidden states + FFN activations -------------------------------
 
     def extract_hidden_states(
-        self, image, instruction, layer_indices: list[int], query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> HiddenStates:
         import torch
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         with torch.inference_mode():
             outputs = self.model(
@@ -190,9 +270,10 @@ class OpenVLAAdapter(VLAModel):
         )
 
     def extract_ffn_activations(
-        self, image, instruction, layer_indices: list[int], query: TokenSelector,
+        self, scene: Scene, layer_indices: list[int], query: TokenSelector,
     ) -> FFNActivations:
         import torch
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
 
         captured: dict[int, torch.Tensor] = {}
@@ -256,7 +337,7 @@ class OpenVLAAdapter(VLAModel):
     # ---- residual-stream patching --------------------------------------
 
     def predict_with_residual_patch(
-        self, image, instruction, patches: dict, patch_position=None,
+        self, scene: Scene, patches: dict, patch_position=None,
     ):
         """Patch the residual-stream output of each named layer at `patch_position`
         with the provided vector, then run inference.
@@ -266,6 +347,7 @@ class OpenVLAAdapter(VLAModel):
         (the residual output) at `patch_position` with the patch tensor.
         """
         import torch
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
 
@@ -344,9 +426,10 @@ class OpenVLAAdapter(VLAModel):
     # ---- neuron ablation -----------------------------------------------
 
     def predict_with_neuron_ablation(
-        self, image, instruction, ablations: dict[tuple[int, int], float],
+        self, scene: Scene, ablations: dict[tuple[int, int], float],
     ) -> ActionResult:
         import torch
+        image, instruction = self._validated_inputs(scene)
         ids, pixel_values = self._tokenize(image, instruction)
         layers = self.model.language_model.model.layers
         handles = []
@@ -470,19 +553,38 @@ class OpenVLAAdapter(VLAModel):
             text_positions = self.find_token_positions(
                 self._extract_instruction_from_ids(ids), q.word,
             )
-            if text_positions:
-                return text_to_mm(text_positions[0])
-            return full_seq_len - 1
+            if not text_positions:
+                raise ValueError(
+                    f"_resolve_query_position: word={q.word!r} did not "
+                    "match any token position in the prompt. We refuse to "
+                    "silently fall back to the last position — a "
+                    "word-anchored diagnostic that gets last-position "
+                    "attention silently looks like 'model attended to the "
+                    "word' when actually we never found the word. Caller "
+                    "must verify the word appears in the instruction."
+                )
+            return text_to_mm(text_positions[0])
         return full_seq_len - 1
 
     def _extract_instruction_from_ids(self, ids) -> str:
         """Recover the original instruction by decoding ids and unwrapping the
-        prompt template. Fallback to empty string if the template isn't present.
+        prompt template.
+
+        Strict: the OpenVLA prompt template has two well-known anchors
+        ('take to ' and '?\\nOut'). If either is missing the prompt
+        template has been changed, and silently returning the raw decoded
+        text would give downstream tokenization-based diagnostics a
+        polluted instruction that includes the template wrapping. We
+        raise so the caller knows the adapter is misconfigured.
         """
         decoded = self.processor.tokenizer.decode(ids[0], skip_special_tokens=True)
-        if "to " in decoded and "?\nOut" in decoded:
-            try:
-                return decoded.split("take to ")[1].split("?\nOut")[0]
-            except Exception:
-                pass
-        return decoded
+        if "take to " in decoded and "?\nOut" in decoded:
+            return decoded.split("take to ")[1].split("?\nOut")[0]
+        raise ValueError(
+            "OpenVLAAdapter._extract_instruction_from_ids: decoded prompt "
+            "does not contain the expected anchors 'take to ' and "
+            "'?\\nOut'. This means PROMPT_TEMPLATE was changed or the "
+            "tokenizer decoded special tokens differently from what we "
+            "expect. Fix the template anchors before running "
+            "word-anchored diagnostics on this model."
+        )

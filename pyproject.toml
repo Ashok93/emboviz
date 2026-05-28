@@ -1,48 +1,211 @@
 [project]
 name = "emboviz"
-version = "0.0.1"
-description = "Emboviz — interpretability/debugging tool for robot policies. MVP: attribute Diffusion Policy actions on LeRobot PushT."
+version = "0.2.0"
+description = "Emboviz — the X-ray for deployed VLA policies. Plain-English diagnostics on failing real-robot episodes."
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<3.13"
 
+# ──────────────────────────────────────────────────────────────────────
+# Core install. Designed so users only ever pick ONE model extra and
+# everything else (reports, .rrd export, MCAP / HDF5 readers, viz) just
+# works. No model / framework deps here — those live in the extras
+# below and bring their own torch + transformers versions.
+#
+# Why these specific packages are core:
+#   • numpy / scipy / Pillow / pyarrow — pure data plumbing
+#   • click / pydantic / tqdm / huggingface_hub — CLI + config + downloads
+#   • matplotlib / jinja2 — Markdown + HTML report rendering
+#   • rerun-sdk — write .rrd files (the killer visualizer); 80 MB
+#   • mcap + mcap-ros2-support + mcap-protobuf-support — read .mcap
+#     deployment recordings (the de-facto ROS 2 / Isaac SIM standard)
+#   • h5py — read Robomimic / ALOHA / Isaac Lab demonstration files
+#   • imageio + imageio-ffmpeg — video / mp4 read+write for overlays
+#
+# Combined size: ~270 MB. No GPU framework. Imports in <1 s.
+# ──────────────────────────────────────────────────────────────────────
 dependencies = [
-    # Core ML
-    "torch>=2.2.0",
-    "torchvision>=0.17.0",
-    "numpy>=1.26,<2.0",
-    # LeRobot — provides pretrained Diffusion Policy + pusht dataset
-    "lerobot>=0.3.0",
-    # Attribution
-    "captum>=0.7.0",
-    # Visualization
+    # plumbing
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pyarrow>=14",
+    "Pillow>=10.0",
+    "tqdm>=4.66",
+    "click>=8.1",
+    "pydantic>=2.7",
+    "huggingface_hub>=0.24",
+    # report rendering
     "matplotlib>=3.8",
+    "jinja2>=3.1",
+    # deployment recording readers (small, no torch)
+    "mcap>=1.2",
+    "mcap-ros2-support>=0.5",
+    "mcap-protobuf-support>=0.5",
+    # tabular / scientific dataset readers
+    "h5py>=3.10",
+    # interactive Rerun export (always-on; .rrd is the headline artifact).
+    # We target the latest stable API (0.23 unified set_time + renamed
+    # Scalar → Scalars; 0.23 also exposed RecordingStream as the public
+    # constructor). emboviz/exporters/rerun.py uses that API.
+    "rerun-sdk>=0.23",
+    # video / image media
     "imageio>=2.34",
     "imageio-ffmpeg>=0.4.9",
-    "Pillow>=10.0",
-    # Utilities
-    "tqdm>=4.66",
-    "huggingface_hub>=0.24",
-    "scikit-learn>=1.3", # linear probes (trainer.py)
-    # Stage B (OpenVLA-7B + faithfulness)
-    "transformers>=4.40,<4.50",
+]
+
+[project.optional-dependencies]
+
+# ────────── Model adapters (one per venv — mutually exclusive) ─────
+# Each extra ships everything the matching adapter needs to do real
+# inference AND read the standard datasets paired with it (LeRobot
+# format, where applicable). The only thing the user does is:
+#
+#     pip install 'emboviz[<model>]'
+#
+# Then ``emboviz analyze --model <model> ...`` works for the standard
+# (model, dataset) pair. No second pip command, no manual scipy /
+# pyarrow / rerun-sdk add-ons.
+#
+# Three of the four model adapters wrap an upstream Python package that
+# is NOT on PyPI (moojink/openvla-oft, Physical-Intelligence/openpi,
+# NVIDIA/Isaac-GR00T). The user runs an additional ``pip install -e
+# git+<url>`` for those — documented in the adapter docstring + the
+# scripts/setup/<NN>_install_<model>_venv.sh dev recipe.
+
+openvla = [
+    "torch>=2.2,<2.13",
+    "torchvision>=0.17",
+    "transformers>=4.40,<4.50",   # OpenVLA modeling code targets <4.50
     "accelerate>=0.30",
-    "scipy>=1.11",
-    "timm>=0.9.10,<1.0", # OpenVLA's modeling code hard-checks this range
-    "tokenizers>=0.19",
+    "peft>=0.11",
+    "timm>=0.9.10,<1.0",          # OpenVLA hard-checks this range
+    "tokenizers>=0.19,<0.22",
     "sentencepiece>=0.2",
+    "einops>=0.8",
+    "safetensors>=0.4",
+    # LeRobot for Bridge / LIBERO datasets
+    "lerobot>=0.3,<0.5",
+    "torchcodec>=0.5",
+    "av>=14",
+    "pandas>=2.0",
+]
+
+oft = [
+    "torch>=2.2,<2.10",
+    "torchvision>=0.17",
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "timm>=0.9.10,<1.0",
+    "einops>=0.8",
+    "safetensors>=0.4",
+    "diffusers>=0.30,<0.40",
+    "lerobot>=0.3,<0.5",
+    "av>=14",
+    "pandas>=2.0",
+    # OpenVLA-OFT is research code (not on PyPI). Pulled via PEP 508
+    # direct-URL refs so ``uv pip install emboviz[oft]`` actually
+    # installs everything — no manual ``git clone`` step.
+    "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
+    # The fork's distribution name is `openvla-oft` (the import package is
+    # still `prismatic`/`openvla`). The PEP 508 LHS must match the dist
+    # name or uv refuses to resolve `emboviz[oft]`.
+    "openvla-oft @ git+https://github.com/moojink/openvla-oft.git",
+]
+
+pi0 = [
+    "torch>=2.2,<2.10",
+    "transformers>=4.50,<4.55",   # openpi's gemma wrapper targets 4.53.x
+    "einops>=0.8",
+    "safetensors>=0.5",
+    # NOTE: openpi itself is NOT listed here. It is git-only and its
+    # documented install REQUIRES `GIT_LFS_SKIP_SMUDGE=1` (it pins an old
+    # lerobot commit whose git-lfs test fixtures are no longer fetchable —
+    # see openpi's README + issue #313). A transitive `openpi @ git+...`
+    # would resolve with smudge ENABLED and crash, and a user cannot inject
+    # an env var into a transitive build. So after `uv pip install
+    # 'emboviz[pi0]'`, the user runs `emboviz install-pi0` once, which sets
+    # the env var exactly as openpi documents. (Same pattern as gr00t.)
+]
+
+gr00t = [
+    "torch>=2.2,<2.13",
+    "transformers>=4.57,<4.60",   # Qwen3-VL needs >=4.57
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "diffusers>=0.30,<0.40",
+    "einops>=0.8",
+    "albumentations>=2.0",
+    "av>=14",
+    "decord>=0.6",
+    "pandas>=2.0",
+    # LeRobot is optional for GR00T (droid_sample uses NVIDIA's loader),
+    # but most users want to also test on LeRobot-format data:
+    "lerobot>=0.3,<0.5",
+    # IMPORTANT: NVIDIA's gr00t Python package lists flash-attn as a
+    # hard dep but flash-attn's build setup imports torch before pip
+    # has installed it (build-isolation failure). We cannot put gr00t
+    # itself in this extra. Instead the user runs ``emboviz install-
+    # gr00t`` ONE TIME after ``uv pip install emboviz[gr00t]``; that
+    # subcommand calls ``pip install --no-deps git+...NVIDIA/Isaac-GR00T``
+    # which skips flash-attn (the gr00t adapter already falls back to
+    # SDPA / eager attention so flash-attn isn't actually used).
+]
+
+# ────────── Optional heavy dataset family ──────────
+# Only pulled in by users who actually have RLDS / Open-X-Embodiment
+# data. Adds tensorflow_datasets + tensorflow-cpu (~500 MB) so we keep
+# it out of the model extras above.
+rlds = [
+    "tensorflow-datasets>=4.9",
+    "tensorflow-cpu>=2.15",
+    "rlds>=0.1.8",
+]
+
+# ────────── Dev / test ──────────
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# uv enforces that the model adapter extras are mutually exclusive —
+# they pin incompatible transformers / lerobot versions and must live
+# in separate virtualenvs. Without this, ``uv sync --all-extras`` would
+# try to resolve all four at once and fail.
+# ──────────────────────────────────────────────────────────────────────
+[tool.uv]
+conflicts = [
+    [
+        { extra = "openvla" },
+        { extra = "oft" },
+        { extra = "pi0" },
+        { extra = "gr00t" },
+    ],
 ]
 
 [project.scripts]
-emboviz-run = "emboviz.cli:main"
+emboviz = "emboviz.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# The model-adapter extras (oft / pi0) pull their upstream packages via
+# PEP 508 direct-URL refs (``pkg @ git+https://...``). Hatchling rejects
+# direct references in project metadata unless this is explicitly enabled.
+# See https://hatch.pypa.io/latest/config/metadata/#allowing-direct-references
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["emboviz"]
 
-# Make uv pick the right torch wheel automatically.
-# - Linux + CUDA (Vast.ai): falls back to PyPI default, which is CUDA-enabled.
-# - macOS: PyPI default is CPU/MPS.
-# If a specific CUDA version is needed on Vast.ai, set TORCH_INDEX in setup_vastai.sh.
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

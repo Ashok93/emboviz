@@ -56,6 +56,10 @@ Thumbs.db
 # Diagnostic outputs / generated artifacts
 # ──────────────────────────────────────────────────────────────────────
 outputs/
+itest/
+itest_outputs/
+*.rrd
+*.mcap
 probes_trained/
 runs/
 wandb/
@@ -94,4 +98,6 @@ logs/
 # Local agent / assistant instructions (not for the public repo)
 # ──────────────────────────────────────────────────────────────────────
 CLAUDE.md
+.claude/
 
+story_outputs/

@@ -85,10 +85,10 @@ class ActivationPatchingDiagnostic(Diagnostic):
             layers_to_patch = list(self.layer_indices)
 
         # 1. Baseline (clean) action + cached residuals
-        baseline = model.predict(scene.image, scene.instruction)
+        baseline = model.predict(scene)
         try:
             clean_hs = model.extract_hidden_states(
-                scene.image, scene.instruction,
+                scene,
                 layers_to_patch,
                 TokenSelector(relative="before_action"),
             )
@@ -108,11 +108,7 @@ class ActivationPatchingDiagnostic(Diagnostic):
 
         for variant in self.perturber.variants(scene):
             v_scene = variant.scene
-            corrupted = (
-                model.predict_with_image(v_scene.image, v_scene.instruction)
-                if self.perturber.domain == "image"
-                else model.predict(v_scene.image, v_scene.instruction)
-            )
+            corrupted = model.predict(v_scene)
             d_clean_corrupt = float(model.compare_actions(baseline, corrupted))
             if d_clean_corrupt < 1e-6:
                 # Corrupted action is identical to clean — no perturbation to recover from.
@@ -121,7 +117,7 @@ class ActivationPatchingDiagnostic(Diagnostic):
             per_layer_for_variant = {}
             for li in layers_to_patch:
                 patched = model.predict_with_residual_patch(
-                    v_scene.image, v_scene.instruction,
+                    v_scene,
                     patches={li: clean_residuals[li]},
                 )
                 d_clean_patched = float(model.compare_actions(baseline, patched))

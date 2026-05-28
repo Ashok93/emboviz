@@ -49,7 +49,7 @@ class ProbeDiagnostic(Diagnostic):
             )
         try:
             hs = model.extract_hidden_states(
-                scene.image, scene.instruction,
+                scene,
                 self.probe.spec.layer_indices,
                 TokenSelector(relative="before_action"),
             )
@@ -133,7 +133,7 @@ class ProbeVsActionDiagnostic(Diagnostic):
         # 1) Probe certainty at baseline.
         try:
             hs_base = model.extract_hidden_states(
-                scene.image, scene.instruction,
+                scene,
                 self.probe.spec.layer_indices,
                 TokenSelector(relative="before_action"),
             )
@@ -146,18 +146,14 @@ class ProbeVsActionDiagnostic(Diagnostic):
         # 2) Per perturbation variant: action change AND probe-label change.
         action_changes: list[float] = []
         label_changes: list[int] = []
-        baseline_action = model.predict(scene.image, scene.instruction)
+        baseline_action = model.predict(scene)
         for variant in self.perturber.variants(scene):
             v_scene = variant.scene
-            pert_action = (
-                model.predict_with_image(v_scene.image, v_scene.instruction)
-                if self.perturber.domain == "image"
-                else model.predict(v_scene.image, v_scene.instruction)
-            )
+            pert_action = model.predict(v_scene)
             action_changes.append(float(model.compare_actions(baseline_action, pert_action)))
             try:
                 hs_v = model.extract_hidden_states(
-                    v_scene.image, v_scene.instruction,
+                    v_scene,
                     self.probe.spec.layer_indices,
                     TokenSelector(relative="before_action"),
                 )

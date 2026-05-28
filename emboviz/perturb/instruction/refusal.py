@@ -32,7 +32,7 @@ class RefusalPerturber(Perturber):
 
     name = "refusal_absent"
     axis = "language.refusal_absent"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def __init__(self, max_swaps: int = 2):
         self.max_swaps = max_swaps

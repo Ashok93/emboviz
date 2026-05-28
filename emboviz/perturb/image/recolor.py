@@ -29,10 +29,11 @@ from typing import Any, Iterable, Optional
 import numpy as np
 from PIL import Image
 
-from emboviz.core.types import PerturbedScene, Scene
+from emboviz.core.types import PerturbedScene, Scene, resolve_cameras
 from emboviz.perturb.base import Perturber
 from emboviz.perturb.image._image_utils import (
     make_perturbed_image_scene,
+    make_perturbed_multi_camera_scene,
     to_array,
     to_pil,
 )
@@ -94,8 +95,14 @@ def _load_grounding(device: str = "cuda"):
 
 
 def _load_sam(device: str = "cuda"):
-    """Load SAM (v1) once. Returns None if SAM isn't installable on this env."""
+    """Load SAM (v1) once. Returns None if SAM isn't installable on this env.
+
+    Emits a warning the first time SAM fails to load so callers know they
+    are operating in degraded (rect-bbox) mode rather than discovering it
+    silently in their diagnostic reports.
+    """
     global _SAM
+    import warnings as _warnings
     with _LOCK:
         if _SAM is not None:
             return _SAM
@@ -107,8 +114,13 @@ def _load_sam(device: str = "cuda"):
             _SAM = (proc, mod)
             return _SAM
         except Exception as e:
-            # SAM is OPTIONAL — we degrade to rectangular masks if it can't
-            # load. Caching the failure (None tuple) avoids re-trying.
+            _warnings.warn(
+                f"SAM ({_SAM_REPO}) failed to load: {type(e).__name__}: {e}. "
+                "ObjectRecolorPerturber will use rectangular-bbox masks "
+                "instead of pixel-accurate masks; install a working "
+                "transformers + SAM stack to silence this warning.",
+                stacklevel=2,
+            )
             _SAM = (None, None)
             return _SAM
 
@@ -237,7 +249,7 @@ class ObjectRecolorPerturber(Perturber):
 
     name = "object_recolor"
     axis = "vision.color_binding"
-    domain = "image"
+    affects = frozenset({"images.*"})
 
     def __init__(
         self,
@@ -246,6 +258,7 @@ class ObjectRecolorPerturber(Perturber):
         colors: Optional[list[str]] = None,
         device: str = "cuda",
         use_sam: bool = True,
+        cameras: Optional[list[str]] = None,
     ):
         if target is None and target_bbox is None:
             raise ValueError(
@@ -256,69 +269,103 @@ class ObjectRecolorPerturber(Perturber):
         self.colors = colors or DEFAULT_COLORS
         self.device = device
         self.use_sam = use_sam
-        self._mask_cache: dict[str, Optional[np.ndarray]] = {}
+        self.cameras = cameras
+        self._mask_cache: dict[tuple[str, str], Optional[np.ndarray]] = {}
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
-        mask = self._get_mask(scene)
-        if mask is None or int(mask.sum()) < _MIN_MASK_PIXELS:
-            return                                       # not applicable
-        image = self._scene_pil(scene)
+        cameras = resolve_cameras(scene, self.cameras)
+        # Detect + mask per camera (each viewpoint sees the object differently).
+        per_camera_masks: dict[str, np.ndarray] = {}
+        per_camera_pils: dict[str, Image.Image] = {}
+        for cam in cameras:
+            pil = self._image_pil(scene.observations.images[cam].data)
+            per_camera_pils[cam] = pil
+            mask = self._get_mask_for_camera(scene, cam, pil)
+            if mask is None or int(mask.sum()) < _MIN_MASK_PIXELS:
+                continue   # honest skip for this camera
+            per_camera_masks[cam] = mask
+
+        if not per_camera_masks:
+            return  # no camera could locate the target; emit nothing rather than fake
+
         for color in self.colors:
             hue = COLOR_HUE.get(color)
             if hue is None:
                 continue
-            recolored = _recolor_with_mask(image, mask, hue)
-            yield make_perturbed_image_scene(
+            new_images = {
+                cam: _recolor_with_mask(per_camera_pils[cam], mask, hue)
+                for cam, mask in per_camera_masks.items()
+            }
+            yield make_perturbed_multi_camera_scene(
                 scene=scene,
                 perturber_name=self.name,
                 axis=self.axis,
                 variant_id=f"to_{color}",
-                new_image=recolored,
-                description=f"target {self.target or 'bbox'} → {color}",
+                new_images_by_camera=new_images,
+                description=(
+                    f"target {self.target or 'bbox'} → {color} on "
+                    f"{sorted(new_images)}"
+                ),
                 parameters={
                     "color": color,
                     "hue_deg": hue,
-                    "mask_pixels": int(mask.sum()),
+                    "mask_pixels_per_camera": {
+                        cam: int(m.sum()) for cam, m in per_camera_masks.items()
+                    },
                     "target": self.target,
+                    "recolored_cameras": sorted(new_images),
+                    "requested_cameras": cameras,
                 },
             )
 
     # -- helpers --------------------------------------------------------------
 
-    def _get_mask(self, scene: Scene) -> Optional[np.ndarray]:
-        key = scene.scene_id or id(scene)
+    def _get_mask_for_camera(
+        self, scene: Scene, camera: str, image: Image.Image,
+    ) -> Optional[np.ndarray]:
+        """Detect + mask the target for ONE camera. Errors raise — they do
+        not silently degrade. SAM-unavailable falls back to a rect mask with
+        a warning (see ``_load_sam``)."""
+        import warnings as _warnings
+        key = ((scene.scene_id or str(id(scene))), camera)
         if key in self._mask_cache:
             return self._mask_cache[key]
 
-        image = self._scene_pil(scene)
         bbox = self.target_bbox
         if bbox is None and self.target:
             try:
                 bbox = _detect_bbox(image, self.target, device=self.device)
             except Exception as e:
-                print(f"[ObjectRecolorPerturber] detection error: {type(e).__name__}: {e}")
+                _warnings.warn(
+                    f"GroundingDINO detection failed on camera '{camera}': "
+                    f"{type(e).__name__}: {e}. Recolor will skip this camera.",
+                    stacklevel=3,
+                )
                 bbox = None
         if bbox is None:
             self._mask_cache[key] = None
             return None
 
+        mask: Optional[np.ndarray] = None
         if self.use_sam:
             try:
                 mask = _bbox_to_mask(image, bbox, device=self.device)
             except Exception as e:
-                print(f"[ObjectRecolorPerturber] SAM error ({type(e).__name__}: {e}); "
-                      f"falling back to rectangular bbox mask.")
+                _warnings.warn(
+                    f"SAM segmentation failed on camera '{camera}': "
+                    f"{type(e).__name__}: {e}. Falling back to "
+                    "rectangular-bbox mask for this camera.",
+                    stacklevel=3,
+                )
                 mask = None
-            if mask is None:
-                mask = _rectangular_mask(np.array(image).shape, bbox)
-        else:
+        if mask is None:
             mask = _rectangular_mask(np.array(image).shape, bbox)
 
         self._mask_cache[key] = mask
         return mask
 
     @staticmethod
-    def _scene_pil(scene: Scene) -> Image.Image:
-        if isinstance(scene.image, Image.Image):
-            return scene.image.convert("RGB")
-        return Image.fromarray(to_array(scene.image)).convert("RGB")
+    def _image_pil(image_data) -> Image.Image:
+        if isinstance(image_data, Image.Image):
+            return image_data.convert("RGB")
+        return Image.fromarray(to_array(image_data)).convert("RGB")

@@ -48,17 +48,25 @@ def main() -> int:
     suite = build_full_profile()
     result = suite.run(model, scene)
 
-    # Print quick console summary
+    # Print quick console summary. Severity is shown only via the badge
+    # colour; the headline sentence comes from the diagnostic's Finding
+    # so the user reads plain English, not a severity word.
     print("\n[battery] === results summary ===")
+    badges = {
+        Severity.CRITICAL: "🔴",
+        Severity.MODERATE: "🟠",
+        Severity.PASS:     "🟢",
+        Severity.INFO:     "🔵",
+        Severity.UNKNOWN:  "⚪",
+    }
     for name, r in result.results.items():
-        marker = {
-            Severity.CRITICAL: "🟥",
-            Severity.MODERATE: "🟧",
-            Severity.PASS: "🟩",
-            Severity.INFO: "🟦",
-            Severity.UNKNOWN: "⬜",
-        }.get(r.severity, "?")
-        print(f"  {marker} {r.axis:40s}  score={r.scalar_score:.3f}  ({r.severity.value})")
+        badge = badges.get(r.severity, "?")
+        headline = (r.finding.observed if r.finding is not None else r.explanation) or ""
+        # Trim to one line for the console summary
+        headline = headline.replace("\n", " ").strip()
+        if len(headline) > 100:
+            headline = headline[:97] + "..."
+        print(f"  {badge} {r.axis:30s}  score={r.scalar_score:.3f}  {headline}")
 
     # Coverage analysis (Bridge only for now)
     if args.dataset == "bridge":

@@ -9,9 +9,22 @@ representations into these types at the protocol boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import numpy as np
+
+from emboviz.core.observations import (
+    ActionHistory,
+    DepthMap,
+    ForceTorque,
+    GripperState,
+    Proprioception,
+    RGBImage,
+    TactileReading,
+)
+
+if TYPE_CHECKING:
+    from emboviz.core.profile import RobotProfile
 
 # Sentinel for "PIL image" without importing PIL here — we accept anything
 # that has a `.size` and is convertible via numpy.asarray, but adapters do
@@ -20,17 +33,163 @@ ImageLike = Any
 
 
 @dataclass(frozen=True)
-class Scene:
-    """A single (image, instruction) input to a VLA, plus optional metadata.
+class Observations:
+    """The full sensor payload at one timestep.
 
-    Scenes are the unit a diagnostic operates on. A trajectory is a list of
-    Scenes.
+    `images` is a dict from day one: single-camera setups populate
+    `{"primary": ...}`, multi-camera setups add more keys (e.g.
+    `"wrist_left"`, `"head"`). The `"primary"` key is the convention that
+    single-cam-aware diagnostics use.
+
+    All other fields are optional. A model that doesn't consume state can
+    receive a Scene whose `state` is None; the runtime validator (see
+    `VLAModel.required_inputs`) checks that what the model declares it
+    needs is actually present.
+
+    Experimental sensors that haven't earned a first-class slot yet live
+    in `extras` — promote to a typed field once ≥2 adapters use them.
     """
 
-    image: ImageLike            # PIL.Image.Image at runtime
-    instruction: str
+    images: dict[str, RGBImage]
+    state: Optional[Proprioception] = None
+    gripper: Optional[GripperState] = None
+    action_history: Optional[ActionHistory] = None
+    depth: Optional[dict[str, DepthMap]] = None
+    force_torque: Optional[ForceTorque] = None
+    tactile: Optional[TactileReading] = None
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def primary_image(self) -> RGBImage:
+        """The default `"primary"` camera. Raises KeyError if not present."""
+        return self.images["primary"]
+
+
+@dataclass(frozen=True)
+class Scene:
+    """One observation point — everything fed to the policy at one timestep.
+
+    Built around a typed `Observations` bag so multi-camera, proprio,
+    gripper, and action history are first-class. Single-camera + text-only
+    callers should use `Scene.from_image(image, instruction)` for the
+    common case.
+
+    A trajectory is a list of Scenes.
+    """
+
+    observations: Observations
+    instruction: Optional[str] = None
+    profile: Optional["RobotProfile"] = None
     metadata: dict = field(default_factory=dict)
-    scene_id: str = ""           # optional, for caching / reporting
+    scene_id: str = ""
+
+    @property
+    def primary_image_data(self) -> Any:
+        """PIL image of the primary camera — the most common access path."""
+        return self.observations.primary_image.data
+
+    @classmethod
+    def from_image(
+        cls,
+        image: ImageLike,
+        instruction: Optional[str] = None,
+        scene_id: str = "",
+        metadata: Optional[dict] = None,
+        profile: Optional["RobotProfile"] = None,
+    ) -> "Scene":
+        """Convenience constructor for the single-cam, text-only case."""
+        obs = Observations(images={"primary": RGBImage(data=image)})
+        return cls(
+            observations=obs,
+            instruction=instruction,
+            profile=profile,
+            scene_id=scene_id,
+            metadata=metadata or {},
+        )
+
+    def with_image(self, new_image: ImageLike, camera: str = "primary") -> "Scene":
+        """Return a new Scene with the named camera's image replaced.
+
+        Other modalities (state, gripper, action_history, etc.) and other
+        cameras are preserved. Used by diagnostics that need to swap one
+        camera's content (occlusion, sensitivity map, memorization mask).
+
+        Raises KeyError if ``camera`` is not already present in the scene —
+        we never invent a new camera silently. To add a new camera, use
+        ``with_images({...})`` and pass the full image dict.
+        """
+        if camera not in self.observations.images:
+            raise KeyError(
+                f"Camera '{camera}' is not in scene.observations.images "
+                f"(available: {sorted(self.observations.images)}). "
+                "with_image only replaces existing cameras."
+            )
+        from dataclasses import replace
+        new_images = dict(self.observations.images)
+        new_images[camera] = RGBImage(data=new_image, camera_id=camera)
+        new_obs = replace(self.observations, images=new_images)
+        return replace(self, observations=new_obs)
+
+    def with_images(self, new_images_by_camera: dict[str, ImageLike]) -> "Scene":
+        """Return a new Scene with multiple cameras replaced in one step.
+
+        Each key must already be present in the scene — we do not invent
+        new cameras. All other modalities and any cameras not in the dict
+        are preserved.
+        """
+        existing = set(self.observations.images.keys())
+        requested = set(new_images_by_camera.keys())
+        missing = requested - existing
+        if missing:
+            raise KeyError(
+                f"with_images: cameras {sorted(missing)} are not in the scene "
+                f"(available: {sorted(existing)}). To replace an existing "
+                "camera use this method; to add a new camera, build a new Scene."
+            )
+        from dataclasses import replace
+        new_images = dict(self.observations.images)
+        for cam, img in new_images_by_camera.items():
+            new_images[cam] = RGBImage(data=img, camera_id=cam)
+        new_obs = replace(self.observations, images=new_images)
+        return replace(self, observations=new_obs)
+
+    def with_instruction(self, new_instruction: str) -> "Scene":
+        """Return a new Scene with the instruction replaced.
+
+        All observations are preserved. Used by diagnostics that vary the
+        text input while holding the visual/state context constant
+        (cross-modal attention, ad-hoc instruction probes).
+        """
+        from dataclasses import replace
+        return replace(self, instruction=new_instruction)
+
+
+def resolve_cameras(scene: "Scene", requested: Optional[list[str]]) -> list[str]:
+    """Resolve a (possibly-None) camera selection against a scene's cameras.
+
+    - ``requested=None`` → return every camera in the scene (alphabetical).
+    - ``requested=["primary", "wrist_left"]`` → return those exact cameras.
+      Raises ValueError if any requested camera is missing from the scene.
+
+    This is the single source of truth for "which cameras does this
+    diagnostic / perturber operate on?". Callers must use it instead of
+    silently defaulting to ``"primary"`` — that pattern silently makes
+    multi-camera scenes look single-camera and hides real model behaviour.
+    """
+    available = set(scene.observations.images.keys())
+    if requested is None:
+        return sorted(available)
+    requested_set = set(requested)
+    missing = requested_set - available
+    if missing:
+        raise ValueError(
+            f"resolve_cameras: requested cameras {sorted(missing)} are "
+            f"not in the scene (available: {sorted(available)}). Either "
+            "remove them from the cameras list, load the missing cameras "
+            "in the dataset adapter, or pass cameras=None to iterate "
+            "every camera the scene actually provides."
+        )
+    return sorted(requested_set)
 
 
 @dataclass
@@ -47,6 +206,13 @@ class ActionResult:
     action_tokens: Optional[Any] = None                 # discrete tokens if any
     action_distribution: Optional[Any] = None           # logits if available
     confidence: Optional[float] = None                  # adapter-defined scalar
+    # Multi-step action chunk if the model predicts one (π0, OFT, ACT, GR00T,
+    # diffusion policies). Shape (chunk_len, action_dim). The first row is
+    # the immediate action — same as ``self.action`` — and subsequent rows
+    # are the model's predicted future actions. Adapters that predict a
+    # single action leave this None. ChunkConsistencyDiagnostic needs this
+    # populated to do the real chunk-coherence test.
+    action_chunk: Optional[np.ndarray] = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -79,29 +245,305 @@ class AttentionMaps:
 
     All attention is in a single tensor of shape (n_layers, n_heads, n_keys)
     — already projected so the query is fixed. Image-token positions are
-    indicated by `image_token_range` so callers can slice and reshape.
+    indicated per-camera so callers can slice and reshape one camera at a
+    time. Multi-camera adapters (OpenVLA-OFT primary+wrist, GR00T per
+    embodiment cameras, π0 ALOHA's 4-cam stack) populate one entry per
+    camera; single-camera adapters (OpenVLA) populate just ``"primary"``.
+
+    **Multi-tile / temporal cameras.** A single user-facing camera can
+    contribute MULTIPLE contiguous runs of image tokens in the key
+    sequence — e.g. GR00T's Qwen3-VL receives each camera as T temporal
+    tiles when ``video_horizon > 1``. We model this honestly: each
+    camera's ``image_token_ranges`` entry is a *list* of (start, end)
+    runs, one per tile. ``image_weights(camera)`` then sums the per-tile
+    reshapes into the per-camera attention map.
+
+    Strict:
+      • Every camera in ``image_token_ranges`` must also be in
+        ``image_grid_sides`` (and vice versa).
+      • Each tile's slice size must equal ``side * side`` (the side
+        applies *per tile*; total tokens per camera = N_tiles * side²).
+      • No silent padding.
     """
 
-    weights: np.ndarray                          # (n_layers, n_heads, n_keys)
+    weights: np.ndarray                                                # (n_layers, n_heads, n_keys)
     query_position: int
     n_keys: int
-    image_token_range: tuple[int, int]           # (start, end) exclusive
-    image_grid_side: int                         # n_image_tokens = side*side
-    layer_indices: Optional[list[int]] = None    # which layers (None = all)
+    image_token_ranges: dict[str, list[tuple[int, int]]]              # camera_id → list of tile (start, end) pairs (exclusive end)
+    image_grid_sides: dict[str, int]                                  # camera_id → grid side PER TILE (tile tokens = side*side)
+    layer_indices: Optional[list[int]] = None                         # which layers (None = all)
     metadata: dict = field(default_factory=dict)
 
-    def image_weights(self) -> np.ndarray:
-        """Slice and reshape the attention to (n_layers, n_heads, side, side)."""
-        s, e = self.image_token_range
-        img = self.weights[..., s:e]
-        side = self.image_grid_side
-        n_image = side * side
-        if img.shape[-1] >= n_image:
-            img = img[..., :n_image]
-        elif img.shape[-1] < n_image:
-            pad = np.zeros(img.shape[:-1] + (n_image - img.shape[-1],), dtype=img.dtype)
-            img = np.concatenate([img, pad], axis=-1)
-        return img.reshape(*img.shape[:-1], side, side)
+    def __post_init__(self):
+        cams_a, cams_b = set(self.image_token_ranges), set(self.image_grid_sides)
+        if cams_a != cams_b:
+            raise ValueError(
+                "AttentionMaps: image_token_ranges and image_grid_sides "
+                f"must cover the same cameras; got ranges={sorted(cams_a)} "
+                f"vs grids={sorted(cams_b)}."
+            )
+        for cam in cams_a:
+            ranges = self.image_token_ranges[cam]
+            side = self.image_grid_sides[cam]
+            if not isinstance(ranges, list) or not ranges:
+                raise ValueError(
+                    f"AttentionMaps camera '{cam}': image_token_ranges["
+                    f"'{cam}'] must be a non-empty list of (start, end) "
+                    f"tile pairs; got {ranges!r}."
+                )
+            for s, e in ranges:
+                if (e - s) != side * side:
+                    raise ValueError(
+                        f"AttentionMaps camera '{cam}': tile range {(s, e)} "
+                        f"yields {e - s} tokens but grid_side={side} requires "
+                        f"{side * side}. Adapter has the wrong range or grid."
+                    )
+
+    @property
+    def cameras(self) -> list[str]:
+        """Sorted list of camera ids with attention available."""
+        return sorted(self.image_token_ranges)
+
+    def image_weights(self, camera: Optional[str] = None) -> np.ndarray:
+        """Raw per-camera attention tensor (n_layers, n_heads, side, side).
+
+        For multi-tile cameras (the same camera duplicated across a
+        temporal stack), per-tile maps are SUMMED.
+
+        This returns the unfiltered model output. For the user-facing
+        "where is the model looking?" question, use
+        :meth:`image_weights_clean` which applies the literature-backed
+        defaults (mid-layer head filter + sink masking) so the heatmap
+        isn't dominated by softmax routing artifacts.
+
+        Raises:
+            KeyError: if the camera was not declared.
+            ValueError: if multiple cameras are declared and camera is None.
+        """
+        if camera is None:
+            if len(self.image_token_ranges) > 1:
+                raise ValueError(
+                    "AttentionMaps.image_weights: this AttentionMaps has "
+                    f"{len(self.image_token_ranges)} cameras "
+                    f"({sorted(self.image_token_ranges)}); pass "
+                    "``camera=<id>`` to pick one. We never silently "
+                    "default to the first."
+                )
+            camera = next(iter(self.image_token_ranges))
+        if camera not in self.image_token_ranges:
+            raise KeyError(
+                f"AttentionMaps has no attention for camera '{camera}'. "
+                f"Available cameras: {sorted(self.image_token_ranges)}."
+            )
+        ranges = self.image_token_ranges[camera]
+        side = self.image_grid_sides[camera]
+        tile_maps = []
+        for s, e in ranges:
+            img = self.weights[..., s:e]
+            tile_maps.append(img.reshape(*img.shape[:-1], side, side))
+        if len(tile_maps) == 1:
+            return tile_maps[0]
+        return np.sum(tile_maps, axis=0)
+
+    def image_weights_clean(
+        self,
+        camera: Optional[str] = None,
+        *,
+        layer_range_fraction: Optional[tuple[float, float]] = None,
+        sink_top_pct: Optional[float] = None,
+    ) -> tuple[np.ndarray, dict]:
+        """Sink-filtered, mid-layer-restricted per-camera attention heatmap.
+
+        This is the **user-facing "where is the model looking?" map.** It
+        applies two literature-backed filters whose parameters come from
+        the per-adapter attention_profile (declared in each adapter's
+        source file with a literature citation):
+
+          1. **Layer range filter**: average only over a fraction of
+             the model's transformer layers (typically the middle half).
+             Per *How Multimodal LLMs Solve Image Tasks*
+             (arXiv:2508.20279) and the LLaVA stage analysis, early
+             layers do token-grouping (sinks dominate), late layers do
+             prediction summarization, and the middle holds the visual-
+             grounding heads. The exact fraction is per-backbone (LLaMA
+             vs Gemma vs Qwen3-VL each have different stage structure).
+
+          2. **Sink masking**: zero out the top ``sink_top_pct`` of
+             attention cells AFTER averaging. The percentage is
+             literature-derived per backbone:
+               • LLaMA (OpenVLA, OFT): 0% (no spatial sinks per LLaVA
+                 stage paper).
+               • PaliGemma/Gemma-2B (π0): ~5% (moderate Gemma sinks per
+                 attention-sink literature).
+               • Qwen3-VL/Cosmos-Reason2 (GR00T): ~10% (strong RoPE
+                 right-edge sinks per Qwen3-VL Issue #2047 and
+                 arXiv:2510.08510 "To Sink or Not to Sink").
+
+        Defaults come from ``metadata["attention_profile"]`` populated
+        by the adapter. Callers can override via kwargs but should
+        ONLY do so to test variations — the adapter's declared values
+        ARE the literature-backed recommendation.
+
+        Args:
+            camera: which camera (same semantics as ``image_weights``).
+            layer_range_fraction: ``(frac_start, frac_end)`` in [0, 1]
+                — fraction of total layers to use. ``None`` reads from
+                adapter's attention_profile.
+            sink_top_pct: fraction of top cells to mask as sinks.
+                ``None`` reads from adapter's attention_profile.
+
+        Returns:
+            ``(heatmap, debug)`` where ``heatmap`` is the (side, side)
+            cleaned attention map and ``debug`` is a dict with the
+            literature citation, layer range used, number of sink
+            positions masked, etc.
+
+        Raises:
+            ValueError: if no attention_profile is in metadata AND no
+                override kwargs are passed — refusing to fabricate
+                defaults that aren't grounded in this model's literature.
+        """
+        raw = self.image_weights(camera)   # (L, H, side, side)
+        L, H, side, _ = raw.shape
+
+        # Source per-model defaults from adapter's literature.
+        profile = self.metadata.get("attention_profile", {})
+
+        if layer_range_fraction is None:
+            layer_range_fraction = profile.get("recommended_layer_range_fraction")
+            if layer_range_fraction is None:
+                raise ValueError(
+                    "AttentionMaps.image_weights_clean: no "
+                    "``recommended_layer_range_fraction`` in metadata's "
+                    "attention_profile, and no override passed. Every "
+                    "adapter must declare its model's recommended layer "
+                    "range based on the model's literature — see "
+                    "emboviz/models/openvla.py's ATTENTION_PROFILE for "
+                    "the template. Refusing to fabricate a default."
+                )
+        if sink_top_pct is None:
+            sink_top_pct = profile.get("sink_top_pct_to_mask")
+            if sink_top_pct is None:
+                raise ValueError(
+                    "AttentionMaps.image_weights_clean: no "
+                    "``sink_top_pct_to_mask`` in metadata's "
+                    "attention_profile, and no override passed. The "
+                    "adapter must declare its model's sink-masking "
+                    "fraction from that model's literature."
+                )
+
+        frac_start, frac_end = layer_range_fraction
+        if not (0.0 <= frac_start < frac_end <= 1.0):
+            raise ValueError(
+                f"image_weights_clean: layer_range_fraction "
+                f"{layer_range_fraction} invalid; expected "
+                "0.0 <= start < end <= 1.0."
+            )
+        if not (0.0 <= sink_top_pct < 1.0):
+            raise ValueError(
+                f"image_weights_clean: sink_top_pct {sink_top_pct} "
+                "invalid; expected 0.0 <= pct < 1.0."
+            )
+
+        start = int(round(frac_start * L))
+        end = int(round(frac_end * L))
+        if start == end:
+            end = start + 1   # never zero layers
+        end = min(end, L)
+        start = max(0, min(start, L - 1))
+
+        # ── Layer-adaptive "last-token attention" map ──
+        # The last text token's attention to the image, mean over heads, at the
+        # ONE layer where visual grounding is clearest. Per the layer-adaptive
+        # localization literature (arXiv:2602.04304; "How Multimodal LLMs Solve
+        # Image Tasks" arXiv:2508.20279) the grounding signal lives in a single
+        # mid-stack layer, while attention sinks (special / border tokens)
+        # dominate the other layers. So within the candidate layer range we
+        # SELECT the layer whose attention is most concentrated on the image
+        # INTERIOR (where objects are) rather than the border ring (where the
+        # positional/RoPE sink sits), then average over heads. One layer chosen
+        # from the data — no magic layer index, no per-cell sink removal, no
+        # head selection, no calibration.
+        per_layer = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, side, side)
+        border = np.zeros((side, side), dtype=bool)
+        border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+        interior = ~border
+        interior_frac = np.array([
+            float(m[interior].sum() / s) if (s := float(m.sum())) > 1e-12 else 0.0
+            for m in per_layer
+        ])
+        best = int(np.argmax(interior_frac))
+        clean = per_layer[best]
+        debug = {
+            "selected_layer":       int(start + best),
+            "candidate_layer_range": (int(start), int(end)),
+            "layer_range_fraction": (float(frac_start), float(frac_end)),
+            "interior_fraction":    float(interior_frac[best]),
+            "n_layers_total":       int(L),
+            "n_heads":              int(H),
+            "method":               "layer-adaptive last-token attention (arXiv:2602.04304): "
+                                    "pick the layer with max interior concentration, mean over heads",
+            "profile_source":       profile.get("literature_citation", "unspecified"),
+        }
+        return clean, debug
+
+
+@dataclass
+class AttentionTrace:
+    """Action→image cross-attention with the denoise-step and head axes KEPT.
+
+    This is the structure a VLA attention visualizer actually needs (cf. the
+    pi0.5 attention visualizer + villekuosmanen/physical-AI-interpretability):
+
+      • ``per_camera[cam]`` has shape ``(n_steps, n_heads, side, side)`` — the
+        action queries' cross-attention onto that camera's image patches.
+      • ``n_steps`` is the flow-matching / diffusion denoise steps. Attention
+        **sharpens** from t=0 (pure-noise action, diffuse) to the last step
+        (clean action, locked onto task-relevant objects) — so the default
+        view is the LAST step, and the whole t=0..last progression is worth
+        scrubbing. We never average across steps (that blurs the signal).
+      • ``n_heads`` is the attention heads, which **specialize** — so we expose
+        per-head maps and a head-mean, never a forced global average.
+
+    Raw attention, reshaped row-major to the grid (no transpose/flip). All
+    display normalization happens in the renderer, not here.
+    """
+
+    per_camera: dict[str, np.ndarray]          # cam -> (n_steps, n_heads, side, side)
+    grid_sides: dict[str, int]                 # cam -> side (tokens = side*side)
+    n_steps: int
+    n_heads: int
+    source: str                                # e.g. "pi0 action-expert cross-attention"
+    query_desc: str                            # e.g. "action chunk tokens (mean)"
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        for cam, a in self.per_camera.items():
+            if a.ndim != 4:
+                raise ValueError(
+                    f"AttentionTrace[{cam}]: expected (n_steps,n_heads,side,side), got {a.shape}"
+                )
+            s = self.grid_sides[cam]
+            if a.shape[2] != s or a.shape[3] != s:
+                raise ValueError(
+                    f"AttentionTrace[{cam}]: grid {a.shape[2:]} != side {s}"
+                )
+
+    @property
+    def cameras(self) -> list[str]:
+        return sorted(self.per_camera)
+
+    def step_head(self, camera: str, step: int, head: int) -> np.ndarray:
+        """Single (side, side) map for one denoise step + one head."""
+        return self.per_camera[camera][step, head]
+
+    def step_mean(self, camera: str, step: int) -> np.ndarray:
+        """Mean over heads at one denoise step → (side, side)."""
+        return self.per_camera[camera][step].mean(axis=0)
+
+    def final_mean(self, camera: str) -> np.ndarray:
+        """The default map: last denoise step, mean over heads → (side, side)."""
+        return self.per_camera[camera][-1].mean(axis=0)
 
 
 @dataclass

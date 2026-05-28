@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Emboviz — episode {{ episode_idx }} — {{ model_id }}</title>
+  <style>
+    :root {
+      --bg:        #0f1115;
+      --panel:    #171a21;
+      --text:     #e5e7eb;
+      --muted:    #9aa3b2;
+      --border:   #262b35;
+      --accent:   #4dabf7;
+      --red:      #ff6b6b;
+      --orange:   #ffb86b;
+      --green:    #51cf66;
+      --blue:     #74c0fc;
+      --gray:     #9aa3b2;
+    }
+    html, body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin: 0; padding: 0; }
+    .container { max-width: 1000px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 16px; margin: 32px 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    h3 { font-size: 17px; margin: 0 0 8px; }
+    .sub { color: var(--muted); margin-bottom: 24px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 8px; }
+    .card .field { margin: 4px 0 12px; color: var(--text); }
+    .badge { display: inline-block; width: 12px; height: 12px; border-radius: 6px; margin-right: 8px; vertical-align: middle; }
+    .b-crit  { background: var(--red); }
+    .b-mod   { background: var(--orange); }
+    .b-pass  { background: var(--green); }
+    .b-info  { background: var(--blue); }
+    .b-unk   { background: var(--gray); }
+    code, pre { background: #1f242e; padding: 1px 4px; border-radius: 4px; font-size: 12px; color: var(--text); }
+    pre { padding: 8px 12px; overflow-x: auto; }
+    .raw-toggle summary { color: var(--muted); cursor: pointer; font-size: 12px; }
+    .raw-toggle table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+    .raw-toggle td { border-top: 1px solid var(--border); padding: 4px 8px; vertical-align: top; }
+    a { color: var(--accent); text-decoration: none; }
+    .rerun-cmd { background: #1f242e; border: 1px dashed var(--border); border-radius: 6px; padding: 10px 12px; font-family: ui-monospace,"SF Mono",Menlo,monospace; font-size: 12px; }
+    .skipped { opacity: 0.6; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h1>Episode {{ episode_idx }} — <code>{{ model_id }}</code></h1>
+<div class="sub">
+  <code>{{ trajectory_source }}</code>
+  · {{ n_frames }} frame(s)
+  · instruction: <code>{{ instruction or "(none)" }}</code>
+</div>
+
+{% if rrd_path %}
+<div class="card">
+  <div class="label">Scrub frame-by-frame in Rerun</div>
+  <div class="rerun-cmd">rerun {{ rrd_path }}</div>
+</div>
+{% endif %}
+
+<h2>Findings (sorted worst first)</h2>
+{% for r in findings %}
+<div class="card">
+  <h3>
+    <span class="badge b-{{ r.badge }}"></span>
+    <code>{{ r.axis }}</code>
+  </h3>
+  <div class="label">Observed</div>
+  <div class="field">{{ r.observed }}</div>
+  {% if r.meaning %}
+  <div class="label">Meaning</div>
+  <div class="field">{{ r.meaning }}</div>
+  {% endif %}
+  {% if r.next_step %}
+  <div class="label">Next step</div>
+  <div class="field">{{ r.next_step }}</div>
+  {% endif %}
+  {% if r.raw_numbers %}
+  <details class="raw-toggle">
+    <summary>raw numbers</summary>
+    <table>
+      {% for k, v in r.raw_numbers.items() %}
+      <tr><td><code>{{ k }}</code></td><td><code>{{ v }}</code></td></tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if not_applicable %}
+<h2>Diagnostics that could not run</h2>
+{% for axis, why in not_applicable.items() %}
+<div class="card skipped">
+  <h3><span class="badge b-unk"></span><code>{{ axis }}</code></h3>
+  <div class="field">{{ why }}</div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if failure_moments %}
+<h2>Failure moments (≥2 critical axes per frame)</h2>
+<div class="card">
+  <table style="width:100%; border-collapse: collapse; font-size: 13px;">
+    <tr>
+      <th align="left">frame</th><th align="left"># crit</th><th align="left">axes</th>
+    </tr>
+    {% for fm in failure_moments %}
+    <tr style="border-top: 1px solid var(--border);">
+      <td><code>{{ fm.frame_idx }}</code></td>
+      <td>{{ fm.n_critical_axes }}</td>
+      <td>{{ fm.critical_axes|join(", ") }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<h2>Calibration</h2>
+<div class="card">
+  <div class="field">noise floor = <code>{{ "%.4f" | format(calibration.noise_floor or 0) }}</code></div>
+  <div class="field">typical action magnitude = <code>{{ "%.4f" | format(calibration.typical_action_magnitude or 0) }}</code></div>
+  <div class="field">averaging samples per call = <code>{{ calibration.n_samples }}</code></div>
+  <div class="label">What this means</div>
+  <div class="field">All diagnostic Δaction values above are normalized: <code>(raw - noise_floor) / typical_action_magnitude</code>. So "Δ_out = 0.05" means the action moved by 5% of a typical action magnitude (above the model's own sampling noise).</div>
+</div>
+
+</div>
+</body>
+</html>

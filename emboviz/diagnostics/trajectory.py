@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 from tqdm import tqdm
 
-from emboviz.core.results import DiagnosticResult, Severity
+from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import VLAModel
@@ -87,21 +87,158 @@ class TrajectoryDiagnosticResult:
             if rank.get(r.severity, -1) >= threshold
         ]
 
+    def bootstrap_ci(
+        self,
+        n_resamples: int = 1000,
+        alpha: float = 0.05,
+        seed: int = 0,
+    ) -> tuple[float, float]:
+        """Bootstrap 95% confidence interval for ``mean_score``.
+
+        Resamples the per-frame scores with replacement and reports the
+        percentile interval. Returns ``(NaN, NaN)`` if fewer than 2 valid
+        scores are available. The interval communicates "how much would
+        this number wobble if we picked a different set of frames from
+        the same distribution?" — a critical sanity check when each
+        trajectory only has 8 frames.
+        """
+        s = self.scores[~np.isnan(self.scores)]
+        if s.size < 2:
+            return (float("nan"), float("nan"))
+        rng = np.random.default_rng(seed)
+        means = np.array([
+            rng.choice(s, size=s.size, replace=True).mean()
+            for _ in range(n_resamples)
+        ], dtype=np.float64)
+        lo = float(np.percentile(means, 100 * alpha / 2))
+        hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
+        return (lo, hi)
+
+    def trajectory_finding(self) -> Finding:
+        """Aggregate per-frame Findings into a single trajectory-level Finding.
+
+        Counts the per-frame severity distribution, picks the dominant
+        verdict, and renders three plain-English sentences describing
+        what we saw across the whole episode (or window). Examples:
+
+          • "On 7 of 8 frames the model produced near-identical actions
+             when the target was masked. The remaining 1/8 showed real
+             visual response." → memorized signature is dominant.
+          • "On 5 of 8 frames the wrist camera was IGNORED; on the other
+             3 it was USED. Looks phase-dependent."
+          • "On all 8 frames the diagnostic was inconclusive — the
+             frames were quiescent. Try a more dynamic episode."
+
+        The trajectory-level Finding is what users see at the top of the
+        per-episode report; the per-frame Findings are available for
+        drill-down.
+        """
+        n = len(self.per_frame)
+        if n == 0:
+            return Finding(
+                observed="No frames were analyzed.",
+                meaning="The trajectory window was empty.",
+                next_step="Pick an episode with frames and re-run.",
+                raw_numbers={"n_frames": 0},
+            )
+
+        counts: dict[Severity, int] = {s: 0 for s in Severity}
+        for r in self.per_frame:
+            counts[r.severity] += 1
+        n_pass = counts[Severity.PASS]
+        n_info = counts[Severity.INFO]
+        n_mod  = counts[Severity.MODERATE]
+        n_crit = counts[Severity.CRITICAL]
+        n_unk  = counts[Severity.UNKNOWN]
+
+        # Pick a representative per-frame Finding for the dominant
+        # severity. Users get its language carried up; counts give scale.
+        rep_severity = max(
+            (Severity.CRITICAL, Severity.MODERATE, Severity.INFO, Severity.PASS, Severity.UNKNOWN),
+            key=lambda s: counts[s],
+        )
+        rep_finding: Optional[Finding] = None
+        for r in self.per_frame:
+            if r.severity == rep_severity and r.finding is not None:
+                rep_finding = r.finding
+                break
+
+        pct = lambda k: f"{100 * k / n:.0f}%"
+        parts: list[str] = []
+        if n_crit > 0: parts.append(f"{n_crit}/{n} ({pct(n_crit)}) flagged")
+        if n_mod  > 0: parts.append(f"{n_mod}/{n} ({pct(n_mod)}) partial")
+        if n_pass > 0: parts.append(f"{n_pass}/{n} ({pct(n_pass)}) clean")
+        if n_info > 0: parts.append(f"{n_info}/{n} ({pct(n_info)}) noteworthy")
+        if n_unk  > 0: parts.append(f"{n_unk}/{n} ({pct(n_unk)}) inconclusive")
+        dist_str = ", ".join(parts)
+
+        # Pull the representative per-frame Finding to ground the
+        # meaning + next-step in concrete language from the dominant
+        # case. Without a representative we synthesize a generic
+        # version from the severity distribution.
+        if rep_finding is not None:
+            observed = (
+                f"Across {n} frames: {dist_str}. "
+                f"Representative frame says: {rep_finding.observed}"
+            )
+            meaning   = rep_finding.meaning
+            next_step = rep_finding.next_step
+        elif rep_severity == Severity.PASS:
+            observed  = f"Across {n} frames: {dist_str}."
+            meaning   = "This axis is healthy throughout the episode."
+            next_step = "No action needed for this axis."
+        elif rep_severity == Severity.CRITICAL:
+            observed  = f"Across {n} frames: {dist_str}."
+            meaning   = "The dominant signal is a flagged frame — the issue persists across the episode."
+            next_step = "Inspect the worst frame in Rerun; cross-reference with other axes' findings."
+        else:
+            observed  = f"Across {n} frames: {dist_str}."
+            meaning   = "Mixed or inconclusive across the episode."
+            next_step = (
+                "Re-run on a more dynamic mid-episode window, or "
+                "increase K-samples / averaging for tighter statistics."
+            )
+
+        return Finding(
+            observed=observed,
+            meaning=meaning,
+            next_step=next_step,
+            raw_numbers={
+                "n_frames":    n,
+                "n_pass":      n_pass,
+                "n_info":      n_info,
+                "n_moderate":  n_mod,
+                "n_critical":  n_crit,
+                "n_unknown":   n_unk,
+                "mean_score":  self.mean_score,
+                "median_score": self.median_score,
+                "worst_frame_idx": self.worst_frame_idx,
+            },
+        )
+
     def to_summary(self) -> dict:
+        ci_lo, ci_hi = self.bootstrap_ci()
+        finding = self.trajectory_finding()
         return {
-            "diagnostic_name": self.diagnostic_name,
-            "axis": self.axis,
-            "model_id": self.model_id,
+            "diagnostic_name":   self.diagnostic_name,
+            "axis":              self.axis,
+            "model_id":          self.model_id,
             "trajectory_source": self.trajectory_source,
-            "n_frames": len(self.per_frame),
-            "mean_score": self.mean_score,
-            "median_score": self.median_score,
-            "worst_frame_idx": self.worst_frame_idx,
-            "failure_moments": self.failure_moments(),
-            "direction": self.direction,
-            "frame_indices": self.frame_indices,
-            "scores": self.scores.tolist(),
-            "severities": [s.value for s in self.severities],
+            "n_frames":          len(self.per_frame),
+            "mean_score":        self.mean_score,
+            "mean_score_ci95":   [ci_lo, ci_hi],
+            "median_score":      self.median_score,
+            "worst_frame_idx":   self.worst_frame_idx,
+            "failure_moments":   self.failure_moments(),
+            "direction":         self.direction,
+            "frame_indices":     self.frame_indices,
+            "scores":            self.scores.tolist(),
+            "severities":        [s.value for s in self.severities],
+            "finding":           finding.to_dict(),
+            "per_frame_findings": [
+                r.finding.to_dict() if r.finding is not None else None
+                for r in self.per_frame
+            ],
         }
 
 

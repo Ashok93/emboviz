@@ -16,7 +16,7 @@ from emboviz.perturb.instruction._text_utils import make_perturbed_scene
 class EmptyInstructionPerturber(Perturber):
     name = "empty"
     axis = "language.empty"
-    domain = "instruction"
+    affects = frozenset({"instruction"})
 
     def variants(self, scene: Scene) -> Iterable[PerturbedScene]:
         if scene.instruction == "":

@@ -1,130 +1,99 @@
 """BridgeV2 (IPEC-COMMUNITY/bridge_orig_lerobot) episode source.
 
-Bridge has 53k episodes; we lazy-load. `load_episode` accepts integer IDs
-and uses batched LeRobotDataset() calls when many episodes are requested.
+One specific configuration of the generic `LeRobotEpisodeSource`.
+Bridge's raw state vector is `[x, y, z, roll, pitch, yaw, gripper]` —
+6-DOF end-effector pose plus a normalized [0, 1] gripper value. The
+`gripper_extractor` here unpacks that into the typed Proprioception +
+GripperState that downstream perturbers and diagnostics consume.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
-import torch
-from PIL import Image
 
-from emboviz.core.types import Scene, Trajectory
-from emboviz.datasets.base import EpisodeSource
+from emboviz.core.profile import (
+    ActionSpec,
+    CameraSpec,
+    GripperSpec,
+    RobotProfile,
+    StateSpec,
+)
+from emboviz.datasets.lerobot import LeRobotEpisodeSource
 
 
 DATASET_REPO = "IPEC-COMMUNITY/bridge_orig_lerobot"
-PRIMARY_IMAGE_KEY = "observation.images.image_0"
-STATE_KEY = "observation.state"
-ACTION_KEY = "action"
 
 
-class BridgeEpisodeSource(EpisodeSource):
-    """Episode source backed by LeRobotDataset on the IPEC bridge mirror."""
+# BridgeV2 ships four camera streams per frame:
+#   image_0  →  the over-the-shoulder exterior camera ("primary")
+#   image_1  →  an alternate exterior view (table-side / shoulder-2)
+#   image_2  →  a third exterior view (some episodes only)
+#   image_3  →  a fourth exterior view (some episodes only)
+# We declare ALL of them so diagnostics that iterate every camera see the
+# full visual stream. If an episode has only image_0/image_1 populated, the
+# loader skips absent keys (rather than fabricating black images).
+BRIDGE_PROFILE = RobotProfile(
+    name="bridge_orig",
+    cameras=[
+        CameraSpec(name="primary"),       # image_0
+        CameraSpec(name="exterior_2"),    # image_1
+        CameraSpec(name="exterior_3"),    # image_2
+        CameraSpec(name="exterior_4"),    # image_3
+    ],
+    state=StateSpec(
+        dim=6,
+        convention="ee_pose",
+        joint_names=["x", "y", "z", "roll", "pitch", "yaw"],
+    ),
+    gripper=GripperSpec(
+        kind="parallel_jaw",
+        units="unit",
+        range=(0.0, 1.0),
+    ),
+    action=ActionSpec(
+        dim=7,
+        dim_names=["dx", "dy", "dz", "drx", "dry", "drz", "gripper"],
+    ),
+)
 
-    name = "bridge_v2"
+
+def _bridge_gripper_extractor(state: np.ndarray) -> tuple[np.ndarray, Optional[float]]:
+    """Bridge state layout: [x, y, z, roll, pitch, yaw, gripper, <unused>].
+
+    The dataset's raw state is 8-dim; index 6 is the normalised gripper
+    value, index 7 is an unused trailing slot we discard.
+    """
+    if state.size < 7:
+        raise ValueError(
+            f"Bridge state vector has only {state.size} dims; expected ≥7 "
+            "(layout: [x, y, z, roll, pitch, yaw, gripper, ...])."
+        )
+    return state[:6].copy(), float(state[6])
+
+
+class BridgeEpisodeSource(LeRobotEpisodeSource):
+    """BridgeV2 episode source. Thin instance of the generic LeRobot adapter.
+
+    All four exterior camera streams (image_0..image_3) are declared. Any
+    diagnostic that iterates ``scene.observations.images`` will see every
+    camera that the dataset populates for the episode.
+    """
 
     def __init__(self):
-        self._meta_dataset = None  # populated on first call to all_instructions
-
-    def list_episodes(self) -> list[str]:
-        # Bridge has 53k. We don't enumerate by default.
-        return [str(i) for i in range(53192)]
-
-    def load_episode(self, episode_id: str) -> list[Scene]:
-        return self.load_episodes([int(episode_id)])[int(episode_id)]
-
-    def load_episodes(self, episode_indices: list[int]) -> dict[int, list[Scene]]:
-        """Batched load — single LeRobotDataset init for all indices."""
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-        indices = sorted(set(episode_indices))
-        dataset = LeRobotDataset(DATASET_REPO, episodes=indices)
-        out: dict[int, list[Scene]] = {i: [] for i in indices}
-
-        for i in range(dataset.num_frames):
-            sample = dataset[i]
-            ep_i = int(sample.get("episode_index", sample.get("episode_idx", indices[0])))
-            if ep_i not in out:
-                continue
-            instruction = self._resolve_instruction(dataset, ep_i)
-            out[ep_i].append(Scene(
-                image=self._tensor_to_pil(sample[PRIMARY_IMAGE_KEY]),
-                instruction=instruction,
-                metadata={
-                    "state": sample[STATE_KEY].to(torch.float32).reshape(-1).tolist(),
-                    "expert_action": sample[ACTION_KEY].to(torch.float32).reshape(-1).tolist(),
-                    "fps": float(dataset.fps),
-                    "frame_index": i,
-                    "episode_index": ep_i,
-                    "dataset": DATASET_REPO,
-                },
-                scene_id=f"bridge:{ep_i}:{len(out[ep_i])}",
-            ))
-        return out
-
-    def load_trajectory(self, episode_idx: int) -> Trajectory:
-        """Load one episode as a Trajectory (Scenes in time order)."""
-        scenes = self.load_episode(str(episode_idx))
-        # FPS comes from the metadata; pull it from any scene that has it.
-        fps = float(scenes[0].metadata.get("fps", 5.0)) if scenes else 5.0
-        return Trajectory(
-            frames=scenes,
-            frame_indices=list(range(len(scenes))),
-            fps=fps,
-            episode_id=str(episode_idx),
-            source=f"bridge:{episode_idx}",
-            metadata={"dataset": DATASET_REPO},
+        super().__init__(
+            repo_id=DATASET_REPO,
+            profile=BRIDGE_PROFILE,
+            image_keys={
+                "primary":    "observation.images.image_0",
+                "exterior_2": "observation.images.image_1",
+                "exterior_3": "observation.images.image_2",
+                "exterior_4": "observation.images.image_3",
+            },
+            state_key="observation.state",
+            action_key="action",
+            gripper_extractor=_bridge_gripper_extractor,
+            n_episodes=53192,
         )
-
-    def all_instructions(self) -> list[str]:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        if self._meta_dataset is None:
-            self._meta_dataset = LeRobotDataset(DATASET_REPO, episodes=[0])
-        tasks = getattr(self._meta_dataset.meta, "tasks", None)
-        if tasks is None:
-            return []
-        if isinstance(tasks, dict):
-            items = list(tasks.values())
-        else:
-            items = list(tasks)
-        out = []
-        for it in items:
-            if isinstance(it, dict) and "task" in it:
-                out.append(str(it["task"]))
-            elif isinstance(it, str):
-                out.append(it)
-        return out
-
-    # ---- helpers ----------------------------------------------------------
-
-    def _tensor_to_pil(self, t) -> Image.Image:
-        a = t.detach().cpu().float().numpy() if hasattr(t, "detach") else np.asarray(t)
-        if a.ndim == 3 and a.shape[0] in (1, 3):
-            a = a.transpose(1, 2, 0)
-        if a.max() <= 1.5:
-            a = a * 255.0
-        a = np.clip(a, 0, 255).astype(np.uint8)
-        return Image.fromarray(a)
-
-    def _resolve_instruction(self, dataset, episode_idx: int) -> str:
-        meta = dataset.meta
-        tasks = getattr(meta, "tasks", None)
-        target_idx: Optional[int] = None
-        for i in range(dataset.num_frames):
-            sample = dataset[i]
-            ep_i = int(sample.get("episode_index", sample.get("episode_idx", -1)))
-            if ep_i == episode_idx and "task_index" in sample:
-                target_idx = int(sample["task_index"])
-                break
-        if target_idx is None or tasks is None:
-            return f"(task #{target_idx})" if target_idx is not None else "(no instruction)"
-        if isinstance(tasks, dict):
-            return str(tasks.get(target_idx, f"(task #{target_idx})"))
-        if isinstance(tasks, (list, tuple)) and target_idx < len(tasks):
-            entry = tasks[target_idx]
-            return entry["task"] if isinstance(entry, dict) else str(entry)
-        return f"(task #{target_idx})"
+        self.name = "bridge_v2"

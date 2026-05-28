@@ -71,9 +71,9 @@ def main() -> int:
         expert_actions = []
         hidden_per_frame = []
         for scene in tqdm(traj.frames, desc=f"ep{ep_idx}", unit="frame", leave=False):
-            ar = model.predict(scene.image, scene.instruction)
+            ar = model.predict(scene)
             hs = model.extract_hidden_states(
-                scene.image, scene.instruction, args.layers,
+                scene, args.layers,
                 TokenSelector(relative="before_action"),
             )
             pred_actions.append(ar.action)
