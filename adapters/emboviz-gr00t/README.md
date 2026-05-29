@@ -3,12 +3,14 @@
 NVIDIA's [GR00T-N1.7](https://huggingface.co/nvidia/GR00T-N1.7-3B)
 adapter for [emboviz](https://github.com/Ashok93/botsigil).
 
-GR00T's upstream package on PyPI depends on `flash-attn`, which can't
+`emboviz install-gr00t` installs NVIDIA's `gr00t` package **with its own
+declared dependencies** — gr00t's pyproject is the source of truth, we
+mirror nothing. The one dependency we drop is `flash-attn`: it can't
 build under pip's isolation (its `setup.py` imports torch before pip
-installs it). `emboviz install-gr00t` handles this with a two-pass
-install — standard deps first, then `gr00t` itself with `--no-deps`.
-The adapter falls back to SDPA at runtime so flash-attn is never
-actually invoked.
+installs it) and gr00t only ships prebuilt wheels for cp310/cp312 (this
+venv is cp311). The adapter runs on SDPA / eager attention, so flash-attn
+is never invoked — it's excluded via a uv `--override`, and every other
+gr00t dependency installs normally.
 
 ## Install
 

@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,38 +255,61 @@ def install_venv(spec: AdapterSpec, *, force: bool = False) -> Path:
     env.update(spec.runtime_env_vars)
 
     py = path / "bin" / "python"
-    requirements = _rewrite_pip_for_dev(spec.runtime_pip)
-    subprocess.run(
-        ["uv", "pip", "install", "--python", str(py), *requirements],
-        check=True,
-        env=env,
-    )
 
-    # Second pass: any --no-deps installs. For each requirement that
-    # looks like ``<name> @ git+https://<host>/<owner>/<repo>...``, we
-    # clone the repo to ``~/.emboviz/repos/<repo>`` first and replace
-    # the requirement with ``-e <clone_path>``. This works around a uv
-    # constraint: uv strictly parses transitive git deps, and NVIDIA's
-    # Isaac-GR00T pyproject pins ``torchcodec`` via a ``file://...wheel``
-    # URL inside its own repo. When we install via ``-e <clone>`` that
-    # file:// ref is just a local-to-local path which uv accepts; when
-    # we install via ``git+`` it's a transitive git ref pointing at a
-    # file, which uv refuses. Cloning once gives every adapter a stable
-    # checkout under ``~/.emboviz/repos/`` we can also reuse for the
+    # Materialise any ``<name> @ git+https://<host>/<owner>/<repo>...``
+    # entry to a local ``-e <clone>`` (clone once to ``~/.emboviz/repos/
+    # <repo>``, reused on rerun). Providers reference local wheels/paths
+    # *inside their own pyproject* — e.g. NVIDIA Isaac-GR00T sources its
+    # ``torchcodec`` / ``flash-attn`` wheels via ``{ path = ... }`` and
+    # ``file://`` refs. uv accepts those as local-to-local paths when the
+    # package is installed editable from a clone, but refuses the same
+    # refs reached transitively through a ``git+`` URL. Cloning also
+    # gives every adapter a stable, inspectable checkout we reuse for the
     # adapter's ``demo_data`` etc.
-    if spec.runtime_pip_no_deps:
-        no_deps_requirements = _materialise_git_clones(spec.runtime_pip_no_deps)
-        no_deps_requirements = _rewrite_pip_for_dev(no_deps_requirements)
-        subprocess.run(
-            [
-                "uv", "pip", "install", "--python", str(py),
-                "--no-deps", *no_deps_requirements,
-            ],
-            check=True,
-            env=env,
-        )
+    requirements = _materialise_git_clones(spec.runtime_pip)
+    requirements = _rewrite_pip_for_dev(requirements)
+
+    cmd = ["uv", "pip", "install", "--python", str(py)]
+    override_path: Optional[Path] = None
+    if spec.runtime_pip_exclude:
+        # Drop provider-declared deps we deliberately don't install
+        # (e.g. gr00t's flash-attn). uv only honours an override when the
+        # package is actually requested, and an always-false marker makes
+        # it unsatisfiable everywhere — the documented way to exclude a
+        # dependency. This keeps the adapter provider-driven: install the
+        # upstream package WITH its own dependency closure, minus the few
+        # we subtract here. No hand-mirrored, drift-prone dep list.
+        override_path = _write_exclude_override(spec)
+        cmd += ["--override", str(override_path)]
+    cmd += requirements
+
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    finally:
+        if override_path is not None:
+            override_path.unlink(missing_ok=True)
 
     return path
+
+
+def _write_exclude_override(spec: AdapterSpec) -> Path:
+    """Write a uv ``--override`` file that drops every package in
+    ``spec.runtime_pip_exclude`` from resolution.
+
+    Each line names a package guarded by ``sys_platform == 'never'`` — a
+    marker that is false on every real platform, so when the package is
+    requested (directly or transitively) uv resolves it to "no version
+    applicable" and omits it. See uv's resolution docs (overrides):
+    https://docs.astral.sh/uv/concepts/resolution/.
+    """
+    body = "".join(f"{pkg} ; sys_platform == 'never'\n"
+                   for pkg in spec.runtime_pip_exclude)
+    fd, name = tempfile.mkstemp(
+        prefix=f"emboviz-{spec.name}-exclude-", suffix=".txt",
+    )
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    return Path(name)
 
 
 # ─────────────────────────────────────────────────────────────────────

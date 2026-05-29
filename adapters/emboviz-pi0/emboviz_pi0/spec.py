@@ -25,6 +25,12 @@ from emboviz_wire import AdapterSpec
 SPEC = AdapterSpec(
     name="pi0",
     server_module="emboviz_pi0.server",
+    # PROVIDER-DRIVEN adapter (cf. AdapterSpec.runtime_pip): ``openpi``
+    # drives its own dependency closure. The few explicit pins below are
+    # not a mirror of openpi's deps — they are pod-compatibility
+    # CONSTRAINTS layered on top (cap torch <2.10 off the cu13-only wheel;
+    # hold transformers in openpi's gemma window) that narrow, not
+    # restate, what openpi resolves.
     runtime_pip=(
         # openpi supports Python 3.11 and 3.12; we pin the venv to 3.11
         # so the RLDS tensorflow-cpu wheels (3.11-only on PyPI) install

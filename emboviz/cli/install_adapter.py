@@ -75,13 +75,13 @@ def _build_install_cmd(name: str, description: str) -> click.Command:
         )
         for req in spec.runtime_pip:
             click.echo(f"    {req}")
-        if spec.runtime_pip_no_deps:
+        if spec.runtime_pip_exclude:
             click.echo(
-                f"[install-{name}] runtime pip (--no-deps "
-                f"{len(spec.runtime_pip_no_deps)}):"
+                f"[install-{name}] excluded (provider-declared, not "
+                f"installed) ({len(spec.runtime_pip_exclude)}):"
             )
-            for req in spec.runtime_pip_no_deps:
-                click.echo(f"    {req}")
+            for pkg in spec.runtime_pip_exclude:
+                click.echo(f"    {pkg}")
 
         path = install_venv(spec, force=force)
         click.echo(f"[install-{name}] venv ready: {path}")

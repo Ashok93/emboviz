@@ -44,10 +44,31 @@ class AdapterSpec:
         = "emboviz_<name>.server:main"`` so the user can also start it
         from the runtime venv's PATH.
     runtime_pip
-        The pip requirement specs that must exist in the runtime venv.
-        The ``install-<name>`` CLI subcommand resolves these into the
-        venv at first use. Include the adapter package itself last so
-        editable installs work cleanly during dev.
+        The pip requirement specs that must exist in the runtime venv,
+        resolved by ``install-<name>`` at first use. Always ends with
+        ``emboviz-wire`` + the adapter shim (rewritten to ``-e <local>``
+        in dev). The model deps follow ONE of two legitimate shapes —
+        never a third:
+
+          • Provider-driven — list the upstream package (``<pkg> @
+            git+…`` or a PyPI name) and let ITS metadata pull the
+            dependency closure. The provider's pyproject is the single
+            source of truth; we add no version pins beyond pod-
+            compatibility constraints. Used by oft / pi0 / gr00t /
+            lerobot. Subtract un-takeable deps via ``runtime_pip_exclude``.
+
+          • Runtime-spec — for models that ship as HF-hub *remote code*
+            (loaded through ``trust_remote_code``) there is NO installable
+            provider package, so list the inference runtime the hub code
+            needs (torch + the right transformers window + vision libs).
+            Used by openvla / sam3.
+
+        What is FORBIDDEN is the third shape: hand-copying an installable
+        package's transitive dependency list into ``runtime_pip``. That
+        mirror drifts the instant the provider changes its deps and
+        silently breaks the worker at import (this is exactly how gr00t's
+        old ``--no-deps`` mirror lost ``tyro``). If the provider ships an
+        installable package, install the package — don't retype its deps.
     runtime_env_vars
         Process-environment variables that must be set in the worker
         process — e.g. ``GIT_LFS_SKIP_SMUDGE=1`` for π0's openpi
@@ -69,13 +90,27 @@ class AdapterSpec:
     needs_gpu
         If True, ``emboviz install-<name>`` will warn if no CUDA device
         is visible. Does not block — some users only test on CPU.
-    runtime_pip_no_deps
-        Packages installed AFTER the main ``runtime_pip`` pass with
-        ``--no-deps``. Required by upstream projects that pin a
-        known-broken transitive dep (e.g. NVIDIA's ``gr00t`` lists
-        ``flash-attn``, whose build setup imports torch before pip has
-        installed it — only ``--no-deps`` gets us past it; the adapter
-        falls back to SDPA at runtime so flash-attn is never invoked).
+    runtime_pip_exclude
+        Packages the provider *declares* as dependencies that we
+        deliberately do NOT install. Passed to ``uv pip install`` as a
+        ``--override`` whose entries carry an always-false environment
+        marker (``sys_platform == 'never'``) — the documented uv idiom
+        for dropping a dependency from resolution (an override only takes
+        effect if the package is actually requested, and the false marker
+        makes it unsatisfiable on every real platform).
+
+        This is the escape hatch that lets an adapter stay *provider-
+        driven*: install the upstream package WITH its own declared
+        dependency closure (its pyproject is the single source of truth)
+        and subtract only the few packages we can't or won't take. The
+        sole user today is ``gr00t``: NVIDIA hard-pins ``flash-attn``,
+        whose sdist build imports torch before pip has installed it
+        (unbuildable under isolation) and whose prebuilt wheels exist
+        only for cp310/cp312 (our venv is cp311). The adapter runs on
+        SDPA / eager attention, so flash-attn is never invoked — we drop
+        it and let the rest of gr00t's deps resolve normally, instead of
+        hand-mirroring the whole list (which silently drifts the moment
+        the provider adds a dependency).
     """
 
     name: str
@@ -86,7 +121,7 @@ class AdapterSpec:
     default_actor_kwargs: dict = field(default_factory=dict)
     requires_python: str = "3.11"
     needs_gpu: bool = True
-    runtime_pip_no_deps: tuple[str, ...] = ()
+    runtime_pip_exclude: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not self.server_module or "." not in self.server_module:

@@ -20,6 +20,10 @@ from emboviz_wire import AdapterSpec
 SPEC = AdapterSpec(
     name="sam3",
     server_module="emboviz_sam3.server",
+    # RUNTIME-SPEC adapter (cf. AdapterSpec.runtime_pip): SAM 3 is loaded
+    # via ``AutoModel/AutoProcessor.from_pretrained("facebook/sam3")`` —
+    # HF-hub code, no installable provider package to drive deps. The list
+    # below is the inference RUNTIME that code needs, not a dep mirror.
     runtime_pip=(
         "torch>=2.7,<2.10",
         # SAM 3's processor uses ``Sam3VideoProcessor`` which is

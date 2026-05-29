@@ -21,7 +21,13 @@ from emboviz_wire import AdapterSpec
 SPEC = AdapterSpec(
     name="openvla",
     server_module="emboviz_openvla.server",
-    # The runtime venv needs:
+    # RUNTIME-SPEC adapter (cf. AdapterSpec.runtime_pip): OpenVLA-7B ships
+    # as HF-hub remote code, loaded via ``AutoModelForVision2Seq.
+    # from_pretrained("openvla/openvla-7b", trust_remote_code=True)``.
+    # There is NO installable ``openvla`` package whose pyproject could
+    # drive the dependency closure, so the list below is the inference
+    # RUNTIME the hub modeling code requires — not a mirror of a package's
+    # transitive deps. The runtime venv needs:
     #
     #   • torch — cap below 2.10 to avoid the cu13-only 2.12 wheel that
     #     breaks on every cloud A40/A6000/A100 driver in 2026.
