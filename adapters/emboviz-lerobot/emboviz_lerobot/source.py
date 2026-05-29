@@ -2,10 +2,15 @@
 
 Wraps ``lerobot.datasets.LeRobotDataset`` (the canonical, official
 reader — we do not reimplement any decoding) and emits the framework's
-universal :class:`Scene` / :class:`Trajectory` types. This module lives
-in the ``emboviz-lerobot`` package, whose venv pins a lerobot version
-that reads the dataset's on-disk format; emboviz core never imports it
+universal :class:`Scene` / :class:`Trajectory` types. This package's
+venv tracks the LATEST lerobot, whose on-disk format is **v3.0** — the
+current official LeRobot standard. emboviz core never imports this module
 and never installs lerobot.
+
+emboviz accepts LeRobot **v3.0** datasets only. v3.0 is not backward-
+compatible with v2.x (lerobot itself refuses), so a v2.x dataset is
+rejected with a clear pointer to lerobot's own ``convert_dataset_v21_to_v30``
+— we don't ship an old reader to humour old data.
 
 ``build_lerobot_source`` turns a run config's ``dataset`` section into a
 configured source: it reads the dataset's own ``meta/info.json`` (a
@@ -113,17 +118,11 @@ class LeRobotEpisodeSource(EpisodeSource):
         ``data/``, ``videos/``). Local paths route via the ``root=`` kwarg
         so lerobot skips its hub lookup.
         """
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
         indices = sorted(set(int(i) for i in episode_indices))
         cache_key = tuple(indices)
         dataset = self._dataset_cache.get(cache_key)
         if dataset is None:
-            is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
-            if is_local:
-                dataset = LeRobotDataset("local", root=self.repo_id, episodes=indices)
-            else:
-                dataset = LeRobotDataset(self.repo_id, episodes=indices)
+            dataset = self._open(indices)
             self._dataset_cache[cache_key] = dataset
             if len(self._dataset_cache) > self._dataset_cache_max:
                 self._dataset_cache.pop(next(iter(self._dataset_cache)))
@@ -131,10 +130,10 @@ class LeRobotEpisodeSource(EpisodeSource):
         out: dict[int, list[Scene]] = {i: [] for i in indices}
         for i in range(dataset.num_frames):
             sample = dataset[i]
-            ep_i = int(sample.get("episode_index", sample.get("episode_idx", indices[0])))
+            ep_i = int(sample.get("episode_index", indices[0]))
             if ep_i not in out:
                 continue
-            instruction = self._resolve_instruction(dataset, sample)
+            instruction = self._resolve_instruction(sample)
             scene = self._build_scene(sample, instruction, ep_i, len(out[ep_i]), dataset.fps)
             out[ep_i].append(scene)
         return out
@@ -152,17 +151,16 @@ class LeRobotEpisodeSource(EpisodeSource):
         )
 
     def all_instructions(self) -> list[str]:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
         if self._meta_dataset is None:
-            is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
-            if is_local:
-                self._meta_dataset = LeRobotDataset("local", root=self.repo_id, episodes=[0])
-            else:
-                self._meta_dataset = LeRobotDataset(self.repo_id, episodes=[0])
+            self._meta_dataset = self._open([0])
         tasks = getattr(self._meta_dataset.meta, "tasks", None)
         if tasks is None:
             return []
+        # LeRobot v3.0: ``meta.tasks`` is a pandas DataFrame indexed by the
+        # task STRING (column = task_index). The strings are the index.
+        if hasattr(tasks, "index") and not isinstance(tasks, (list, tuple, dict)):
+            return [str(t) for t in tasks.index]
+        # Defensive fallbacks for dict / list-shaped task tables.
         items = list(tasks.values()) if isinstance(tasks, dict) else list(tasks)
         out: list[str] = []
         for it in items:
@@ -173,6 +171,36 @@ class LeRobotEpisodeSource(EpisodeSource):
         return out
 
     # ----- internals -------------------------------------------------
+
+    def _open(self, indices: list[int]):
+        """Construct the underlying ``LeRobotDataset``.
+
+        On a local failure we surface the REAL cause: lerobot falls back
+        to an HF lookup when it can't read local metadata, and since we
+        hand it the placeholder repo_id ``"local"`` that surfaces as a
+        misleading ``404 ... repo 'local'`` — we re-raise with the true
+        local context.
+        """
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
+        try:
+            if is_local:
+                return LeRobotDataset("local", root=self.repo_id, episodes=indices)
+            return LeRobotDataset(self.repo_id, episodes=indices)
+        except Exception as e:
+            if not is_local:
+                raise
+            meta = Path(self.repo_id) / "meta"
+            present = sorted(p.name for p in meta.iterdir()) if meta.is_dir() else []
+            raise RuntimeError(
+                f"Failed to load local LeRobot dataset at {self.repo_id!r}: "
+                f"{type(e).__name__}: {e}\n"
+                f"meta/ contains {present}. NOTE: lerobot retries on the HF Hub "
+                f"when it cannot read a dataset's local metadata, so an "
+                f"underlying \"404 ... datasets/local\" is the masked fallback — "
+                f"the real failure is the local one above."
+            ) from e
 
     def _build_scene(
         self, sample: dict, instruction: str,
@@ -267,19 +295,14 @@ class LeRobotEpisodeSource(EpisodeSource):
         a = np.clip(a, 0, 255).astype(np.uint8)
         return Image.fromarray(a)
 
-    def _resolve_instruction(self, dataset, sample: dict) -> str:
-        """Look up the instruction string for this sample's task_index."""
-        meta = dataset.meta
-        tasks = getattr(meta, "tasks", None)
-        task_idx = int(sample.get("task_index", -1)) if "task_index" in sample else -1
-        if task_idx < 0 or tasks is None:
-            return ""
-        if isinstance(tasks, dict):
-            return str(tasks.get(task_idx, ""))
-        if isinstance(tasks, (list, tuple)) and task_idx < len(tasks):
-            entry = tasks[task_idx]
-            return entry["task"] if isinstance(entry, dict) else str(entry)
-        return ""
+    def _resolve_instruction(self, sample: dict) -> str:
+        """Instruction string for this frame.
+
+        LeRobot v3.0 carries the task STRING directly in each sample
+        (``sample['task']``) — no task_index → table lookup needed.
+        """
+        task = sample.get("task", "")
+        return task if isinstance(task, str) else ""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -303,11 +326,11 @@ def _read_lerobot_info(path: str) -> dict:
     return json.loads(Path(p).read_text())
 
 
-# LeRobot codebase versions this reader's pinned lerobot can load. Read
-# from the worker's lerobot at call time so the message is always honest.
 def _assert_readable(path: str, info: dict) -> None:
-    """Fail loudly if the dataset's codebase_version is one the installed
-    lerobot cannot read — never silently produce wrong frames."""
+    """Fail loudly unless the dataset is the LeRobot format this reader's
+    lerobot reads (v3.0). lerobot's v3.0 is a hard major break — it cannot
+    read v2.x — so we refuse v2.x up front with the exact one-time fix
+    rather than emit a masked HF error or risk wrong frames."""
     try:
         from lerobot.datasets.lerobot_dataset import CODEBASE_VERSION
     except Exception:  # pragma: no cover - lerobot layout drift
@@ -316,17 +339,28 @@ def _assert_readable(path: str, info: dict) -> None:
     supported = str(CODEBASE_VERSION).lstrip("v")
     if not ds_version:
         return
-    ds_major = ds_version.split(".", 1)[0]
-    sup_major = supported.split(".", 1)[0]
-    if ds_major != sup_major:
+    try:
+        ds_major = int(ds_version.split(".", 1)[0])
+        sup_major = int(supported.split(".", 1)[0])
+    except ValueError:  # pragma: no cover - unexpected version string
+        return
+    if ds_major == sup_major:
+        return
+    if ds_major < sup_major:
         raise RuntimeError(
-            f"Dataset {path!r} is LeRobot format v{ds_version}, but this "
-            f"reader's lerobot only reads v{supported} (major v{sup_major}.x). "
-            f"Reading across format majors is not supported by lerobot. "
-            f"Install a reader venv whose lerobot matches v{ds_major}.x, or "
-            f"convert the dataset with lerobot's official converter. We refuse "
-            f"to read it with a mismatched reader rather than risk wrong frames."
+            f"Dataset {path!r} is LeRobot format v{ds_version}; emboviz uses the "
+            f"latest LeRobot (v{supported}), and v3.0 is NOT backward-compatible "
+            f"with v2.x. Convert it once with lerobot's own tool, then re-run:\n"
+            f"    python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 "
+            f"--repo-id={path}\n"
+            f"(If it's v2.0, run convert_dataset_v20_to_v21 first.) We refuse to "
+            f"read v2.x with a v3.0 reader rather than risk wrong frames."
         )
+    raise RuntimeError(
+        f"Dataset {path!r} is LeRobot format v{ds_version}, NEWER than this "
+        f"reader's lerobot (v{supported}). Bump emboviz-lerobot's lerobot pin to "
+        f"a release that reads v{ds_major}.x."
+    )
 
 
 def build_lerobot_source(
