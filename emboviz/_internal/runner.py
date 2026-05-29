@@ -188,6 +188,16 @@ def _build_target_detector(args) -> tuple[Optional[CachingTargetDetector], Optio
         )
     detector_kind = (args.detector or "sam3").lower()
     if detector_kind == "sam3":
+        # The detector is a client to the isolated SAM 3 worker (its own
+        # py3.12 venv). Spawn it the SAME way the runner brings up the
+        # model and dataset-reader workers (connect → auto-install the
+        # runtime venv if missing, auto-spawn, wait for ping) so that
+        # ``emboviz analyze --config`` is self-contained — no separate
+        # ``emboviz-sam3 serve`` step. ``connect`` attaches to a warm
+        # worker if one is already running (no kwargs → no conflict). We
+        # only need the worker UP; SAM3Detector opens its own client.
+        from emboviz.adapters import connect
+        connect("sam3", auto_spawn=True, auto_install=True)
         base: TargetDetector = SAM3Detector(target_text=text, device="cuda")
         print(
             f"      memorization detector = "
