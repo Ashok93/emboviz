@@ -59,15 +59,13 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration, averaged_predict
+from emboviz.calibration import ModelCalibration, averaged_predict, averaged_predict_batch
 from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import ActionResult, Scene
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 from emboviz.perturb._target_detection import (
     BBoxDetector,
-    GroundingDINOSAMDetector,
-    SAM3Detector,
     TargetDetector,
 )
 from emboviz.perturb.image._image_utils import to_array, to_pil
@@ -301,6 +299,12 @@ class MemorizationDiagnostic(Diagnostic):
         # measure intervention magnitude (mask_contrast) and response
         # magnitude (Δaction vs baseline).
         per_fill_results: dict[str, dict] = {}
+        # Phase 1 — build one masked scene per fill mode and record its
+        # contrast. The fill modes are independent interventions on the same
+        # frame, so we predict them as ONE batch (Phase 2) instead of a
+        # forward per fill.
+        fill_scenes: list[Scene] = []
+        fill_meta: list[tuple[str, float, dict[str, float]]] = []
         for fill_mode in self.fill_modes:
             masked_arrays: dict[str, np.ndarray] = {}
             contrasts: dict[str, float] = {}
@@ -311,10 +315,17 @@ class MemorizationDiagnostic(Diagnostic):
                 masked_arrays[cam] = masked
                 contrasts[cam] = _mask_contrast(arr, masked, mask)
             mean_contrast = float(np.mean(list(contrasts.values())))
-
             masked_pils = {cam: to_pil(a) for cam, a in masked_arrays.items()}
-            masked_scene = scene.with_images(masked_pils)
-            action_masked = averaged_predict(model, masked_scene, n_samples)
+            fill_scenes.append(scene.with_images(masked_pils))
+            fill_meta.append((fill_mode, mean_contrast, contrasts))
+
+        # Phase 2 — one batched prediction across all fill modes.
+        fill_preds = averaged_predict_batch(model, fill_scenes, n_samples)
+
+        # Phase 3 — Δaction vs baseline per fill (numerics unchanged).
+        for (fill_mode, mean_contrast, contrasts), action_masked in zip(
+            fill_meta, fill_preds,
+        ):
             raw_delta = float(np.linalg.norm(action_masked.action - baseline.action))
             if self.calibration is not None:
                 norm_delta = self.calibration.normalize(raw_delta)

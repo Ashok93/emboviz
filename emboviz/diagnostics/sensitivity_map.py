@@ -11,10 +11,10 @@ Multi-camera contract:
   • ``cameras=None`` (default) → run the grid per camera in the scene.
   • ``cameras=["primary"]`` → only that camera.
   • Per-camera concentration scores live in ``per_variant`` keyed by camera.
-  • Aggregate ``scalar_score`` = the MINIMUM concentration across cameras
-    (lowest concentration = most diffuse = worst signal). Going by the
-    worst camera, not the average, surfaces "model uses one camera well
-    but ignores another."
+  • Aggregate ``scalar_score`` = the MEAN concentration across the cameras
+    the model actually consumed (cameras whose grid response never clears
+    the noise floor are reported separately as ``ignored_cameras``, not
+    folded into the headline number where they'd read as misleading zeros).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration, averaged_predict
+from emboviz.calibration import ModelCalibration, averaged_predict, averaged_predict_batch
 from emboviz.core.results import DiagnosticResult, Finding, Severity
 from emboviz.core.types import ActionResult, Scene, resolve_cameras
 from emboviz.diagnostics.base import Diagnostic
@@ -94,23 +94,45 @@ class SensitivityMapDiagnostic(Diagnostic):
             cell_noise_floor = 0.0
             cell_signal_threshold = 1e-6
 
+        # Phase 1 — build EVERY masked scene (all cameras × grid cells) up
+        # front, each masking one patch with that camera's channel mean.
+        # These forward passes are mutually independent, so we submit them
+        # as ONE batch (Phase 2) instead of grid² sequential round-trips
+        # per camera — the GPU runs them in parallel.
+        cam_hw: dict[str, tuple[int, int]] = {}
+        pert_scenes: list[Scene] = []
+        pert_index: list[tuple[str, int, int]] = []   # (cam, gi, gj) per scene
         for cam in cameras:
             arr = to_array(scene.observations.images[cam].data)
             H, W = arr.shape[:2]
             chan_mean = arr.reshape(-1, 3).mean(axis=0)
             ph = H // self.grid_side
             pw = W // self.grid_side
-            drops = np.zeros((self.grid_side, self.grid_side), dtype=np.float32)
+            cam_hw[cam] = (H, W)
             for gi in range(self.grid_side):
                 for gj in range(self.grid_side):
                     masked = arr.copy()
                     y0, x0 = gi * ph, gj * pw
                     masked[y0:y0 + ph, x0:x0 + pw] = chan_mean
-                    pert_scene = scene.with_image(to_pil(masked), camera=cam)
-                    pert = averaged_predict(model, pert_scene, n_samples)
-                    drops[gi, gj] = metric.compute(baseline, pert)
+                    pert_scenes.append(scene.with_image(to_pil(masked), camera=cam))
+                    pert_index.append((cam, gi, gj))
+
+        # Phase 2 — one batched prediction for every masked cell.
+        preds = averaged_predict_batch(model, pert_scenes, n_samples)
+
+        # Phase 3 — scatter Δaction into each camera's grid, then the
+        # per-camera signal / concentration logic (unchanged).
+        drops_by_cam = {
+            cam: np.zeros((self.grid_side, self.grid_side), dtype=np.float32)
+            for cam in cameras
+        }
+        for (cam, gi, gj), pert in zip(pert_index, preds):
+            drops_by_cam[cam][gi, gj] = metric.compute(baseline, pert)
+
+        for cam in cameras:
+            H, W = cam_hw[cam]
             # Subtract noise floor — what's left is real signal above noise.
-            signal = np.maximum(drops - cell_noise_floor, 0.0)
+            signal = np.maximum(drops_by_cam[cam] - cell_noise_floor, 0.0)
             per_camera_grid[cam] = signal
             per_camera_image_shape[cam] = (H, W)
             flat = signal.flatten()

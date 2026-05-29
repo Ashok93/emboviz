@@ -19,19 +19,25 @@ diagnostics, CLI commands) just sees endpoints.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from emboviz.adapters.client import ZMQAdapterClient, default_endpoint
+from emboviz.adapters.client import (
+    RpcClient,
+    ZMQAdapterClient,
+    ZMQReaderClient,
+    default_endpoint,
+)
 from emboviz.adapters.protocol import AdapterSpec
 from emboviz.adapters.registry import find_adapter
+from emboviz.adapters.reader_registry import find_reader
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -296,7 +302,7 @@ class WorkerHandle:
 
     name: str
     endpoint: str
-    client: ZMQAdapterClient
+    client: RpcClient            # ZMQAdapterClient (model) or ZMQReaderClient (dataset)
     process: Optional[subprocess.Popen] = None
     spawned: bool = False
 
@@ -462,6 +468,7 @@ def _ensure_runtime_venv(
             "pi0":     "~8 GB (downloads checkpoint + Triton autotune ~5-10 min on first inference)",
             "gr00t":   "~7 GB",
             "sam3":    "~5 GB (downloads facebook/sam3 ~3.4 GB; gated, needs HF_TOKEN)",
+            "lerobot": "~3 GB (lerobot 0.3.x + torch + video-decode stack)",
         }.get(spec.name, "")
         print(
             f"[emboviz] first run for '{spec.name}' — materialising the "
@@ -473,61 +480,50 @@ def _ensure_runtime_venv(
     return venv_path(spec.name)
 
 
-def connect(
-    name: str,
+def _connect_with_spec(
+    spec: AdapterSpec,
     *,
+    client_cls,
     actor_kwargs: Optional[dict] = None,
     auto_spawn: bool = True,
     auto_install: bool = True,
     timeout_s: int = 600,
+    endpoint: Optional[str] = None,
 ) -> WorkerHandle:
-    """Return a live :class:`WorkerHandle` for the named adapter.
+    """Shared connect lifecycle for ANY worker — model adapter OR dataset
+    reader. They use one mechanism (isolated venv + ZMQ worker); only the
+    typed client facade differs.
 
-    Three states the caller can be in:
-
-      1. Worker already running and responsive at the resolved endpoint
-         (because a previous CLI invocation left it warm, or the user
-         started it manually) — we attach and return.
-      2. Worker not running but the adapter's runtime venv exists —
-         spawn the worker via ``subprocess.Popen`` and wait for it to
-         answer ``ping``.
-      3. Runtime venv doesn't exist yet — ``auto_install`` (default
-         True) creates it via :func:`install_venv`, then proceeds to
-         state 2. Visible progress is printed to stderr.
-
-    Pass ``auto_install=False`` or ``auto_spawn=False`` to require the
-    user to have already run ``emboviz install-<name>`` /
-    ``emboviz-<name> serve`` themselves.
-
-    ``timeout_s`` bounds how long we wait for cold-load on first spawn —
-    larger models (π0 with its Triton autotune cache cold) can take
-    minutes.
+    States: (1) attach to a warm worker; (2) spawn into an existing
+    runtime venv; (3) materialise the venv (``auto_install``) then spawn.
+    ``client_cls`` is :class:`ZMQAdapterClient` (VLA) or
+    :class:`ZMQReaderClient` (dataset). ``endpoint`` overrides the default
+    socket (the reader uses a per-dataset socket so different datasets get
+    distinct warm workers) — the runtime venv is still keyed by ``spec.name``.
     """
-    spec = find_adapter(name)
-    endpoint = default_endpoint(name)
+    name = spec.name
+    endpoint = endpoint or default_endpoint(name)
 
     # ── 1. Already alive ────────────────────────────────────────────
     if _is_alive(endpoint):
         # A warm worker carries whatever construction kwargs it was
-        # spawned with. If the caller is requesting specific per-run
-        # kwargs (e.g. their own --model-kwargs checkpoint), we must NOT
-        # silently attach to a worker that may hold a different model —
-        # that would diagnose the wrong checkpoint. Refuse with a clear
-        # remediation. (No actor_kwargs → attaching to the warm worker
-        # is exactly the intended fast path.)
+        # spawned with. If the caller requests specific per-run kwargs (a
+        # model checkpoint, a dataset path), we must NOT silently attach
+        # to a worker that may hold a DIFFERENT model/dataset — that would
+        # diagnose the wrong thing. Refuse with a clear remediation. (No
+        # kwargs → attaching to the warm worker is the intended fast path.)
         if actor_kwargs:
             raise RuntimeError(
                 f"a '{name}' worker is already running at {endpoint}, "
                 f"loaded with its own configuration. Refusing to route "
-                f"this run's model-kwargs {actor_kwargs!r} to it — it may "
-                f"hold a different checkpoint, and sending your data to "
-                f"the wrong model would be a silent-wrong-answer bug. "
-                f"Stop the running worker first (kill the "
-                f"`emboviz-{name} serve` process, or remove "
-                f"{endpoint[len('ipc://'):] if endpoint.startswith('ipc://') else endpoint}), "
+                f"this run's kwargs {actor_kwargs!r} to it — it may hold a "
+                f"different model/dataset, and sending work to the wrong "
+                f"one would be a silent-wrong-answer bug. Stop the running "
+                f"worker first (kill the `emboviz-{name} serve` process, or "
+                f"remove {endpoint[len('ipc://'):] if endpoint.startswith('ipc://') else endpoint}), "
                 f"then re-run so a fresh worker loads with your kwargs."
             )
-        client = ZMQAdapterClient(name=name, endpoint=endpoint)
+        client = client_cls(name=name, endpoint=endpoint)
         return WorkerHandle(
             name=name, endpoint=endpoint, client=client, spawned=False,
         )
@@ -536,19 +532,19 @@ def connect(
     if not _runtime_venv_ready(name):
         if not auto_install:
             raise RuntimeError(
-                f"runtime venv for adapter '{name}' is missing at "
-                f"{venv_path(name)}. Run `emboviz install-{name}` to "
-                "create it, or pass --auto-install (default) to let "
-                "emboviz set it up automatically."
+                f"runtime venv for '{name}' is missing at {venv_path(name)}. "
+                f"Run `emboviz install-{name}` to create it, or pass "
+                "--auto-install (default) to let emboviz set it up "
+                "automatically."
             )
         _ensure_runtime_venv(spec)
 
     # ── 3. Spawn the worker if not already running ──────────────────
     if not auto_spawn:
         raise RuntimeError(
-            f"no worker reachable at {endpoint} for adapter '{name}'. "
-            f"Start one with:\n    emboviz-{name} serve\n"
-            "or pass --auto-spawn (default) to let emboviz launch one."
+            f"no worker reachable at {endpoint} for '{name}'. Start one "
+            f"with:\n    emboviz-{name} serve\nor pass --auto-spawn "
+            "(default) to let emboviz launch one."
         )
 
     proc = _spawn_worker(spec, endpoint, actor_kwargs=actor_kwargs)
@@ -561,10 +557,70 @@ def connect(
             pass
         raise
 
-    client = ZMQAdapterClient(name=name, endpoint=endpoint)
+    client = client_cls(name=name, endpoint=endpoint)
     return WorkerHandle(
         name=name, endpoint=endpoint, client=client, process=proc, spawned=True,
     )
+
+
+def connect(
+    name: str,
+    *,
+    actor_kwargs: Optional[dict] = None,
+    auto_spawn: bool = True,
+    auto_install: bool = True,
+    timeout_s: int = 600,
+) -> WorkerHandle:
+    """Return a live :class:`WorkerHandle` for the named VLA model adapter.
+
+    Three states: (1) attach to a warm worker; (2) spawn into an existing
+    runtime venv; (3) ``auto_install`` materialises the venv then spawn.
+    Pass ``auto_install=False`` / ``auto_spawn=False`` to require the user
+    to have run ``emboviz install-<name>`` / ``emboviz-<name> serve``.
+    ``timeout_s`` bounds cold-load on first spawn (π0's Triton autotune
+    cold can take minutes).
+    """
+    return _connect_with_spec(
+        find_adapter(name), client_cls=ZMQAdapterClient,
+        actor_kwargs=actor_kwargs, auto_spawn=auto_spawn,
+        auto_install=auto_install, timeout_s=timeout_s,
+    )
+
+
+def connect_reader(
+    name: str,
+    *,
+    reader_kwargs: Optional[dict] = None,
+    auto_spawn: bool = True,
+    auto_install: bool = True,
+    timeout_s: int = 600,
+) -> ZMQReaderClient:
+    """Return a live :class:`ZMQReaderClient` (an EpisodeSource) for the
+    named dataset reader (e.g. ``"lerobot"``).
+
+    Identical lifecycle to :func:`connect` — same isolated venv, same
+    spawn-and-wait over the wire — but resolves the reader spec from the
+    ``emboviz.readers`` entry-point group and returns the EpisodeSource
+    client directly (the worker stays warm, detached, exactly like a
+    model worker). ``reader_kwargs`` is the run config's ``dataset``
+    section, forwarded to the reader's source builder.
+
+    A reader worker is bound to ONE dataset at spawn (``build_*_source``
+    runs from these kwargs), so we give each dataset its OWN socket
+    (keyed by a hash of the path). Different datasets therefore get
+    distinct warm readers that coexist, and a request is never routed to
+    a reader holding a different dataset — which would be a silent-wrong-
+    answer bug. The runtime venv is shared (one ``lerobot`` venv).
+    """
+    path = str((reader_kwargs or {}).get("path", ""))
+    tag = hashlib.sha1(path.encode("utf-8")).hexdigest()[:12] if path else "default"
+    endpoint = default_endpoint(f"{name}-{tag}")
+    handle = _connect_with_spec(
+        find_reader(name), client_cls=ZMQReaderClient,
+        actor_kwargs=reader_kwargs, auto_spawn=auto_spawn,
+        auto_install=auto_install, timeout_s=timeout_s, endpoint=endpoint,
+    )
+    return handle.client  # type: ignore[return-value]
 
 
 def shutdown(handle: WorkerHandle, *, terminate: bool = False) -> None:

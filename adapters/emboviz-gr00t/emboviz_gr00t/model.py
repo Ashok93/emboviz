@@ -247,37 +247,33 @@ class Gr00tAdapter(VLAModel):
     def extract_attention(
         self, scene: Scene, query: TokenSelector,
     ) -> AttentionMaps:
-        """Extract per-camera attention from GR00T's System-1 action DiT.
+        """Extract per-camera attention from GR00T's System-2 Qwen3-VL backbone.
 
         GR00T-N1.7 is a DUAL-SYSTEM model. System-2 (Qwen3-VL / Cosmos-
-        Reason2) perceives the scene and emits hidden states; System-1, a
-        Diffusion Transformer (DiT), cross-attends to those VL features to
-        denoise the action chunk. Two attention signals exist:
+        Reason2) PERCEIVES the scene; System-1, a Diffusion Transformer
+        (DiT), cross-attends to its features to denoise the action chunk.
+        There are two attention signals, and they answer different
+        questions:
 
-          • VLM last-instruction-token → image self-attention ("what the model
-            perceives"). For THIS checkpoint (Cosmos-Reason2-2B truncated to
-            ``select_layer`` layers) we measured it and found it genuinely
-            diffuse — early layers are a pure border sink, late layers spread
-            broadly with no compact object blob — so it is NOT used.
-          • DiT action → image cross-attention ("where the policy reads the
-            image to act"). This is the action-relevant signal and what we
-            extract.
+          • Qwen3-VL last-instruction-token → image self-attention — "what
+            the model PERCEIVES." This is the user-facing "where is the
+            model looking?" map and the SAME canonical last-token recipe
+            that makes OpenVLA clean, just on Qwen instead of LLaMA. This
+            method extracts it.
+          • DiT action → image cross-attention — "where the policy reads
+            the image to ACT." That is the separate, per-denoise-step view
+            exposed by :meth:`extract_attention_trace`, not here.
 
-        The DiT (``gr00t/model/modules/dit.py``, ``AlternateVLDiT``) interleaves
-        self-attention (idx%2==1) with cross-attention blocks that alternate
-        between non-image and IMAGE keys; we capture the image-cross blocks via
-        a diffusers ``AttnProcessor`` that materializes the (unmasked)
-        ``attention_probs`` (same math as the fused path), restrict to the image
-        columns, average over the action queries, and stack over
-        (image-block × denoise-step).
-
-        The raw DiT cross-attention has a strong content-independent corner/
-        border sink that buries the object signal under a head-average — the
-        exact failure the cleaning step fixes. ``AttentionMaps.
-        image_weights_clean`` removes the positional sink (cells consistently
-        hot across heads) and then selects the few most-localized heads by
-        spatial entropy and sums them (arXiv:2503.06287; attention-sink
-        removal Xiao et al. 2309.17453). Raw attention, no gradient.
+        We force eager attention on the Qwen LM (sdpa/flash return no
+        weights), capture its per-layer ``output_attentions``, take the
+        last instruction token's row over the image columns, and subtract
+        the query-averaged attention per (layer, head) so the
+        content-independent attention-sink / register tokens (Xiao et al.
+        arXiv:2309.17453; Darcet et al. "ViTs Need Registers" ICLR'24)
+        cancel and the instruction-specific grounding survives.
+        ``AttentionMaps.image_weights_clean`` then applies the
+        layer-adaptive selection (the one mid-stack layer most concentrated
+        on the image interior, mean over heads). Raw attention, no gradient.
 
         Multi-camera handling: image tokens are INLINE in ``input_ids``
         (marked by ``image_token_id``, expanded to one id per merged patch);

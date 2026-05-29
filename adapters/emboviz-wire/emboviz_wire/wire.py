@@ -178,6 +178,114 @@ def _dec_tactile(d: Optional[dict]):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# RobotProfile  ↔  dict
+#
+# A Scene carries the dataset's RobotProfile (action dim-names, state
+# convention, camera roles). It MUST round-trip: the dataset reader runs
+# in its own worker venv and ships Scenes to the host, which reads
+# ``frame.profile`` for action-dim labels and conventions. Each spec is
+# rebuilt by name so we never depend on cross-Python-version pickle.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _enc_camera_spec(c) -> dict:
+    return {"name": c.name, "width": c.width, "height": c.height}
+
+
+def _dec_camera_spec(d: dict):
+    from emboviz_wire.profile import CameraSpec
+    return CameraSpec(name=d["name"], width=d.get("width"), height=d.get("height"))
+
+
+def _enc_state_spec(s) -> Optional[dict]:
+    if s is None:
+        return None
+    seg = None
+    if s.segment_layout is not None:
+        seg = {k: [v.start, v.stop, v.step] for k, v in s.segment_layout.items()}
+    return {
+        "dim": int(s.dim),
+        "convention": s.convention,
+        "joint_names": list(s.joint_names) if s.joint_names is not None else None,
+        "segment_layout": seg,
+    }
+
+
+def _dec_state_spec(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.profile import StateSpec
+    seg = None
+    if d.get("segment_layout"):
+        seg = {k: slice(*v) for k, v in d["segment_layout"].items()}
+    return StateSpec(
+        dim=int(d["dim"]), convention=d["convention"],
+        joint_names=d.get("joint_names"), segment_layout=seg,
+    )
+
+
+def _enc_gripper_spec(g) -> Optional[dict]:
+    if g is None:
+        return None
+    return {"kind": g.kind, "units": g.units, "range": list(g.range)}
+
+
+def _dec_gripper_spec(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.profile import GripperSpec
+    return GripperSpec(
+        kind=d["kind"], units=d["units"], range=tuple(d.get("range", (0.0, 1.0))),
+    )
+
+
+def _enc_action_spec(a) -> Optional[dict]:
+    if a is None:
+        return None
+    return {
+        "dim": int(a.dim),
+        "dim_names": list(a.dim_names) if a.dim_names is not None else None,
+        "dim_scale": (np.asarray(a.dim_scale) if a.dim_scale is not None else None),
+    }
+
+
+def _dec_action_spec(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.profile import ActionSpec
+    return ActionSpec(
+        dim=int(d["dim"]), dim_names=d.get("dim_names"), dim_scale=d.get("dim_scale"),
+    )
+
+
+def encode_profile(p) -> Optional[dict]:
+    if p is None:
+        return None
+    return {
+        "name": p.name,
+        "cameras": [_enc_camera_spec(c) for c in p.cameras],
+        "state": _enc_state_spec(p.state),
+        "gripper": _enc_gripper_spec(p.gripper),
+        "action": _enc_action_spec(p.action),
+        "extras": dict(p.extras) if p.extras else {},
+    }
+
+
+def decode_profile(d: Optional[dict]):
+    if d is None:
+        return None
+    from emboviz_wire.profile import RobotProfile
+    return RobotProfile(
+        name=d["name"],
+        cameras=[_dec_camera_spec(c) for c in d.get("cameras", [])],
+        state=_dec_state_spec(d.get("state")),
+        gripper=_dec_gripper_spec(d.get("gripper")),
+        action=_dec_action_spec(d.get("action")),
+        extras=d.get("extras") or {},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Scene  ↔  dict
 # ─────────────────────────────────────────────────────────────────────
 
@@ -196,14 +304,19 @@ def encode_scene(scene) -> dict:
         "instruction": scene.instruction,
         "scene_id": scene.scene_id,
         "metadata": dict(scene.metadata) if scene.metadata else {},
+        "profile": encode_profile(scene.profile),
     }
 
 
 def decode_scene(d: dict):
-    """Rebuild a Scene from a wire dict. ``profile`` is not transported
-    (it's a per-adapter concept that lives on the worker side); if a
-    downstream consumer needs it, it should be reconstructed from the
-    metadata blob."""
+    """Rebuild a Scene from a wire dict, including its ``profile``.
+
+    The Scene round-trips completely: the dataset reader (in its own
+    worker venv) builds the RobotProfile and ships it with each Scene, so
+    the host reads ``scene.profile`` (action dim-names, state convention)
+    without any per-adapter reconstruction. A Scene built without a
+    profile (e.g. host-side perturbations) carries ``profile=None``.
+    """
     from emboviz_wire.types import Observations, Scene
 
     obs = Observations(
@@ -219,8 +332,37 @@ def decode_scene(d: dict):
     return Scene(
         observations=obs,
         instruction=d.get("instruction"),
+        profile=decode_profile(d.get("profile")),
         metadata=d.get("metadata") or {},
         scene_id=d.get("scene_id", ""),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Trajectory  ↔  dict  (a dataset reader's episode payload)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def encode_trajectory(traj) -> dict:
+    return {
+        "frames": [encode_scene(s) for s in traj.frames],
+        "frame_indices": list(traj.frame_indices),
+        "fps": float(traj.fps),
+        "episode_id": traj.episode_id,
+        "source": traj.source,
+        "metadata": dict(traj.metadata) if traj.metadata else {},
+    }
+
+
+def decode_trajectory(d: dict):
+    from emboviz_wire.types import Trajectory
+    return Trajectory(
+        frames=[decode_scene(s) for s in d["frames"]],
+        frame_indices=[int(i) for i in (d.get("frame_indices") or [])],
+        fps=float(d.get("fps", 0.0)),
+        episode_id=d.get("episode_id", ""),
+        source=d.get("source", ""),
+        metadata=d.get("metadata") or {},
     )
 
 

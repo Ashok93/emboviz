@@ -54,13 +54,12 @@ def get_model(name: str) -> Callable[..., VLAModel]:
 def _try_lazy_register(name: str) -> None:
     """Trigger the in-process adapter module's side-effect import.
 
-    Only the two remaining in-process adapters live here. Every other
-    model name resolves through :mod:`emboviz.adapters.registry`
-    instead.
+    ``mock`` is the only in-process adapter (a GPU-free deterministic
+    policy for testing the diagnostic side). Every real model resolves
+    through :mod:`emboviz.adapters.registry` as an isolated ZMQ worker.
     """
     builtin = {
-        "mock":    "emboviz.models.mock",
-        "lerobot": "emboviz.models.lerobot_policy",
+        "mock": "emboviz.models.mock",
     }
     module = builtin.get(name)
     if module:

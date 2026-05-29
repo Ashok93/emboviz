@@ -11,7 +11,6 @@ Public API entry points (lazy imports — heavy modules don't load on
     from emboviz.core import Scene, ActionResult, DiagnosticResult
     from emboviz.models import VLAModel, Capability
     from emboviz.diagnostics import Diagnostic
-    from emboviz.suites import Suite
 
 See README.md for the user-facing flow and ARCHITECTURE.md for the design.
 """

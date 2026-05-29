@@ -28,41 +28,28 @@ _ADAPTER_DESCRIPTIONS: dict[str, str] = {
     "sam3":     "Meta SAM 3 — text→mask detector for memorization & target-aware diagnostics.",
 }
 
-# Built-in in-process models that don't go through the ZMQ adapter path.
-_LEGACY_INPROC_MODELS: dict[str, str] = {
-    "mock":    "Deterministic mock policy for testing (no GPU).",
-    "lerobot": "Stock LeRobotDataset policy (CPU OK).",
+# The only in-process model: a GPU-free deterministic policy for testing
+# the diagnostic side. Every real model is an isolated ZMQ adapter worker.
+_INPROC_MODELS: dict[str, str] = {
+    "mock": "Deterministic mock policy for testing (no GPU).",
 }
 
 # The three self-describing dataset input formats (config `dataset.format`).
-# emboviz reads each format's own schema (info.json / array shapes / TFDS
-# feature spec) — these are the only `dataset.format` values a run config
-# accepts. (Rerun/MCAP are recording-viz formats, not dataset inputs.)
-_DATASET_FORMAT_EXTRAS: dict[str, tuple[str, str]] = {
-    "lerobot":  ("LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF)", "lerobot"),
-    "hdf5":     ("Robomimic / ALOHA / Isaac Lab Mimic HDF5",                  ""),
-    "rlds":     ("RLDS / TFDS (Open-X-Embodiment, RT-X, Octo)",              "rlds"),
+# Each entry: (description, module-that-indicates-availability, install hint).
+# LeRobot is read by the ISOLATED emboviz-lerobot worker, so its presence
+# is indicated by the reader SHIM in the host (emboviz_lerobot), not an
+# in-host lerobot. HDF5's h5py ships in core. RLDS needs the rlds extra.
+_DATASET_FORMATS: dict[str, tuple[str, str, str]] = {
+    "lerobot": ("LeRobot v2.x (BridgeV2, LIBERO, DROID, ALOHA, custom HF)",
+                "emboviz_lerobot", "uv pip install emboviz-lerobot && emboviz install-lerobot"),
+    "hdf5":    ("Robomimic / ALOHA / Isaac Lab Mimic HDF5", "h5py", ""),
+    "rlds":    ("RLDS / TFDS (Open-X-Embodiment, RT-X, Octo)",
+                "tensorflow_datasets", "uv pip install 'emboviz[rlds]'"),
 }
 
 
 def _import_check(pkg: str) -> bool:
     return importlib.util.find_spec(pkg) is not None
-
-
-def _dataset_extra_installed(extra: str) -> bool:
-    if not extra:
-        return True
-    primary = {
-        "lerobot":  "lerobot",
-        "rlds":     "tensorflow_datasets",
-        "hdf5":     "h5py",
-        "mcap":     "mcap",
-        "rerun":    "rerun",
-        "viz":      "matplotlib",
-    }.get(extra)
-    if primary is None:
-        return False
-    return _import_check(primary)
 
 
 @click.command("list-models")
@@ -94,7 +81,7 @@ def list_models_cmd() -> None:
 
     click.echo()
     click.echo("In-process built-ins:")
-    for name, desc in _LEGACY_INPROC_MODELS.items():
+    for name, desc in _INPROC_MODELS.items():
         click.echo(f"  ✓ {name:<10} {desc}")
 
     click.echo()
@@ -109,10 +96,10 @@ def list_datasets_cmd() -> None:
     formats; emboviz reads dims/per-dim names from each format's own schema.
     """
     click.echo("Dataset input formats (config `dataset.format`):")
-    for fmt, (desc, extra) in _DATASET_FORMAT_EXTRAS.items():
-        ok = _dataset_extra_installed(extra) if extra else True
+    for fmt, (desc, indicator, install) in _DATASET_FORMATS.items():
+        ok = _import_check(indicator)
         mark = "✓" if ok else "·"
-        hint = "" if ok else f"  (install with: uv pip install 'emboviz[{extra}]')"
+        hint = "" if ok or not install else f"  (install with: {install})"
         click.echo(f"  {mark} {fmt:<10} {desc}{hint}")
     click.echo()
     click.echo("Each config maps camera roles / state convention / gripper for its")

@@ -1,0 +1,41 @@
+[project]
+name = "emboviz-lerobot"
+version = "0.3.0"
+description = "LeRobot dataset reader for emboviz — reads LeRobot-format datasets in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# This is the THIN SHIM that goes in the user's MAIN (host) venv. It
+# carries zero heavy deps — its only job is to (a) advertise an
+# AdapterSpec via the ``emboviz.readers`` entry point so
+# ``emboviz install-lerobot`` knows what to install in the isolated
+# reader venv, and (b) expose the ``emboviz-lerobot`` console entry
+# point that becomes available on the reader venv's PATH once that venv
+# is materialised.
+#
+# The heavy stuff (lerobot + its torch / video-decode stack, and its
+# transitive rerun-sdk<0.23 pin) lives in ``AdapterSpec.runtime_pip``
+# and ships into ``~/.emboviz/venvs/lerobot/`` via
+# ``emboviz install-lerobot`` — NEVER into the host venv. That is how
+# core stays free of lerobot's dependency pins (notably the rerun cap
+# that conflicts with core's own .rrd exporter).
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.readers"]
+lerobot = "emboviz_lerobot.spec:SPEC"
+
+[project.scripts]
+emboviz-lerobot = "emboviz_lerobot.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# runtime_pip on the AdapterSpec may use PEP 508 direct refs; Hatch must
+# allow them in metadata even though the SHIM itself doesn't pull them.
+[tool.hatch.metadata]
+allow-direct-references = true

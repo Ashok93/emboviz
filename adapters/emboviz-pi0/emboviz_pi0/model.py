@@ -339,36 +339,22 @@ class Pi0Adapter(VLAModel):
 
     _BASE_CAPS = Capability.INFERENCE
 
-    # π0 uses PaliGemma (Gemma-2B language model + SigLIP vision tower)
-    # as the VLM backbone. PaliGemma's bidirectional prefix attention
-    # creates a different sink profile than causal-mask models:
-    #
-    #   - Layer range: Gemma-2B has 18 layers; visual-grounding heads
-    #     concentrate in the middle half per the same multi-modal stage
-    #     analysis (arXiv:2508.20279). Very early and very late layers
-    #     dump on the BOS/EOS prefix tokens (Gemma's standard sink
-    #     behaviour); mid-layers contain the visual grounding signal.
-    #
-    #   - Sink masking: PaliGemma image patches show MODERATE spatial
-    #     sinks — weaker than Qwen3-VL but present (per PaliGemma paper
-    #     §4 and "To Sink or Not to Sink" arXiv:2510.08510 analysis of
-    #     prefix-LM architectures). 5% top-cell masking is a balance
-    #     between catching the few obvious sinks (typically the first
-    #     image token in raster order) and preserving real grounding
-    #     signal on the rest.
+    # π0's VLM is PaliGemma (Gemma-2B language model + SigLIP vision tower).
+    # ``AttentionMaps.image_weights_clean`` uses the layer-adaptive
+    # last-instruction-token map: within the mid-to-late band, pick the one
+    # layer whose attention is most concentrated on the image INTERIOR
+    # (where objects are) rather than the BOS/prefix sink, then mean over
+    # heads. Gemma-2B's grounding signal sits mid-to-late; the very early
+    # and very late layers dump on the prefix sink — hence the 0.25–0.85
+    # band. Only ``recommended_layer_range_fraction`` is read by the cleaner.
     ATTENTION_PROFILE = {
         "recommended_layer_range_fraction": (0.25, 0.85),
-        "localization_heads_topk": 3,
-        "localization_smooth_sigma": 1.0,
-        "exclude_first_n_layers": 2,
         "literature_citation":
-            "Method: 'Your Large Vision-Language Model Only Needs A Few "
-            "Attention Heads For Visual Grounding' (CVPR 2025, "
-            "arXiv:2503.06287) — query = last instruction token; select "
-            "localization heads by image-mass + spatial entropy; sum top-k "
-            "(no gradient, no sink removal). Layer range (mid-to-late, "
-            "exclude first 2): same paper + 'How Multimodal LLMs Solve "
-            "Image Tasks' (arXiv:2508.20279) for Gemma-2B/PaliGemma.",
+            "Layer-adaptive last-token attention (arXiv:2602.04304; 'How "
+            "Multimodal LLMs Solve Image Tasks', arXiv:2508.20279) on "
+            "PaliGemma/Gemma-2B: query = last instruction token of the "
+            "prefix; select the mid-stack layer most concentrated on the "
+            "image interior; mean over heads. Raw attention, no gradient.",
     }
 
     @property

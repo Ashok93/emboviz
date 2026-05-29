@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Optional
 
 import numpy as np
 from PIL import Image
 
-from emboviz.core.observations import RGBImage
-from emboviz.core.types import Observations, PerturbedScene, Scene
+from emboviz.core.types import PerturbedScene, Scene
 
 
 def to_array(image) -> np.ndarray:

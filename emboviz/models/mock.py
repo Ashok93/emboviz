@@ -24,7 +24,6 @@ from emboviz.core.types import (
 )
 from emboviz.models.protocol import (
     Capability,
-    NotSupported,
     RequiredInputs,
     VLAModel,
 )

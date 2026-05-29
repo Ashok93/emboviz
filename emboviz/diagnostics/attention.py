@@ -9,11 +9,9 @@ ignored by the attention machinery.
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import numpy as np
 
-from emboviz.core.divergences import jensen_shannon
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene, TokenSelector
 from emboviz.diagnostics.base import Diagnostic

@@ -93,9 +93,19 @@ class CounterfactualDiagnostic(Diagnostic):
 
         per_variant: dict[str, float] = {}
         variant_records: list[dict] = []
+        skipped_variants: dict[str, str] = {}
 
         for variant in self.perturber.variants(scene):
             v_scene = variant.scene
+            # A perturber may legitimately produce a scene the model can't
+            # accept — e.g. EmptyInstructionPerturber blanks the instruction,
+            # which a model that requires one rejects. Validate each variant
+            # and skip the unacceptable ones with a recorded reason rather
+            # than letting predict() raise and abort the whole suite.
+            invalid = model.required_inputs.validate(v_scene)
+            if invalid is not None:
+                skipped_variants[variant.variant_id] = invalid
+                continue
             perturbed = model.predict(v_scene)
             d = metric.compute(baseline, perturbed)
             per_variant[variant.variant_id] = d
@@ -111,10 +121,13 @@ class CounterfactualDiagnostic(Diagnostic):
             })
 
         if not per_variant:
-            return self._not_applicable(
-                model, scene,
-                f"{self.perturber.name} produced no variants for this scene",
-            )
+            reason = f"{self.perturber.name} produced no testable variants for this scene"
+            if skipped_variants:
+                reason += (
+                    f"; all {len(skipped_variants)} variant(s) were rejected by "
+                    f"the model's required_inputs ({next(iter(skipped_variants.values()))})"
+                )
+            return self._not_applicable(model, scene, reason)
 
         scores = np.array(list(per_variant.values()))
         mean = float(scores.mean())
@@ -152,6 +165,7 @@ class CounterfactualDiagnostic(Diagnostic):
             per_variant=per_variant,
             raw={
                 "variants": variant_records,
+                "skipped_variants": skipped_variants,
                 "baseline_instruction": scene.instruction,
                 "noise_floor": self.noise_floor,
                 "grounded_threshold": self.grounded_threshold,

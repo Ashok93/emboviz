@@ -9,7 +9,7 @@ representations into these types at the protocol boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import numpy as np
 
@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 
 # Sentinel for "PIL image" without importing PIL here — we accept anything
 # that has a `.size` and is convertible via numpy.asarray, but adapters do
-# the actual loading.
+# the actual loading. Re-exported from ``emboviz_wire`` so adapters can
+# annotate image arguments with it.
 ImageLike = Any
 
 
@@ -214,6 +215,60 @@ class ActionResult:
     # populated to do the real chunk-coherence test.
     action_chunk: Optional[np.ndarray] = None
     metadata: dict = field(default_factory=dict)
+
+
+def average_action_results(results: list[ActionResult]) -> ActionResult:
+    """Average several ActionResults (samples of the SAME scene) into one.
+
+    Stochastic policies (π0 flow-matching, GR00T diffusion) return a
+    different action each call; the mean of N independent samples has
+    sampling noise ``σ/√N``. This is the single averaging implementation
+    shared by the host (``emboviz.calibration.averaged_predict``) and the
+    in-worker ``VLAModel.predict_batch`` n-sample expansion, so both reduce
+    noise identically.
+
+    ``action`` and ``action_chunk`` are averaged. A model that emits
+    chunks of inconsistent shape across samples of one scene has a real
+    bug (truncated / diverged decoding) — we raise rather than silently
+    truncate, so a chunk-based diagnostic never runs on garbage.
+
+    A single-element list is returned unchanged (no copy, no metadata
+    mutation) — the deterministic / ``n_samples == 1`` fast path.
+    """
+    if not results:
+        raise ValueError("average_action_results: empty results list")
+    if len(results) == 1:
+        return results[0]
+
+    mean_action = np.stack(
+        [np.asarray(r.action, dtype=np.float32) for r in results], axis=0
+    ).mean(axis=0).astype(np.float32)
+
+    chunks = [
+        np.asarray(r.action_chunk, dtype=np.float32)
+        for r in results if r.action_chunk is not None
+    ]
+    mean_chunk: Optional[np.ndarray] = None
+    if chunks:
+        shapes = {c.shape for c in chunks}
+        if len(shapes) != 1:
+            raise ValueError(
+                f"average_action_results: action chunks have inconsistent "
+                f"shapes across {len(chunks)} samples: {sorted(shapes)}. The "
+                "same input produced different-shaped chunks — fix the model "
+                "adapter (likely truncated decoding under noise) before "
+                "trusting any chunk-based diagnostic on this model."
+            )
+        mean_chunk = np.stack(chunks, axis=0).mean(axis=0).astype(np.float32)
+
+    last = results[-1]
+    return ActionResult(
+        action=mean_action,
+        action_dim=last.action_dim if last.action_dim else int(mean_action.size),
+        action_chunk=mean_chunk,
+        confidence=last.confidence,
+        metadata={**last.metadata, "n_samples_averaged": len(results)},
+    )
 
 
 @dataclass

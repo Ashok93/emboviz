@@ -47,6 +47,8 @@ from emboviz_wire.types import (
     TokenSelector,
 )
 from emboviz_wire.model_protocol import Capability, RequiredInputs, VLAModel
+from emboviz_wire.reader_protocol import EpisodeSource
+from emboviz_wire.types import Trajectory
 
 
 # Default per-call timeout. Diagnostics that need to cold-load a large
@@ -295,6 +297,15 @@ class ZMQAdapterClient(RpcClient, VLAModel):
         result = self.request("predict", {"scene": wire.encode_scene(scene)})
         return wire.decode_action_result(result)
 
+    def predict_batch(
+        self, scenes: list[Scene], n_samples: int = 1,
+    ) -> list[ActionResult]:
+        result = self.request("predict_batch", {
+            "scenes": [wire.encode_scene(s) for s in scenes],
+            "n_samples": int(n_samples),
+        })
+        return [wire.decode_action_result(r) for r in result]
+
     # ----- VLAModel ABC: internal inspection ----------------------------
 
     def extract_attention(self, scene: Scene, query: TokenSelector) -> AttentionMaps:
@@ -368,3 +379,62 @@ class ZMQAdapterClient(RpcClient, VLAModel):
         return list(self.request("find_token_positions", {
             "instruction": instruction, "word": word,
         }))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Dataset-reader client — typed wrappers, satisfies the EpisodeSource ABC.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class ZMQReaderClient(RpcClient, EpisodeSource):
+    """EpisodeSource facade over an :class:`RpcClient`.
+
+    The dataset-side analogue of :class:`ZMQAdapterClient`. The host
+    talks to an isolated reader worker (its own venv with the heavy
+    dataset library) exactly as it talks to a model worker — same wire,
+    same lifecycle — but the methods are the EpisodeSource contract. The
+    server side is :class:`emboviz_wire.server.DatasetReaderHandler`; the
+    two must be kept on the SAME method list.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        endpoint: Optional[str] = None,
+        timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+    ):
+        super().__init__(name, endpoint=endpoint, timeout_ms=timeout_ms)
+        self._meta: Optional[dict] = None
+
+    def _ensure_meta(self) -> dict:
+        if self._meta is None:
+            self._meta = self.request("static_metadata")
+        return self._meta
+
+    @property
+    def name(self) -> str:            # type: ignore[override]
+        """Dataset identity (e.g. ``"lerobot:<repo_id>"``), from the
+        worker — NOT the socket name. The modality-pool cache keys off
+        this, so it must reflect the actual dataset."""
+        return self._ensure_meta().get("name") or self._name
+
+    def list_episodes(self) -> list[str]:
+        return [str(e) for e in self.request("list_episodes")]
+
+    def load_episode(self, episode_id: str) -> list[Scene]:
+        result = self.request("load_episode", {"episode_id": str(episode_id)})
+        return [wire.decode_scene(s) for s in result]
+
+    def load_episodes(self, episode_indices: list[int]) -> dict[int, list[Scene]]:
+        result = self.request("load_episodes", {
+            "episode_indices": [int(i) for i in episode_indices],
+        })
+        return {int(k): [wire.decode_scene(s) for s in v] for k, v in result.items()}
+
+    def load_trajectory(self, episode_idx: int) -> Trajectory:
+        result = self.request("load_trajectory", {"episode_idx": int(episode_idx)})
+        return wire.decode_trajectory(result)
+
+    def all_instructions(self) -> list[str]:
+        return [str(x) for x in self.request("all_instructions")]

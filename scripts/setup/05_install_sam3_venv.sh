@@ -3,7 +3,7 @@
 #
 # Mirrors the user-path exactly (per README):
 #
-#     uv pip install emboviz emboviz-sam3
+#     uv pip install emboviz emboviz-lerobot emboviz-sam3
 #     emboviz install-sam3
 #
 # The SAM 3 runtime venv is pinned to Python 3.12 (sam3 reference repo
@@ -17,9 +17,12 @@ source /root/.bashrc.emboviz
 MAIN_VENV=/root/.venv-emboviz
 ADAPTER=sam3
 
-uv venv "$MAIN_VENV" --python 3.11
+# Shared main venv: created once (guarded), each script adds its shims.
+[ -d "$MAIN_VENV" ] || uv venv "$MAIN_VENV" --python 3.11
 uv pip install --python "$MAIN_VENV/bin/python" \
+    -e /root/emboviz/adapters/emboviz-wire \
     -e /root/emboviz \
+    -e /root/emboviz/adapters/emboviz-lerobot \
     -e /root/emboviz/adapters/emboviz-$ADAPTER
 
 EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-$ADAPTER --force

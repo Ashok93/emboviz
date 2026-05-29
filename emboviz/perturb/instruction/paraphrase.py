@@ -71,12 +71,10 @@ def _paraphrase(instruction: str) -> list[tuple[str, str]]:
     if "place " in lower:
         variants.append(("place_to_put", s.lower().replace("place ", "put ")))
 
-    # Reorder "X and Y" → "Y and X" (semantic-preserving when X and Y
-    # are independent objects, which is the common case).
-    if " and " in lower:
-        parts = s.split(" and ", 1)
-        if len(parts) == 2:
-            variants.append(("reorder_and", f"{parts[1]} and {parts[0]}"))
+    # NOTE: we deliberately do NOT reorder "X and Y" → "Y and X". For
+    # sequential instructions ("pick up the cup AND place it on the plate")
+    # that flips the order of operations — a meaning change — which breaks
+    # this perturber's meaning-preserving contract.
 
     return variants
 

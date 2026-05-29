@@ -94,9 +94,11 @@ class SweepDiagnostic(Diagnostic):
         lvl = np.array(levels)[order]
         div = np.array(divergences)[order]
         # AUC vs level — normalized by the level range so different
-        # perturbers are comparable.
+        # perturbers are comparable. numpy 2.0 renamed ``trapz`` →
+        # ``trapezoid``; support both so we work on numpy 1.26 and 2.x.
+        trapezoid = getattr(np, "trapezoid", None) or np.trapz
         if lvl[-1] > lvl[0]:
-            auc = float(np.trapz(div, lvl) / (lvl[-1] - lvl[0]))
+            auc = float(trapezoid(div, lvl) / (lvl[-1] - lvl[0]))
         else:
             auc = float(div.mean())
 

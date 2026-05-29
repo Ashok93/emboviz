@@ -3,7 +3,7 @@
 #
 # Mirrors the user-path exactly (per README):
 #
-#     uv pip install emboviz emboviz-gr00t
+#     uv pip install emboviz emboviz-lerobot emboviz-gr00t
 #     emboviz install-gr00t        # handles --no-deps for gr00t package
 #
 # The ``emboviz install-gr00t`` command's second-pass ``--no-deps``
@@ -28,9 +28,12 @@ fi
 MAIN_VENV=/root/.venv-emboviz
 ADAPTER=gr00t
 
-uv venv "$MAIN_VENV" --python 3.11
+# Shared main venv: created once (guarded), each script adds its shims.
+[ -d "$MAIN_VENV" ] || uv venv "$MAIN_VENV" --python 3.11
 uv pip install --python "$MAIN_VENV/bin/python" \
+    -e /root/emboviz/adapters/emboviz-wire \
     -e /root/emboviz \
+    -e /root/emboviz/adapters/emboviz-lerobot \
     -e /root/emboviz/adapters/emboviz-$ADAPTER
 
 EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-$ADAPTER --force

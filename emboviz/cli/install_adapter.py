@@ -23,12 +23,23 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
 
 import click
 
-from emboviz.adapters import find_adapter, install_venv
-from emboviz.adapters.lifecycle import venv_path, venv_python
+from emboviz.adapters import find_adapter, find_reader, install_venv
+from emboviz.adapters.lifecycle import venv_python
+
+
+def _find_installable_spec(name: str):
+    """Resolve an install-able :class:`AdapterSpec` from EITHER the model-
+    adapter (``emboviz.adapters``) or the dataset-reader
+    (``emboviz.readers``) entry-point group. Both kinds build their
+    runtime venv identically; they differ only in the registry they
+    register under."""
+    try:
+        return find_adapter(name)
+    except KeyError:
+        return find_reader(name)
 
 
 def _build_install_cmd(name: str, description: str) -> click.Command:
@@ -56,7 +67,7 @@ def _build_install_cmd(name: str, description: str) -> click.Command:
         help="Run a sanity import after install (default: on).",
     )
     def _cmd(force: bool, check_import: bool) -> None:
-        spec = find_adapter(name)
+        spec = _find_installable_spec(name)
         click.echo(f"[install-{name}] adapter server: {spec.server_module}")
         click.echo(f"[install-{name}] runtime python: {spec.requires_python}")
         click.echo(
@@ -112,6 +123,9 @@ INSTALLABLE_ADAPTERS = {
     "pi0":      "Physical Intelligence π0 / π0.5",
     "gr00t":    "NVIDIA GR00T N1.5 / N1.7",
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
+    # Dataset readers register under the ``emboviz.readers`` group but
+    # install into a runtime venv identically — same command, same flow.
+    "lerobot":  "LeRobot dataset reader (isolated; reads v2.x datasets)",
 }
 
 

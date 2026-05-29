@@ -111,6 +111,7 @@ class VLAModelHandler:
         return {
             "static_metadata":               self._static_metadata,
             "predict":                       self._predict,
+            "predict_batch":                 self._predict_batch,
             "extract_attention":             self._extract_attention,
             "extract_hidden_states":         self._extract_hidden_states,
             "extract_ffn_activations":       self._extract_ffn_activations,
@@ -140,6 +141,12 @@ class VLAModelHandler:
     def _predict(self, args: dict) -> dict:
         scene = wire.decode_scene(args["scene"])
         return wire.encode_action_result(self._m.predict(scene))
+
+    def _predict_batch(self, args: dict) -> list:
+        scenes = [wire.decode_scene(s) for s in args["scenes"]]
+        n_samples = int(args.get("n_samples", 1))
+        results = self._m.predict_batch(scenes, n_samples)
+        return [wire.encode_action_result(r) for r in results]
 
     def _extract_attention(self, args: dict) -> dict:
         scene = wire.decode_scene(args["scene"])
@@ -195,6 +202,66 @@ class VLAModelHandler:
 
     def close(self) -> None:
         close = getattr(self._m, "close", None)
+        if callable(close):
+            close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Standard dataset-reader handler — every dataset reader uses this.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class DatasetReaderHandler:
+    """Wire-method dispatcher for any :class:`emboviz_wire.reader_protocol.
+    EpisodeSource` — the dataset-side analogue of :class:`VLAModelHandler`.
+
+    Lives in the isolated reader worker venv (which has the heavy dataset
+    library, e.g. lerobot). It is the boundary between msgpack bytes and
+    the typed Scene / Trajectory objects: it encodes whatever the reader
+    produces and ships it to the host. Reader packages just write::
+
+        serve(lambda **kw: DatasetReaderHandler(build_my_source(**kw)),
+              name="lerobot")
+    """
+
+    def __init__(self, source):
+        self._s = source
+
+    @property
+    def methods(self) -> dict[str, Callable[[dict], Any]]:
+        return {
+            "static_metadata":  self._static_metadata,
+            "list_episodes":    self._list_episodes,
+            "load_episode":     self._load_episode,
+            "load_episodes":    self._load_episodes,
+            "load_trajectory":  self._load_trajectory,
+            "all_instructions": self._all_instructions,
+        }
+
+    def _static_metadata(self, _: dict) -> dict:
+        return {"name": str(getattr(self._s, "name", "") or "")}
+
+    def _list_episodes(self, _: dict) -> list:
+        return [str(e) for e in self._s.list_episodes()]
+
+    def _load_episode(self, args: dict) -> list:
+        scenes = self._s.load_episode(str(args["episode_id"]))
+        return [wire.encode_scene(s) for s in scenes]
+
+    def _load_episodes(self, args: dict) -> dict:
+        indices = [int(i) for i in args["episode_indices"]]
+        out = self._s.load_episodes(indices)
+        return {int(k): [wire.encode_scene(s) for s in v] for k, v in out.items()}
+
+    def _load_trajectory(self, args: dict) -> dict:
+        traj = self._s.load_trajectory(int(args["episode_idx"]))
+        return wire.encode_trajectory(traj)
+
+    def _all_instructions(self, _: dict) -> list:
+        return [str(x) for x in self._s.all_instructions()]
+
+    def close(self) -> None:
+        close = getattr(self._s, "close", None)
         if callable(close):
             close()
 

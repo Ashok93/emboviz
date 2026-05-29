@@ -3,17 +3,22 @@
 # (mostly pip + the first SAM 3 / OpenVLA / π0 checkpoint download).
 #
 # Layout (after running this script):
-#   /root/.venv-emboviz                     main venv — core + adapter shims (Python 3.11, no torch)
+#   /root/.venv-emboviz                     main venv — core + LIGHTWEIGHT shims only
+#                                           (Python 3.11; NO torch, NO lerobot — every heavy
+#                                           dep lives in an isolated runtime venv below)
 #   /root/venvs/openvla                     OpenVLA-7B runtime venv
 #   /root/venvs/oft                         OpenVLA-OFT runtime venv
 #   /root/venvs/pi0                         π0 / π0.5 runtime venv
 #   /root/venvs/gr00t                       GR00T-N1.7 runtime venv
 #   /root/venvs/sam3                        SAM 3 detector runtime venv (Python 3.12)
+#   /root/venvs/lerobot                     LeRobot dataset-reader venv (lerobot 0.3.x / v2.1)
 #
-# All five runtime venvs are independent — each pins its own Python +
-# torch + transformers + adapter deps. ZeroMQ over Unix sockets is the
+# Every runtime venv is independent — each pins its own Python + torch +
+# transformers / lerobot + adapter deps. ZeroMQ over Unix sockets is the
 # only thing that talks between them; the wire is bytes / msgpack so
-# Python versions don't have to match.
+# Python versions don't have to match. The host stays free of torch AND
+# lerobot (notably lerobot's rerun-sdk<0.27 pin, which would collide with
+# core's own rerun>=0.32 .rrd exporter).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +42,9 @@ bash "$DIR/04_install_gr00t_venv.sh"
 echo "########## 05 sam3 ##########"
 bash "$DIR/05_install_sam3_venv.sh"
 
+echo "########## 06 lerobot reader ##########"
+bash "$DIR/06_install_lerobot_venv.sh"
+
 echo "########## ALL DONE ##########"
 cat <<'EOM'
 
@@ -49,9 +57,8 @@ between analyze calls):
     /root/venvs/pi0/bin/emboviz-pi0 serve &
     /root/venvs/gr00t/bin/emboviz-gr00t serve &
 
-Then run an analysis:
+Then run an analysis (one config file describes the whole run — model,
+dataset mapping, episodes, memorization target, output):
 
-    /root/.venv-emboviz/bin/emboviz analyze \
-        --model openvla --dataset bridge --episodes 537 \
-        --target "the cloth" --output /root/outputs/openvla
+    /root/.venv-emboviz/bin/emboviz analyze --config configs/openvla-bridge.yaml
 EOM

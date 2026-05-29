@@ -11,7 +11,7 @@ keeps every single-scene diagnostic trivially trajectory-able.
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np

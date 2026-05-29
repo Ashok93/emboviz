@@ -20,7 +20,6 @@ from emboviz.perturb.instruction._text_utils import (
 )
 from emboviz.taxonomy.object_categories import (
     OBJECT_CATEGORIES,
-    category_for_word,
 )
 
 

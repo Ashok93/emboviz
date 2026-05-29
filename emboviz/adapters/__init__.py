@@ -31,11 +31,13 @@ from emboviz.adapters.client import (
     AdapterRpcError,
     RpcClient,
     ZMQAdapterClient,
+    ZMQReaderClient,
     default_endpoint,
 )
 from emboviz.adapters.lifecycle import (
     WorkerHandle,
     connect,
+    connect_reader,
     install_venv,
     shutdown,
     venv_path,
@@ -44,7 +46,13 @@ from emboviz.adapters.lifecycle import (
 )
 from emboviz.adapters.protocol import AdapterSpec
 from emboviz.adapters.registry import find_adapter, list_adapters
-from emboviz.adapters.server_base import ServiceHandler, VLAModelHandler, serve
+from emboviz.adapters.reader_registry import find_reader, list_readers
+from emboviz.adapters.server_base import (
+    DatasetReaderHandler,
+    ServiceHandler,
+    VLAModelHandler,
+    serve,
+)
 
 __all__ = [
     "AdapterRpcError",
@@ -52,13 +60,18 @@ __all__ = [
     "RpcClient",
     "ServiceHandler",
     "VLAModelHandler",
+    "DatasetReaderHandler",
     "WorkerHandle",
     "ZMQAdapterClient",
+    "ZMQReaderClient",
     "connect",
+    "connect_reader",
     "default_endpoint",
     "find_adapter",
+    "find_reader",
     "install_venv",
     "list_adapters",
+    "list_readers",
     "serve",
     "shutdown",
     "venv_path",

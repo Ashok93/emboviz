@@ -29,5 +29,5 @@ emboviz analyze --config configs/openvla-bridge.yaml
 
 The run is described entirely by the config (model + checkpoint, dataset
 mapping, diagnostics). Copy the template and set `model.kwargs.hf_repo` to
-your own fine-tune. The diagnostic suite runs the model in the isolated ZMQ
+your own fine-tune. The diagnostics run the model in the isolated ZMQ
 worker venv; it never imports into your main environment.

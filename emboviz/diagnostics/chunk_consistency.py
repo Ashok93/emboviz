@@ -153,6 +153,10 @@ class ChunkConsistencyDiagnostic(Diagnostic):
         frame_indices = list(trajectory.frame_indices)
         raw_deltas: list[float] = []
         frame_gaps: list[int] = []
+        # Dataset-frame index of frame t for each comparable pair — keyed to
+        # the chunk that MADE the prediction. Lets reporters plot
+        # disagreement against the frame where it originates.
+        comparable_frame_indices: list[int] = []
         uncomparable: list[tuple[int, int]] = []   # (t, gap) pairs the chunk couldn't reach
         for t in range(len(chunks) - k):
             gap = int(frame_indices[t + k] - frame_indices[t])
@@ -174,6 +178,7 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 float(np.linalg.norm(pred_for_next - actual_at_next))
             )
             frame_gaps.append(gap)
+            comparable_frame_indices.append(int(frame_indices[t]))
 
         if not raw_deltas:
             return self._not_applicable(
@@ -322,14 +327,15 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 for t, d in enumerate(normalized)
             },
             raw={
-                "compare_lookahead":     k,
-                "chunk_lengths":         chunk_lens,
-                "raw_deltas":            raw_arr.tolist(),
-                "normalized_deltas":     normalized.tolist(),
-                "raw_mean_delta":        raw_mean,
-                "raw_max_delta":         raw_max,
-                "noise_floor":           self.noise_floor,
-                "grounded_threshold":    self.grounded_threshold,
-                "calibration_used":      self.calibration.to_summary() if self.calibration else None,
+                "compare_lookahead":      k,
+                "chunk_lengths":          chunk_lens,
+                "raw_deltas":             raw_arr.tolist(),
+                "normalized_deltas":      normalized.tolist(),
+                "per_pair_frame_indices": comparable_frame_indices,
+                "raw_mean_delta":         raw_mean,
+                "raw_max_delta":          raw_max,
+                "noise_floor":            self.noise_floor,
+                "grounded_threshold":     self.grounded_threshold,
+                "calibration_used":       self.calibration.to_summary() if self.calibration else None,
             },
         )

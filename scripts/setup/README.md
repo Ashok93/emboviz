@@ -34,13 +34,20 @@ bash scripts/setup/01_install_openvla_venv.sh   # OpenVLA-7B on Bridge
 bash scripts/setup/02_install_oft_venv.sh       # OpenVLA-OFT on LIBERO
 bash scripts/setup/03_install_pi0_venv.sh       # pi0 on LIBERO
 bash scripts/setup/04_install_gr00t_venv.sh     # GR00T-N1.7 on DROID
+bash scripts/setup/05_install_sam3_venv.sh      # SAM 3 detector (memorization target)
+bash scripts/setup/06_install_lerobot_venv.sh   # LeRobot dataset reader (isolated)
 ```
+
+Each model script also installs the lightweight host shims (`emboviz-wire`,
+`emboviz`, `emboviz-lerobot`, `emboviz-<model>`); `06` builds the isolated
+LeRobot reader venv. The reader is also auto-built on first `analyze` if you
+skip `06`.
 
 ## What's NOT installed automatically
 
 - **HF_TOKEN**: put your own in `/root/emboviz/.env`. Required for π0/GR00T (gated repos: `nvidia/Cosmos-Reason2-2B`).
 - **Model checkpoints**: downloaded lazily on first inference (HF cache → `$HF_HOME=/root/hf_cache`).
-- **Datasets**: same. lerobot lazy-fetches Bridge/LIBERO from HF the first time we run.
+- **Datasets**: same. The isolated LeRobot reader venv lazy-fetches Bridge/LIBERO from HF the first time we run.
 - **droid_sample**: shipped with Isaac-GR00T; the GR00T install script clones the repo which brings it.
 
 ## After install, verify

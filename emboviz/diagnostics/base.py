@@ -12,7 +12,7 @@ from typing import Optional
 
 from emboviz.core.results import DiagnosticResult
 from emboviz.core.types import Scene
-from emboviz.models.protocol import Capability, NotSupported, VLAModel
+from emboviz.models.protocol import Capability, VLAModel
 
 
 class Diagnostic(ABC):

@@ -881,11 +881,6 @@ raw distance against two model-specific anchors:
   the dataset pool (not zeros, not last-frame). Zero state crashes
   the 6D-rotation decoder.
 
-### SmolVLA (registered but not in primary 4-model suite)
-- **Output**: per LeRobot policy interface. Action chunk via
-  diffusion. STOCHASTIC.
-- **Capabilities**: INFERENCE only.
-
 ---
 
 ## 8. Master citation list (sorted by topic, then year)

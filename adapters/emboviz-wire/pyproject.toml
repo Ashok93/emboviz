@@ -20,6 +20,7 @@ dependencies = [
     "msgpack>=1.0",     # standardized serialization format
     "msgpack-numpy>=0.4.8",  # ndarray ext-type (stable encoding)
     "Pillow>=10.0",     # RGBImage carries PIL images
+    "click>=8.1",       # the `serve` worker CLI (emboviz_wire.server)
 ]
 
 [build-system]

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-import numpy as np
 from PIL import Image
 
 from emboviz.core.types import PerturbedScene, Scene, resolve_cameras

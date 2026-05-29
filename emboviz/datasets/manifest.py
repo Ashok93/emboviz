@@ -15,38 +15,27 @@ What the manifest declares (uniform across formats):
   • ``instruction`` — {from: tasks} | {key: ...} | {text: ...}
 
 The dataset's own schema (dims + per-dim names) is read from the source —
-never hand-typed, never guessed:
-  • LeRobot — ``meta/info.json`` ``features``.
-  • HDF5    — the first demo's array shapes.
-  • RLDS    — the TFDS feature spec (``builder.info.features``), without
-    materializing data.
+never hand-typed, never guessed.
 
-Format coverage — the three real "saved episode" dataset formats, each
-self-describing, all fully manifest-driven:
-  • ``lerobot`` — schema from info.json.
-  • ``hdf5``    — schema from the first demo's shapes.
-  • ``rlds``    — schema from the TFDS feature spec.
+Format coverage — the three real "saved episode" dataset formats:
+  • ``lerobot`` — read by the ISOLATED ``emboviz-lerobot`` worker (its
+    venv pins a lerobot version that matches the dataset's on-disk
+    format; core never imports lerobot). ``build_source`` connects to
+    that worker and returns its :class:`ZMQReaderClient`, which IS an
+    EpisodeSource over the wire.
+  • ``hdf5``    — read in-process (h5py is light + conflict-free).
+  • ``rlds``    — read in-process (the ``rlds`` extra pulls tensorflow).
 
-Rerun (.rrd) and MCAP/rosbag2 are *recording / debugging-viz* formats,
-not dataset formats — they are deliberately not input formats here.
+The shared profile / gripper-extractor construction lives in
+``emboviz_wire.dataset_build`` so the in-process readers here and the
+isolated lerobot worker build profiles from the SAME code.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Optional
 
-import numpy as np
-
-from emboviz.core.profile import (
-    ActionSpec,
-    CameraSpec,
-    GripperSpec,
-    RobotProfile,
-    StateSpec,
-)
+from emboviz_wire.dataset_build import build_profile, make_gripper_extractor
 from emboviz.datasets.base import EpisodeSource
 
 
@@ -88,152 +77,34 @@ def build_source(
     )
 
 
-# ── shared profile + gripper construction ────────────────────────────
-
-def _parse_names(names_field: Any) -> Optional[list[str]]:
-    """LeRobot ``names`` is one of: {"motors": [...]} / a flat list / null.
-    Return a clean list[str] or None — never fabricate."""
-    if names_field is None:
-        return None
-    if isinstance(names_field, dict):
-        # take the single declared list (motors / axes / ...)
-        for v in names_field.values():
-            if isinstance(v, list):
-                return [str(x) for x in v]
-        return None
-    if isinstance(names_field, (list, tuple)):
-        return [str(x) for x in names_field]
-    return None
-
-
-def _build_profile(
-    *, name: str, cameras: dict[str, str],
-    state_dim: Optional[int], state_names: Optional[list[str]], convention: Optional[str],
-    action_dim: Optional[int], action_names: Optional[list[str]],
-    gripper: Optional[dict],
-) -> RobotProfile:
-    state_spec = None
-    if state_dim is not None:
-        if not convention:
-            raise ValueError(
-                "dataset.state is present but state.convention is missing — "
-                "the format does not encode joint-angles vs ee-pose, so you "
-                "must state it (we refuse to guess)."
-            )
-        state_spec = StateSpec(dim=int(state_dim), convention=convention,
-                               joint_names=state_names)
-    action_spec = (
-        ActionSpec(dim=int(action_dim), dim_names=action_names)
-        if action_dim is not None else None
-    )
-    gripper_spec = None
-    if gripper is not None:
-        gripper_spec = GripperSpec(
-            kind=gripper.get("kind", "parallel_jaw"),
-            units=gripper.get("units", "unit"),
-            range=tuple(gripper.get("range", (0.0, 1.0))),
-        )
-    return RobotProfile(
-        name=name,
-        cameras=[CameraSpec(name=role) for role in cameras],
-        state=state_spec,
-        gripper=gripper_spec,
-        action=action_spec,
-    )
-
-
-def _make_gripper_extractor(
-    gripper: Optional[dict], state_names: Optional[list[str]],
-) -> Callable[[np.ndarray], tuple[np.ndarray, Optional[float]]]:
-    """Return an extractor (state) → (proprio, gripper_value).
-
-    The proprio is the FULL state vector (models consume the whole state
-    they were trained on); the gripper value is pulled from the declared
-    dim. ``gripper.source`` is an int index or a per-dim name resolved
-    against the state names. No gripper → (state, None)."""
-    if gripper is None:
-        return lambda s: (s, None)
-    src = gripper["source"]
-    if isinstance(src, str):
-        if not state_names or src not in state_names:
-            raise ValueError(
-                f"gripper.source={src!r} is a name but it is not in the "
-                f"state's per-dim names ({state_names}). Use the integer "
-                "index instead, or fix the name."
-            )
-        idx = state_names.index(src)
-    else:
-        idx = int(src)
-
-    def extractor(state: np.ndarray) -> tuple[np.ndarray, Optional[float]]:
-        if idx >= state.size:
-            raise ValueError(
-                f"gripper.source index {idx} is out of range for a "
-                f"{state.size}-dim state vector."
-            )
-        return state.copy(), float(state[idx])
-
-    return extractor
-
-
-# ── LeRobot ───────────────────────────────────────────────────────────
-
-def _read_lerobot_info(path: str) -> dict:
-    """Read ``meta/info.json`` for a LeRobot dataset — local dir or HF repo.
-    Uses single-file ``hf_hub_download`` (no full-tree enumeration)."""
-    if os.path.isdir(path):
-        info_path = Path(path) / "meta" / "info.json"
-        if not info_path.is_file():
-            raise FileNotFoundError(f"{info_path} not found in local dataset")
-        return json.loads(info_path.read_text())
-    from huggingface_hub import hf_hub_download
-    p = hf_hub_download(repo_id=path, filename="meta/info.json", repo_type="dataset")
-    return json.loads(Path(p).read_text())
-
+# ── LeRobot — isolated reader worker ──────────────────────────────────
 
 def _build_lerobot(path, cameras, state, action, gripper, instruction, n_episodes):
-    from emboviz.datasets.lerobot import LeRobotEpisodeSource
+    """Connect to the isolated ``emboviz-lerobot`` reader worker.
 
-    info = _read_lerobot_info(path)
-    features = info.get("features", {})
+    Core does NOT read LeRobot data in-process (lerobot's transitive
+    pins — notably ``rerun-sdk<0.27`` — would collide with core's own
+    .rrd exporter). Instead we spawn the reader worker in its own venv
+    and return its :class:`ZMQReaderClient`, an ``EpisodeSource`` whose
+    methods round-trip over the wire. The worker reads ``info.json`` and
+    builds the RobotProfile itself; all the dataset config travels as the
+    worker's construction kwargs.
+    """
+    from emboviz.adapters import connect_reader
 
-    state_key = state["key"] if state else None
-    action_key = action["key"] if action else "action"
-    state_dim = state_names = None
-    if state_key is not None:
-        feat = features.get(state_key)
-        if feat is None:
-            raise KeyError(
-                f"dataset.state.key={state_key!r} is not a feature in "
-                f"{path}'s info.json. Available: {sorted(features)}."
-            )
-        state_dim = feat["shape"][0]
-        state_names = _parse_names(feat.get("names"))
-    action_dim = action_names = None
-    if action_key in features:
-        action_dim = features[action_key]["shape"][0]
-        action_names = _parse_names(features[action_key].get("names"))
-
-    profile = _build_profile(
-        name=info.get("robot_type") or path,
-        cameras=cameras,
-        state_dim=state_dim, state_names=state_names,
-        convention=(state or {}).get("convention"),
-        action_dim=action_dim, action_names=action_names,
-        gripper=gripper,
-    )
-    return LeRobotEpisodeSource(
-        repo_id=path,
-        profile=profile,
-        image_keys=dict(cameras),
-        state_key=state_key,
-        action_key=action_key,
-        gripper_extractor=_make_gripper_extractor(gripper, state_names),
-        n_episodes=int(n_episodes or info.get("total_episodes", 1_000_000)),
-    )
+    reader_kwargs = {
+        "path": path,
+        "cameras": dict(cameras),
+        "state": state,
+        "action": action,
+        "gripper": gripper,
+        "instruction": instruction,
+        "n_episodes": n_episodes,
+    }
+    return connect_reader("lerobot", reader_kwargs=reader_kwargs)
 
 
-# ── HDF5 ──────────────────────────────────────────────────────────────
+# ── HDF5 — in-process (h5py is light, conflict-free) ──────────────────
 
 def _build_hdf5(path, cameras, state, action, gripper, instruction, extra):
     from emboviz.datasets.hdf5 import HDF5EpisodeSource
@@ -263,7 +134,7 @@ def _build_hdf5(path, cameras, state, action, gripper, instruction, extra):
         if action_key in demo0:
             action_dim = int(demo0[action_key].shape[-1])
 
-    profile = _build_profile(
+    profile = build_profile(
         name=extra.get("robot_type", path),
         cameras=cameras,
         state_dim=state_dim, state_names=None,   # HDF5 carries no per-dim names
@@ -283,11 +154,11 @@ def _build_hdf5(path, cameras, state, action, gripper, instruction, extra):
         instruction_attr=instr_attr,
         demo_group=demo_group,
         profile=profile,
-        gripper_extractor=_make_gripper_extractor(gripper, None),
+        gripper_extractor=make_gripper_extractor(gripper, None),
     )
 
 
-# ── RLDS / TFDS (Open-X-Embodiment) ───────────────────────────────────
+# ── RLDS / TFDS (Open-X-Embodiment) — in-process ──────────────────────
 
 def _build_rlds(path, cameras, state, action, gripper, instruction, extra):
     """Build an RLDSEpisodeSource. ``path`` is the TFDS builder name (the
@@ -344,7 +215,7 @@ def _build_rlds(path, cameras, state, action, gripper, instruction, extra):
     if action_key in step_dict:
         action_dim = int(step_dict[action_key].shape[-1])
 
-    profile = _build_profile(
+    profile = build_profile(
         name=path,
         cameras=cameras,
         state_dim=state_dim, state_names=None,   # TFDS Tensor features carry no per-dim names
@@ -366,5 +237,5 @@ def _build_rlds(path, cameras, state, action, gripper, instruction, extra):
         action_key=action_key,
         instruction_key=instruction_key,
         profile=profile,
-        gripper_extractor=_make_gripper_extractor(gripper, None),
+        gripper_extractor=make_gripper_extractor(gripper, None),
     )

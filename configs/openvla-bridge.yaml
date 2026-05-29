@@ -13,7 +13,7 @@ model:
     unnorm_key: bridge_orig              # action de-normalization stats key
 
 dataset:
-  format: lerobot                        # lerobot | hdf5 | rlds | mcap | rerun
+  format: lerobot                        # lerobot | hdf5 | rlds (the 3 dataset formats)
   path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id, or a local dir
 
   # model's logical camera role  ->  this dataset's actual image key.

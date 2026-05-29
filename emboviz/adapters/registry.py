@@ -9,9 +9,7 @@ small spec module.
 
 from __future__ import annotations
 
-import importlib
 from importlib import metadata as importlib_metadata
-from typing import Optional
 
 from emboviz.adapters.protocol import AdapterSpec
 

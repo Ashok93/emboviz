@@ -20,7 +20,7 @@ Two dimensions of declarative metadata travel on every adapter:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Flag, auto
 from typing import TYPE_CHECKING, Optional
 
@@ -33,6 +33,7 @@ from emboviz_wire.types import (
     HiddenStates,
     Scene,
     TokenSelector,
+    average_action_results,
 )
 
 if TYPE_CHECKING:
@@ -205,6 +206,38 @@ class VLAModel(ABC):
         of length `self.action_dim`, even if the model internally produces
         discrete action tokens or flow-matching trajectories.
         """
+
+    def predict_batch(
+        self, scenes: list[Scene], n_samples: int = 1,
+    ) -> list[ActionResult]:
+        """Predict actions for many scenes at once — the parallel hot path.
+
+        Returns one ``ActionResult`` per input scene, **in input order**,
+        each averaged over ``n_samples`` independent samples (for stochastic
+        policies). Semantically identical to averaging ``n_samples`` calls of
+        :meth:`predict` per scene — batching changes throughput only, never
+        the numbers. The diagnostics that fan out hundreds of perturbed
+        scenes (sensitivity grid, modality dropout, memorization fills) call
+        this so the GPU runs one batched forward instead of N round-trips.
+
+        This default loops :meth:`predict` so every adapter works
+        unmodified. An adapter that runs a TRUE batched GPU forward
+        overrides this and advertises ``Capability.BATCH_INFERENCE``. The
+        override **owns its batch-size policy** (memory-aware chunking +
+        OOM-backoff): callers submit the full list and never pass a batch
+        size — that keeps the same call site correct on a 12 GB laptop and
+        an 80 GB datacenter GPU.
+        """
+        if n_samples < 1:
+            raise ValueError(
+                f"predict_batch: n_samples must be >= 1, got {n_samples}"
+            )
+        out: list[ActionResult] = []
+        for scene in scenes:
+            out.append(average_action_results(
+                [self.predict(scene) for _ in range(n_samples)]
+            ))
+        return out
 
     # ----- internal inspection (capability-gated) -------------------------
 

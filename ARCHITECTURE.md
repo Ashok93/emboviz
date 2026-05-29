@@ -2,272 +2,216 @@
 
 ## Goal
 
-A **diagnostic and interpretability framework for robot policies** (VLAs and successor architectures) where:
+A model-agnostic diagnostic / interpretability framework for VLA robot
+policies. The engine — datasets, perturbers, metrics, diagnostics,
+exporters — knows nothing about any specific model; each VLA family is a
+self-contained adapter package. Adding a model is one adapter package;
+adding a diagnostic or a dataset format is one file.
 
-- The **core engine** — algorithms, perturbations, metrics, diagnostics, reporters — is model-agnostic.
-- The **per-model adapters** are the only place model internals leak in.
-- Adding a new VLA = one adapter file. Adding a new diagnostic technique = one file in `core/`. Adding a new visualization = one file in `viz/`.
-- The interpretability research field moves fast; new techniques emerge monthly. The architecture must absorb new methods without refactors.
+## Two processes, one wire
 
-## Design principles
-
-1. **Separation of concerns** — models, perturbations, metrics, diagnostics, coverage, viz, datasets are independent.
-2. **Composition over inheritance** — a "diagnostic" is a recipe `(Perturber, Metric, Runner)`, not a class hierarchy.
-3. **Capability-based interfaces** — adapters declare what they support; diagnostics check before running.
-4. **Pure functions in core** — side-effects (I/O, GPU work) live in adapters, datasets, and reporters only.
-5. **Optional heavy deps** — captum, SAM2, InstructPix2Pix import lazily and only when needed.
-6. **Type-safe + dataclass-heavy** — Protocols, ABCs, dataclasses; minimum cleverness.
-7. **Uniform result shape** — every diagnostic returns a `DiagnosticResult` so reporters and dashboards consume one schema.
-8. **Reproducibility** — every diagnostic accepts a seed; results are hashed.
-
-## Layers
+The hard constraint is dependency conflict: OpenVLA pins transformers
+4.40–4.49, OFT a vendored transformers fork, π0 transformers 4.53, GR00T
+4.57, SAM 3 ≥4.56 — none coexist in one venv. So emboviz runs as **two
+kinds of process**:
 
 ```
-                         ┌─────────────────────┐
-                         │  Reporters / Viz    │  Layer 5: render results
-                         ├─────────────────────┤
-                         │  Suites             │  Layer 4: preset diagnostic batteries
-                         ├─────────────────────┤
-                         │  Diagnostics        │  Layer 3: orchestrate perturb + metric + runner
-                         ├─────────────────────┤
-            ┌────────────┼─────────┬───────────┤
-            │ Perturbers │ Metrics │ Probes    │  Layer 2: primitives, composable
-            ├────────────┴─────────┴───────────┤
-            │  VLAModel Protocol               │  Layer 1: interface
-            ├──────────────────────────────────┤
-            │  Adapters: openvla, pi0, ...     │  Layer 1: model-specific impls
-            ├──────────────────────────────────┤
-            │  core/types, distances           │  Layer 0: pure data + math
-            └──────────────────────────────────┘
-
-                    Datasets, Coverage, Taxonomy live alongside,
-                    not as a layer
+ host venv (emboviz)                 isolated runtime venvs (~/.emboviz/venvs/<name>)
+ ┌───────────────────────┐           ┌──────────────────────────────────────┐
+ │ emboviz core          │  msgpack  │ emboviz-openvla  → torch + transformers│
+ │  + adapter shims      │   over    │ emboviz-oft      → moojink fork        │
+ │  + reader shim        │ ZMQ/UDS   │ emboviz-pi0      → openpi              │
+ │  + emboviz-wire       │ ◀───────▶ │ emboviz-gr00t    → Isaac-GR00T         │
+ │  (NO torch/lerobot)   │  (bytes)  │ emboviz-sam3     → SAM 3 (Python 3.12) │
+ │                       │           │ emboviz-lerobot  → lerobot (dataset    │
+ │                       │           │                    reader, v2.x)       │
+ └───────────────────────┘           └──────────────────────────────────────┘
+        DEALER                                      ROUTER (one per worker)
 ```
 
-## Directory layout
+* The **host** holds the engine (diagnostics, exporters, orchestration) and
+  a thin shim per installed adapter AND per installed dataset reader. It
+  carries **no torch and no lerobot** — lerobot's transitive `rerun-sdk<0.27`
+  pin would collide with the host's own `rerun>=0.32` `.rrd` exporter, so
+  the LeRobot reader is isolated like a model (see below).
+* Each **adapter worker** loads one model in its own venv (its own Python
+  version, its own torch/transformers pins) and serves it over a ZMQ
+  ROUTER on a Unix socket.
+* The **LeRobot dataset reader** is isolated the SAME way: `emboviz-lerobot`
+  is a thin host shim; its `lerobot` install lives in its own reader venv
+  and serves universal `Scene`/`Trajectory` objects over the wire (the
+  `EpisodeSource` contract) — the dataset-side mirror of a model worker.
+  HDF5/RLDS readers (no conflicting pins) stay in-process in the host.
+* The wire is **msgpack over ZeroMQ** — bytes, not pickle — so the two
+  sides may run different Python / numpy / transformers versions. This is
+  the `emboviz-wire` package, the only emboviz package a worker installs.
+
+`emboviz analyze` resolves an adapter alias to its `AdapterSpec`,
+attaches to a running worker (or spawns one in its runtime venv and waits
+for `ping`), and drives it through a `VLAModel`-shaped client. Diagnostics
+never import a worker's model code; they call the `VLAModel` protocol.
+
+## Packages
 
 ```
-emboviz/
-├── core/                     # Layer 0 — pure foundation
-│   ├── types.py              # Scene, Action, ActionResult, AttentionMaps, HiddenStates, ...
-│   ├── distances.py          # action distance metrics
-│   ├── divergences.py        # JS, KL, Spearman
-│   ├── seeding.py
-│   └── results.py            # DiagnosticResult schema
-│
-├── models/                   # Layer 1 — model abstraction + adapters
-│   ├── protocol.py           # VLAModel ABC + Capability flags
-│   ├── registry.py           # name → adapter factory
-│   ├── openvla.py            # OpenVLAAdapter
-│   ├── pi0.py                # future
-│   └── mock.py               # MockVLA for testing diagnostics without GPU
-│
-├── perturb/                  # Layer 2 — perturbations
-│   ├── base.py               # Perturber Protocol + PerturbedScene type
-│   ├── instruction/
-│   │   ├── noun_swap.py
-│   │   ├── preposition_swap.py
-│   │   ├── color_swap.py
-│   │   ├── count_swap.py
-│   │   ├── negation.py
-│   │   ├── refusal.py
-│   │   ├── empty.py
-│   │   └── ood_task.py
-│   └── image/
-│       ├── occlusion.py            # patch occlusion (no models)
-│       ├── viewpoint.py            # homography proxy
-│       ├── lighting.py             # gamma / HSV / CLAHE
-│       ├── distractor.py           # paste colored rect / inpaint
-│       ├── target_remove.py        # mask-out target region
-│       ├── recolor.py              # OPTIONAL: SAM+IP2P
-│       └── noise.py                # gaussian noise / sensor sim
-│
-├── metrics/                  # Layer 2 — metrics
-│   ├── base.py               # Metric Protocol
-│   ├── action_divergence.py
-│   ├── instruction_sensitivity.py
-│   ├── attention_js.py
-│   ├── pointing_game.py
-│   ├── ablation_drop.py
-│   └── probe_confidence.py
-│
-├── probes/                   # Layer 2 — linear probes on hidden states
-│   ├── base.py
-│   ├── trainer.py
-│   ├── store.py              # save / load
-│   └── presets/
-│       ├── object_presence.py
-│       ├── object_color.py
-│       └── object_position.py
-│
-├── diagnostics/              # Layer 3 — orchestration
-│   ├── base.py               # Diagnostic ABC + DiagnosticResult
-│   ├── counterfactual.py     # perturb + measure
-│   ├── sweep.py              # parametric sweep (occlusion %, distractor count, ...)
-│   ├── attention.py          # cross-modal attention diagnostics
-│   ├── sensitivity_map.py    # BYOVLA-style per-region ablation
-│   ├── memorization.py       # target-removed-still-acts test
-│   ├── concept_decomp.py     # FFN logit-lens analysis
-│   ├── ablation.py           # neuron-ablation diagnostics
-│   └── probe.py              # probe-based confidence
-│
-├── suites/                   # Layer 4 — preset batteries
-│   ├── base.py               # Suite class
-│   ├── language_grounding.py # ALL language-axis diagnostics
-│   ├── visual_robustness.py  # ALL vision-axis diagnostics
-│   ├── full_profile.py       # everything
-│   └── quick_smoke.py        # minimal smoke test
-│
-├── coverage/                 # Adjacent — dataset coverage
-│   ├── text_analyzer.py
-│   └── gap_detector.py
-│
-├── taxonomy/                 # Adjacent — canonical lists
-│   ├── failure_modes.py
-│   ├── object_categories.py
-│   └── spatial_prepositions.py
-│
-├── datasets/                 # Adjacent — dataset adapters
-│   ├── base.py               # EpisodeSource Protocol
-│   ├── lerobot_bridge.py
-│   └── custom.py
-│
-├── viz/                      # Layer 5 — plotting primitives
-│   ├── overlays.py
-│   ├── arrows.py
-│   ├── bars.py
-│   ├── grids.py
-│   └── stitch.py             # PIL section stitching
-│
-├── reports/                  # Layer 5 — high-level reporters
-│   ├── base.py               # Reporter Protocol
-│   ├── verdict_card.py       # the killer single-PNG output
-│   ├── failure_matrix.py     # per-axis grid
-│   ├── markdown.py
-│   ├── json_export.py
-│   └── comparison.py         # model-vs-model diff
-│
-└── cli/                      # Layer 6 — user entry points
-    ├── run_diagnostic.py
-    ├── run_suite.py
-    ├── run_battery.py
-    ├── compare_models.py
-    └── train_probes.py
+emboviz-wire/            the shared contract (host AND every worker install it)
+  types                  Scene, Observations, ActionResult, AttentionMaps, Trajectory, ...
+  observations/          RGBImage, Proprioception, GripperState, ... (typed, unit-aware)
+  profile                RobotProfile (cameras, state convention, gripper, action)
+  model_protocol         VLAModel ABC + Capability flags + RequiredInputs (model side)
+  reader_protocol        EpisodeSource ABC (dataset side — mirror of VLAModel)
+  dataset_build          build_profile / make_gripper_extractor (shared by all readers)
+  wire                   msgpack encode/decode for every wired type (Scene carries profile)
+  client / server        ZMQ DEALER clients (ZMQAdapterClient, ZMQReaderClient) +
+                         ROUTER serve() loop + VLAModelHandler + DatasetReaderHandler
+  handler                AdapterSpec (what a worker venv needs + how to launch it)
+
+adapters/emboviz-<name>/ one per backend: a shim (AdapterSpec + server entry
+                         point) the host installs, plus the heavy code that
+                         runs only inside the runtime venv.
+                         openvla · oft · pi0 · gr00t (VLAs, group emboviz.adapters)
+                         sam3 (detector) · lerobot (dataset reader, group emboviz.readers)
+
+emboviz/                 the host engine (no model deps)
+  core/                  re-exports emboviz_wire types + DiagnosticResult/Finding,
+                         divergences, seeding
+  adapters/              registry + reader_registry (entry-point discovery for
+                         emboviz.adapters / emboviz.readers) + lifecycle
+                         (venv install, connect / connect_reader worker spawn) + shims
+  config.py              RunConfig — one YAML file describes a whole run
+  calibration.py         per-trajectory noise-floor + typical-action anchors
+  diagnostics/           the algorithms (one file each)
+  perturb/               instruction / image / state perturbers
+  metrics/               action divergence, attention JS, pointing game, ...
+  datasets/              manifest builder (lerobot → reader worker; hdf5/rlds in-process)
+  exporters/             Rerun .rrd writer (export_rerun) + failure-moment correlation
+  models/                mock (no GPU) + the in-process model registry
+  probes/ taxonomy/      linear failure-probe training/store + failure-mode taxonomy
+  _internal/             runner (run_story) + multi-episode aggregation + report.md/html
+  cli/                   analyze · list-models · list-datasets · version
+                         · install-<adapter> · convert-pi0
 ```
 
 ## Key contracts
 
-### `VLAModel` (in `models/protocol.py`)
+### `VLAModel` (`emboviz_wire.model_protocol`)
+
+Every adapter implements this; diagnostics call only this.
 
 ```python
 class Capability(Flag):
-    INFERENCE = auto()
-    ATTENTION = auto()
-    HIDDEN_STATES = auto()
-    FFN_ACTIVATIONS = auto()
-    NEURON_ABLATION = auto()
-    PROBABILITY_OUTPUT = auto()
-    GRADIENT = auto()
+    INFERENCE; PROBABILITY_OUTPUT; ATTENTION; HIDDEN_STATES
+    FFN_ACTIVATIONS; FFN_VALUE_VECTORS; VOCAB_LOGIT_LENS
+    NEURON_ABLATION; GRADIENT; BATCH_INFERENCE; CHUNK_PREDICTION
+    ACTIVATION_PATCHING
 
 class VLAModel(ABC):
     model_id: str
-    capabilities: Capability
+    capabilities: Capability         # what the model can EXPOSE
+    required_inputs: RequiredInputs  # what it must CONSUME from a Scene
+    action_dim: int
 
-    def predict(image, instruction) -> ActionResult
-    def predict_with_image(perturbed_image, instruction) -> ActionResult
-    def extract_attention(image, instruction, query: TokenSelector) -> AttentionMaps
-    def extract_hidden_states(image, instruction, layers) -> HiddenStates
-    def extract_ffn_activations(image, instruction, layers) -> dict[int, Tensor]
-    def predict_with_neuron_ablation(image, instruction, ablations) -> ActionResult
-    def find_token_positions(prompt, word) -> list[int]
-    def compare_actions(a, b) -> float    # adapter-defined distance
+    def predict(scene) -> ActionResult
+    def extract_attention(scene, query) -> AttentionMaps          # ATTENTION
+    def extract_hidden_states(scene, layers, query) -> HiddenStates
+    def extract_ffn_activations(scene, layers, query) -> FFNActivations
+    def predict_with_residual_patch(scene, patches, pos) -> ActionResult
+    def predict_with_neuron_ablation(scene, ablations) -> ActionResult
+    def find_token_positions(instruction, word) -> list[int]
+    def compare_actions(a, b) -> float
 ```
 
-Adding π0 = implement these methods on a `Pi0Adapter` class. All diagnostics work immediately.
+`RequiredInputs` declares which cameras + modalities the model reads; the
+runner validates a `Scene` against it before `predict`, and perturbers
+auto-skip modalities the model doesn't consume. Capability-gated methods
+raise `NotSupported` by default, so a diagnostic that needs `ATTENTION`
+skips cleanly on a model that lacks it.
 
-### `Perturber` (in `perturb/base.py`)
+### `AdapterSpec` (`emboviz_wire.handler`)
 
-```python
-class Perturber(Protocol):
-    name: str
-    axis: str           # category for grouping
-    domain: Literal["instruction", "image", "joint"]
+One per adapter package, registered via the `emboviz.adapters`
+entry-point group. Declares the runtime venv's Python version, its
+`runtime_pip` (the heavy deps), env vars, and the `server_module` that
+launches the worker. The host reads it without importing any model code.
 
-    def variants(scene: Scene) -> Iterable[PerturbedScene]
-```
-
-### `Metric` (in `metrics/base.py`)
-
-```python
-class Metric(Protocol):
-    name: str
-
-    def compute(baseline: ActionResult, perturbed: ActionResult) -> float
-    # or
-    def compute_pair(model, scene_a, scene_b) -> float
-```
-
-### `Diagnostic` + `DiagnosticResult`
+### `DiagnosticResult` + `Finding` (`emboviz.core.results`)
 
 ```python
-class Diagnostic(ABC):
-    name: str
-    axis: str
-    required_capabilities: Capability
-
-    def run(model: VLAModel, scene: Scene) -> DiagnosticResult
-
 @dataclass
 class DiagnosticResult:
-    diagnostic_name: str
-    axis: str
+    diagnostic_name; axis; model_id; scene_id
     scalar_score: float
-    severity: Literal["pass", "moderate", "critical"]
-    per_variant: dict[str, float]
-    explanation: str
-    recommendation: Optional[str]
-    raw: dict                # diagnostic-specific data for viz
-    metadata: dict
+    severity: Severity          # INTERNAL sort key — never rendered to users
+    direction: "lower_is_worse" | "higher_is_worse"
+    finding: Finding            # plain-English verdict (observed/meaning/next_step)
+    per_variant: dict; raw: dict; metadata: dict
 ```
 
-Reporters and dashboards consume `DiagnosticResult` only.
+`Finding` is the user-facing verdict (three sentences + raw numbers); the
+`Severity` enum is only used to sort, filter, and colour. Reports never
+print severity words.
 
-### `Suite`
+### `EpisodeSource` (`emboviz_wire.reader_protocol`)
 
-```python
-@dataclass
-class Suite:
-    name: str
-    diagnostics: list[Diagnostic]
+`list_episodes()`, `load_episode(s)`, `load_trajectory(idx) -> Trajectory`,
+`all_instructions()`. The dataset-side contract — mirror of the
+`VLAModel` model-side contract, in the same wire package so an isolated
+reader worker (which has the wire package, not core) implements it.
+One implementation per self-describing format; dims and per-dim names are
+read from the format's own schema, never hand-typed:
 
-    def run(model, scene) -> dict[str, DiagnosticResult]
+* **`lerobot`** → the isolated `emboviz-lerobot` worker; the host gets a
+  `ZMQReaderClient` (an `EpisodeSource` over the wire) via
+  `connect_reader("lerobot", ...)`. Scenes carry their `RobotProfile`
+  across the wire so the host has action dim-names + conventions.
+* **`hdf5`** / **`rlds`** → in-process in the host (no conflicting pins).
+
+Rerun `.rrd` and MCAP are recording / viz formats, not dataset inputs.
+
+### `Diagnostic`, `Perturber`, `Metric`, `Suite`
+
+A `Diagnostic.run(model, scene) -> DiagnosticResult` composes a
+`Perturber` (mutates one input modality) and a `Metric` (scores two
+`ActionResult`s). A `Suite` is an ordered list of diagnostics for the
+in-process composable path (mock / LeRobot policies).
+
+## The `emboviz analyze` path
+
+```
+RunConfig (one YAML)
+  └─ model.adapter ──▶ adapters.connect()  ──▶ ZMQ worker (VLAModel client)
+  └─ dataset ───────▶ datasets.manifest.build_source() ──▶ EpisodeSource
+  └─ analysis ──────▶ _internal.runner.run_story() per episode:
+        calibrate ▸ per-frame baseline + attention ▸ the five diagnostics ▸
+        summary.json + rollout.rrd + report.md/html
+  └─ aggregate across episodes ──▶ aggregate.json / .md / .html
 ```
 
-## How a new technique gets added
+The five shipped diagnostics:
 
-If a new paper drops next month — say "VLA-Watch" (made up) — the integration path is:
+| axis | question |
+|---|---|
+| `vision.memorization` | is the policy looking at the target, or replaying memorized motion? |
+| `input.modality_dropout` | which declared inputs does it actually use? (SHAP-marginal) |
+| `vision.scene_sensitivity` | which image regions drive the action? (occlusion sweep) |
+| `internal.chunk_consistency` | is the multi-step action chunk internally coherent? |
+| `internal.attention_drift` | does internal visual attention stay anchored across frames? |
 
-- **New perturbation?** → add a file in `perturb/instruction/` or `perturb/image/`.
-- **New metric?** → add a file in `metrics/`.
-- **New diagnostic algorithm?** → add a file in `diagnostics/` that composes existing perturbers and metrics, or builds its own primitives.
-- **New attention-analysis trick?** → add a file in `diagnostics/attention.py`, calls `model.extract_attention()` only.
-- **New SAE / probe?** → add a file in `probes/presets/`.
-- **New visualization?** → add a file in `viz/` or `reports/`.
+Every threshold is anchored to a per-trajectory calibration (noise floor +
+typical action magnitude), and every diagnostic refuses a verdict — with a
+stated reason — when its inputs don't meet the method's assumptions.
 
-Nothing in the core hierarchy needs to change. New techniques drop in as additional files.
+## How to extend
 
-## How a new model gets added
+* **New model** → new `adapters/emboviz-<name>/` package: a `VLAModel`
+  subclass + an `AdapterSpec` + a one-line `server.py`. Every applicable
+  diagnostic works immediately; the rest skip on capability.
+* **New diagnostic** → one file in `emboviz/diagnostics/`, returning a
+  `DiagnosticResult`; wire it into `run_story` (the runner).
+* **New dataset format** → either a branch in
+  `datasets/manifest.build_source` (in-process, for conflict-free readers
+  like HDF5/RLDS) or a new isolated reader package + `emboviz.readers`
+  entry point (for a heavy/conflicting reader, like `emboviz-lerobot`).
+* **New perturber / metric / exporter** → one file in the matching package.
 
-- Write one file in `models/`: a class implementing `VLAModel` with the appropriate `Capability` flags.
-- All ~15 existing diagnostics work immediately, gracefully skipping any that need capabilities the new model lacks.
-
-## What this enables for the user
-
-- One command: `emboviz run --model openvla --suite full_profile --episode bridge:0` → 14-axis failure profile + verdict card.
-- Compare two checkpoints: `emboviz compare --models ckpt1.bin ckpt2.bin --suite language_grounding`.
-- CI integration: any diagnostic emits JSON for regression dashboards.
-- Custom workflows: `from emboviz import Diagnostic, Perturber, ...` and compose.
-
----
-
-This is the contract. Implementation lives below.
+Nothing in the core hierarchy changes; new techniques drop in as files.

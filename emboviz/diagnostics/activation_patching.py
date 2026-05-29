@@ -66,7 +66,7 @@ class ActivationPatchingDiagnostic(Diagnostic):
         self.strong_threshold = strong_threshold
         self.moderate_threshold = moderate_threshold
         self.name = f"activation_patching.{perturber.name}"
-        self.axis = f"internal.activation_patching"
+        self.axis = "internal.activation_patching"
 
     def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
         if not self.applicable_to(model):

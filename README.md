@@ -50,7 +50,7 @@ We **surface signals**. You form conclusions. Debugger, not oracle.
  emboviz core +                                 ↑   on its OWN Python version, with its
  emboviz-openvla,                               ↑   OWN torch/transformers/etc. pinned —
  emboviz-oft, ...                               ↑   they never share dependencies.
- — no torch)                                    │
+ — no model deps)                               │
                                                 ├── ~/.emboviz/venvs/pi0     (Python 3.11)
                                                 ├── ~/.emboviz/venvs/gr00t   (Python 3.11)
                                                 ├── ~/.emboviz/venvs/oft     (Python 3.11)
@@ -70,10 +70,21 @@ via `torchcodec` which needs FFmpeg system libraries.
 ### Install (per adapter you actually want)
 
 ```bash
-# Main venv — emboviz core + adapter shims. ~10 KB per shim; no torch.
+# Main venv — emboviz core + lightweight shims (~10 KB each; no model
+# deps, no torch, no lerobot).
 uv venv --python 3.11
-uv pip install emboviz emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
+uv pip install emboviz emboviz-lerobot emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
 ```
+
+`emboviz-lerobot` is the **shim** for the LeRobot dataset reader — its
+heavy `lerobot` install (plus `torch` and lerobot's `rerun-sdk<0.27` pin)
+lives in an **isolated reader venv**, built by `emboviz install-lerobot`,
+*never* in the host. That isolation is deliberate: lerobot's rerun cap
+would otherwise collide with core's own `rerun>=0.32` `.rrd` exporter.
+The reader runs as a ZeroMQ worker and hands the host universal `Scene`s
+over the wire — exactly like a model worker. If your episodes are HDF5 or
+RLDS instead, you don't need `emboviz-lerobot` at all (`hdf5` reads
+in-process; `rlds` is its own extra: `uv pip install 'emboviz[rlds]'`).
 
 That's it. The first time you run `emboviz analyze --config <file>`,
 emboviz transparently:
@@ -95,7 +106,8 @@ If you want to do the install step ahead of time (e.g. in CI, before a
 long benchmark run), the explicit subcommand is still available:
 
 ```bash
-emboviz install-openvla    # explicit; same effect as the lazy path
+emboviz install-openvla    # a model's runtime venv (explicit; same as the lazy path)
+emboviz install-lerobot    # the isolated LeRobot dataset-reader venv
 ```
 
 ### Optional: PyTorch backend for π0's attention diagnostic
@@ -181,7 +193,7 @@ optional `extra: {data_dir, split}`.
 
 In every `report/episode_<idx>/`:
 
-- **`summary.json`** — every metric the diagnostic suite produced, with the per-frame numbers.
+- **`summary.json`** — every metric the diagnostics produced, with the per-frame numbers.
 - **`report.md` / `report.html`** — plain-English findings ("masked the bowl, action barely moved — memorized-trajectory signature, try an unseen episode") sorted worst-first. No internal severity words.
 - **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention heatmaps, GroundingDINO bbox + per-fill masked images for memorization, per-modality response timeline, per-camera occlusion grids, action plots with abrupt-shift markers.
 
@@ -197,16 +209,17 @@ No prose synthesis, no "we think your model is broken because…" — just evide
 
 ### Model adapters (one file per model)
 
-Each adapter declares which interpretability surfaces it exposes — inference, attention, hidden states, FFN activations, residual patching, neuron ablation. The diagnostic suite checks the capabilities and runs every applicable test.
+Each adapter declares which interpretability surfaces it exposes — inference, attention, hidden states, FFN activations, residual patching, neuron ablation. emboviz checks those capabilities and runs every applicable diagnostic, skipping the rest with a clear "not supported" note.
 
 | Family | Inference | **Attention extraction** | Hidden states / patching | Install |
 |---|---|---|---|---|
-| OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv pip install 'emboviz[openvla]'` |
-| **OpenVLA-OFT** | ✅ | ✅ shipped (moojink LLaMA backbone, BOS-aware token ranges) | — | `uv pip install 'emboviz[oft]'`; separate venv |
-| **π0 / π0.5** | ✅ | ✅ shipped (PaliGemma VLM inside openpi; needs `emboviz convert-pi0`) | — | `uv pip install 'emboviz[pi0]'`; separate venv |
-| **GR00T-N1 / N1.7** | ✅ | ✅ shipped (Eagle-2 VLM inside Gr00tPolicy) | — | `uv pip install 'emboviz[gr00t]'` + `uv run emboviz install-gr00t` |
-| LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) | ✅ via `LeRobotPolicyAdapter` | 🚧 case-by-case (depends on backbone) | — | base install |
+| OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv pip install emboviz-openvla` + `emboviz install-openvla` |
+| **OpenVLA-OFT** | ✅ | ✅ shipped (moojink LLaMA backbone, BOS-aware token ranges) | — | `uv pip install emboviz-oft` + `emboviz install-oft` |
+| **π0 / π0.5** | ✅ | ✅ shipped (PaliGemma VLM inside openpi; needs `emboviz convert-pi0`) | — | `uv pip install emboviz-pi0` + `emboviz install-pi0` |
+| **GR00T-N1 / N1.7** | ✅ | ✅ shipped (Qwen3-VL backbone inside Gr00tPolicy) | — | `uv pip install emboviz-gr00t` + `emboviz install-gr00t` |
 | Mock (no GPU) | ✅ — for diagnostic-side dev | N/A | N/A | base install |
+
+> Planned: LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) as a future isolated adapter worker — not yet integrated.
 | RDT-1B | 📅 planned (flash-attn build complexity) | | | |
 | Octo | 📅 planned (JAX backend) | | | |
 
@@ -218,18 +231,16 @@ Each adapter declares which interpretability surfaces it exposes — inference, 
 > venv is not possible today. Per-adapter optional-dep groups in
 > `pyproject.toml` make this explicit.
 
-### Robot profiles (preshipped configs)
+### Robot profile (declared in your config)
 
-| Robot | Status |
-|---|---|
-| BridgeV2 (`bridge_orig`) | ✅ shipped |
-| Franka Panda + Robotiq 2F-85 | ✅ shipped |
-| UR5 / UR10 + Robotiq | ✅ shipped |
-| Trossen ViperX-300 (single-arm ALOHA) | ✅ shipped |
-| ALOHA bimanual | 📅 roadmap |
-| Unitree H1 / G1 | 📅 roadmap |
-
-Custom robots: write a ~30-line `RobotProfile` and drop it in `emboviz/profiles/`.
+There are no preshipped robot presets to match against — you describe your
+robot inline in the run config's `dataset` block: the **state convention**
+(joint-angles vs ee-pose — the one thing no dataset format encodes), the
+**gripper** location/kind, and which dataset image key maps to which model
+**camera role**. The reader builds a typed `RobotProfile` from that, reading
+dims and per-dim names from the dataset's own schema (never hand-typed). See
+`configs/` for ready-made templates and `configs/README.md` for the full
+field reference.
 
 ### Data formats
 
@@ -307,25 +318,25 @@ Each diagnostic is one file in `emboviz/diagnostics/`. Adding a new technique fr
 
 ## Architecture
 
-```
-                       ┌─────────────────────┐
-                       │  exporters/ + viz/  │   Rerun + Foxglove + scorecards
-                       ├─────────────────────┤
-                       │  suites/            │   composable batteries
-                       ├─────────────────────┤
-                       │  diagnostics/       │   orchestrate perturb + metric + model
-                       ├──────────┬──────────┤
-              perturb/ │ metrics/ │ probes/  │   composable primitives
-              ├────────┴──────────┴──────────┤
-              │  models/  (VLAModel ABC)     │   one adapter per model family
-              ├──────────────────────────────┤
-              │  core/  types + observations │   pure foundation
-              └──────────────────────────────┘
+Everything heavy or version-conflicting runs in its **own isolated venv** and
+talks to the lean host over a bytes wire (msgpack/ZeroMQ). The host has no
+torch and no lerobot.
 
-       datasets/  ╳  profiles/  ╳  taxonomy/  ╳  coverage/
+```
+  host venv (lean)                              isolated worker venvs
+  ┌────────────────────────────────┐           ┌────────────────────────────┐
+  │ diagnostics · perturb · metrics │  msgpack  │ emboviz-openvla / oft /    │
+  │ calibration · runner            │ ── over ▶ │ pi0 / gr00t   (VLA models) │
+  │ exporters (Rerun .rrd +         │  ZMQ/UDS  │ emboviz-sam3   (detector)  │
+  │   report.md/html)               │ ◀ (bytes) │ emboviz-lerobot (dataset   │
+  │ + emboviz-wire contracts        │           │   reader)                  │
+  └────────────────────────────────┘           └────────────────────────────┘
 ```
 
-The **core engine** (everything outside `models/`) is model-agnostic. Adding a new VLA = one adapter file. Adding a new diagnostic = one file. Adding a new data format = one file. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the contract.
+The **host engine** is model- and dataset-agnostic: it only speaks the
+`emboviz-wire` contracts (`Scene` in, `ActionResult` out for models; `Scene`/
+`Trajectory` out for readers). Adding a new VLA, detector, or dataset format =
+one isolated worker package. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the contract.
 
 ---
 
@@ -343,38 +354,42 @@ A hosted Emboviz Hub is planned for team workflows (run history, regression aler
 ## Repository layout
 
 ```
-emboviz/
-  core/            Layer 0 — pure types, Observations, RobotProfile
-  models/          Layer 1 — VLAModel protocol + adapters
-  perturb/         Layer 2 — instruction / image / state perturbers
-  metrics/         Layer 2 — divergences, JS, pointing-game, ablation drops
-  probes/          Layer 2 — trainable linear probes (e.g., failure predictor)
-  diagnostics/     Layer 3 — orchestrate perturb + metric + model
-  suites/          Layer 4 — preset diagnostic batteries
-  exporters/       Layer 5 — Rerun, Foxglove, scorecard, JSON
-  viz/             Layer 5 — plotting primitives
-  datasets/        Adjacent — episode source adapters per format
-  profiles/        Adjacent — preshipped robot profiles
-  coverage/        Adjacent — dataset gap analysis
-  taxonomy/        Adjacent — canonical lists (failure modes, prepositions)
-  cli/             Layer 6 — entry points (diagnose, init, validate, compare)
+emboviz/                 the lean host engine (no torch, no lerobot)
+  core/            pure types (re-exported from emboviz-wire) + divergences
+  models/          VLAModel protocol + mock (in-process) + model registry
+  perturb/         instruction / image perturbers + target detection
+  metrics/         action divergence, attention JS, pointing-game, ...
+  probes/          trainable linear failure probes
+  diagnostics/     the shipped diagnostics — perturb × metric × model
+  exporters/       Rerun .rrd writer + failure-moment correlation
+  datasets/        manifest builder (hdf5/rlds in-process; lerobot → reader worker)
+  taxonomy/        canonical failure-mode / preposition lists
+  adapters/        worker registry + lifecycle (connect / connect_reader)
+  _internal/       runner (run_story) + multi-episode aggregation + report.md/html
+  cli/             analyze · list-models · list-datasets · install-<name> · convert-pi0
+
+adapters/                isolated worker packages — one venv each:
+  emboviz-wire     the shared ZMQ wire + contracts (Scene, VLAModel, EpisodeSource, codec)
+  emboviz-openvla · emboviz-oft · emboviz-pi0 · emboviz-gr00t    VLA model workers
+  emboviz-sam3     text→mask detector worker
+  emboviz-lerobot  LeRobot dataset-reader worker
 ```
 
 ---
 
 ## Roadmap
 
-**Now (foundation):**
+**Shipped:**
 - Multi-modal Scene refactor (typed Observations, RobotProfile, RequiredInputs, capability gating)
-- State-side perturbers (gripper_flip and friends)
-- Generic rollout loader + format adapters (LeRobot v3, RLDS, ROS bag, HuggingFace, Rerun, Foxglove)
-- Rerun + Foxglove EXPORT (the killer integration)
-- Model adapter coverage (OpenVLA-OFT, π0, GR00T, ACT, Diffusion Policy, RDT, Octo)
-- Robot profile coverage (Franka, UR, Trossen)
+- Isolated-worker architecture over the bytes wire (models, detector, dataset reader each in its own venv)
+- Dataset readers: LeRobot (isolated worker), HDF5 + RLDS (in-process)
+- Rerun `.rrd` export (per-frame overlays, verdict ribbons, metric time-series)
+- VLA adapters: OpenVLA, OpenVLA-OFT, π0/π0.5, GR00T-N1.7 (+ SAM 3 detector)
+- The five diagnostics: memorization, modality-dropout, scene-sensitivity, chunk-consistency, attention-drift
 
-**Next (productization):**
-- Onboarding wizard (`emboviz init`)
-- Pluggable failure labelers + composable suites
+**Next:**
+- LeRobot-policy adapter (ACT, Diffusion Policy, TDMPC2, VQ-BeT) as an isolated worker
+- Reasoning-output diagnostics (faithfulness / stability) for VLAs that emit chain-of-thought
 - Sim integration (Isaac Lab, RoboSuite, Mujoco MJX)
 - Documentation site + example gallery
 

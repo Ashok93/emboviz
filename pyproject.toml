@@ -33,7 +33,6 @@ dependencies = [
     # plumbing — pure-Python or fast-imported data wrangling
     "numpy>=1.26",
     "scipy>=1.11",
-    "pyarrow>=14",
     "Pillow>=10.0",
     "tqdm>=4.66",
     "click>=8.1",
@@ -41,24 +40,19 @@ dependencies = [
     "PyYAML>=6.0",          # run-config files (emboviz analyze --config)
     "huggingface_hub>=0.24",
     # report rendering
-    "matplotlib>=3.8",
-    "jinja2>=3.1",
-    # deployment recording readers (small, no torch)
-    "mcap>=1.2",
-    "mcap-ros2-support>=0.5",
-    "mcap-protobuf-support>=0.5",
-    # tabular / scientific dataset readers
+    "matplotlib>=3.8",      # heatmap colormaps in the rerun export + report figures
+    "jinja2>=3.1",          # report.html templating
+    # tabular / scientific dataset readers (HDF5 in-process; LeRobot/RLDS
+    # readers live in their own venvs)
     "h5py>=3.10",
-    # interactive Rerun export. exporters/rerun.py uses the modern
-    # RecordingStream(application_id=..., recording_id=...) constructor
-    # (the 0.22 constructor took only a positional app-id and no
-    # recording_id, raising TypeError on the kwargs we pass). Pin >=0.32
-    # — the current series a fresh `uv pip install` resolves to — so the
-    # installed rerun always matches the API we call.
+    # interactive Rerun export (exporters/rerun.py). The exporter targets
+    # the rerun-sdk >=0.23 API — RecordingStream(application_id=,
+    # recording_id=), the unified set_time(sequence=|duration=), and the
+    # Scalars archetype. No upper bound: core no longer installs
+    # ``lerobot`` (its v2.x reader lives in the isolated ``emboviz-lerobot``
+    # worker venv, which keeps lerobot's ``rerun-sdk<0.27`` pin OUT of
+    # core), so the exporter rides whatever current rerun resolves to.
     "rerun-sdk>=0.32",
-    # video / image media
-    "imageio>=2.34",
-    "imageio-ffmpeg>=0.4.9",
     # COCO RLE mask decoder (used by both the SAM 3 client and the
     # CocoAnnotationConnector for user-supplied per-frame annotations).
     "pycocotools>=2.0",
@@ -75,6 +69,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+# ────────── LeRobot dataset reader ──────────
+# NOTE: there is intentionally NO ``[lerobot]`` extra. Reading LeRobot
+# datasets is done by the SEPARATE ``emboviz-lerobot`` package, whose
+# isolated reader venv holds ``lerobot`` (and its ``rerun-sdk<0.27`` pin +
+# torch). Installing it into core would drag that rerun cap into the host
+# and collide with core's own ``rerun>=0.32`` .rrd exporter. Instead:
+#
+#     uv pip install emboviz emboviz-lerobot   # core + the thin reader shim
+#     emboviz install-lerobot                  # builds the isolated reader venv
+#
+# Core stays torch-free and lerobot-free; the reader runs as a ZMQ worker.
 
 # ────────── Optional heavy dataset family ──────────
 # Only pulled in by users who actually have RLDS / Open-X-Embodiment
@@ -112,6 +118,20 @@ emboviz = "emboviz.cli:main"
 #
 # This dict is INTENTIONALLY EMPTY in core — each adapter package adds
 # its own entry via its own pyproject [project.entry-points...] block.
+
+# ──────────────────────────────────────────────────────────────────────
+# Local development sources (dev-only — NOT part of the published wheel).
+#
+# ``emboviz-wire`` is the one runtime dependency of core that lives in
+# THIS repo rather than on PyPI. uv strips ``[tool.uv.sources]`` from the
+# built distribution's metadata, so PyPI users still resolve
+# ``emboviz-wire>=0.3`` from the registry; only local ``uv run`` / ``uv
+# sync`` redirect it to the in-repo checkout. The dev-pod / user install
+# scripts use ``uv pip install -e`` (which does not read sources) and pass
+# the wire checkout explicitly, so all three paths install the SAME wire.
+# ──────────────────────────────────────────────────────────────────────
+[tool.uv.sources]
+emboviz-wire = { path = "adapters/emboviz-wire", editable = true }
 
 [build-system]
 requires = ["hatchling"]

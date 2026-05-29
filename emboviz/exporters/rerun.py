@@ -267,21 +267,23 @@ def export_rerun(
         import rerun.blueprint as rrb
     except ImportError as e:
         raise ImportError(
-            "Rerun export requires the `rerun-sdk` package (>=0.22). "
-            "Install with: uv pip install 'rerun-sdk>=0.22'"
+            "Rerun export requires the `rerun-sdk` package. It ships with "
+            "emboviz core — reinstall with: uv pip install 'emboviz' "
+            "(rerun-sdk>=0.32)."
         ) from e
 
     if not hasattr(rr, "RecordingStream"):
         raise RuntimeError(
-            "rerun-sdk too old. Install >=0.22: uv pip install 'rerun-sdk>=0.22'"
+            "rerun-sdk too old for the export API. Install the pinned range: "
+            "uv pip install 'rerun-sdk>=0.32'"
         )
 
     # rerun-sdk 0.23 renamed Scalar → Scalars (plural) and unified the
     # per-axis ``set_time_sequence`` / ``set_time_seconds`` calls into a
-    # single ``set_time(name, *, sequence|duration)``. We support both
-    # so the [oft] extra (which transitively pins lerobot 0.3.2 →
-    # rerun-sdk<0.23) and the other extras (which can use latest) both
-    # produce identical .rrd files.
+    # single ``set_time(name, *, sequence|duration)``. The host pin
+    # (rerun-sdk>=0.32 — see pyproject; core no longer carries lerobot's
+    # <0.27 cap) always takes the modern path; these getattr/hasattr shims
+    # are a harmless defensive fallback for a 0.23–0.31 install.
     Scalars = getattr(rr, "Scalars", None) or rr.Scalar
     _has_unified_set_time = hasattr(rr, "set_time")
 
@@ -617,6 +619,17 @@ def export_rerun(
             ),
             recording=rec, static=True,
         )
+
+    # Per-frame-pair series for the trajectory-level axes. These axes carry
+    # one episode-level verdict, but the underlying signal (chunk-step
+    # disagreement, attention-centroid drift) is naturally per-frame-pair.
+    # Logging it keyed to the originating frame populates each tab's
+    # time-series view — without it those views referenced an entity path
+    # that was never written.
+    for axis, info in trajectory_axis_results.items():
+        for frame_idx, value in info.get("per_frame_series", []):
+            _set_time("frame_index", sequence=int(frame_idx))
+            rr.log(f"plots/diagnostics/{axis}", Scalars(float(value)), recording=rec)
 
     # ── 7. Findings (one big plain-English page across all axes) ──────────
     findings_md = _build_findings_markdown(

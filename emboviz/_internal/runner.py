@@ -32,15 +32,16 @@ Efficiency contract (refactor 2026-05):
     per-frame forward-pass count and total estimated wall time so users
     can size their run before committing GPU hours.
 
-Invocation (called once per (model, scenario)):
+Invocation (normally via ``emboviz analyze --config``, which fills these
+in from the run config; shown here for reference):
 
     uv run python -m emboviz._internal.runner \\
-        --story-id     openvla:bridge:ep0:clutter \\
-        --model-builder emboviz.models.registry:get_model:openvla-7b \\
-        --dataset-builder emboviz.datasets.lerobot_bridge:BridgeEpisodeSource \\
+        --story-id     openvla:bridge:ep0 \\
+        --model-builder adapter:openvla \\
+        --dataset-builder emboviz.datasets.manifest:build_source \\
         --episode-idx 0 \\
         --frame-start 8 --n-frames 8 \\
-        --out-dir /tmp/itest/openvla/bridge_clutter_ep0
+        --out-dir /tmp/itest/openvla/bridge_ep0
 
 The runner deliberately stays slim: it imports a builder, asks the
 dataset for a trajectory, runs the diagnostic suite, and writes
@@ -64,7 +65,7 @@ import numpy as np
 
 from emboviz.calibration import averaged_predict, calibrate_model
 from emboviz.core.results import Severity
-from emboviz.core.types import ActionResult, TokenSelector, resolve_cameras
+from emboviz.core.types import ActionResult, TokenSelector
 from emboviz.diagnostics.attention_drift import AttentionDriftDiagnostic
 from emboviz.diagnostics.chunk_consistency import ChunkConsistencyDiagnostic
 from emboviz.diagnostics.memorization import MemorizationDiagnostic
@@ -112,11 +113,11 @@ def _resolve(spec: str, kwargs_json: str = ""):
          resolver path; kept for back-compat until the legacy in-
          process adapters are removed.
 
-    The ``kwargs_json`` blob for ``adapter:<name>`` is currently
-    ignored (the adapter's defaults are baked into its server
-    invocation). When per-call overrides are needed we'll surface
-    them through a separate ``EMBOVIZ_<NAME>_KWARGS`` env var that
-    the spawned server reads — keeps the RPC schema unchanged.
+    The ``kwargs_json`` blob for ``adapter:<name>`` carries the user's
+    per-run constructor overrides (their fine-tuned checkpoint, unnorm
+    key, etc.). It is merged over the spec's ``default_actor_kwargs`` and
+    forwarded to the worker at spawn time (``serve --kwargs``), so the
+    worker loads exactly the model the config names.
     """
     kwargs = json.loads(kwargs_json) if kwargs_json else {}
 
@@ -352,8 +353,8 @@ def run_story(args) -> None:
         return
 
     # --- 2. CALIBRATION: noise floor + typical action magnitude ----------
-    print(f"[2b/7] calibrating model on this trajectory "
-          f"(noise-floor + typical action magnitude)...", flush=True)
+    print("[2b/7] calibrating model on this trajectory "
+          "(noise-floor + typical action magnitude)...", flush=True)
     calibration = calibrate_model(model, trajectory, n_noise_probes=5)
     print(f"      noise_floor              = {calibration.noise_floor:.4f}", flush=True)
     print(f"      typical_action_magnitude = {calibration.typical_action_magnitude:.4f}", flush=True)
@@ -362,10 +363,10 @@ def run_story(args) -> None:
         print(f"      (single-sample noise floor was "
               f"{calibration.single_sample_noise_floor:.4f}; "
               f"averaging reduces it to {calibration.noise_floor:.4f})", flush=True)
-    print(f"      → diagnostic scores reported on a 0-1 anchored scale", flush=True)
+    print("      → diagnostic scores reported on a 0-1 anchored scale", flush=True)
 
     # --- 3. Build the target detector + caching wrapper ------------------
-    print(f"[3/7] preparing target detector and per-frame artifact caches ...", flush=True)
+    print("[3/7] preparing target detector and per-frame artifact caches ...", flush=True)
     cached_detector, memorization_skip_reason = _build_target_detector(args)
     not_applicable: dict[str, str] = {}
     if memorization_skip_reason is not None:
@@ -444,10 +445,20 @@ def run_story(args) -> None:
         if drift.severity == Severity.UNKNOWN:
             not_applicable["internal.attention_drift"] = drift.explanation
         else:
+            # Per-frame-pair drift series for the Rerun time-series plot.
+            # displacement[i] is the centroid move between analyzed frames
+            # i and i+1, so it belongs to the LATER frame's dataset index.
+            disp = drift.raw.get("displacements_pixel", [])
+            drift_series = [
+                [int(trajectory.frame_indices[i + 1]), float(d)]
+                for i, d in enumerate(disp)
+                if i + 1 < len(trajectory.frame_indices)
+            ]
             trajectory_axes["internal.attention_drift"] = {
-                "severity":     drift.severity.value,
-                "scalar_score": drift.scalar_score,
-                "explanation":  drift.explanation,
+                "severity":         drift.severity.value,
+                "scalar_score":     drift.scalar_score,
+                "explanation":      drift.explanation,
+                "per_frame_series": drift_series,
             }
             print(f"      attention_drift: {drift.severity.value} "
                   f"({drift.scalar_score:.1f}px)", flush=True)
@@ -463,18 +474,25 @@ def run_story(args) -> None:
         if chunk.severity == Severity.UNKNOWN:
             not_applicable["internal.chunk_consistency"] = chunk.explanation
         else:
+            # Per-frame chunk-disagreement series for the Rerun plot: each
+            # comparable pair's normalized delta, keyed to the analyzed
+            # frame t whose chunk made the prediction.
+            cfi = chunk.raw.get("per_pair_frame_indices", [])
+            nds = chunk.raw.get("normalized_deltas", [])
+            chunk_series = [[int(fi), float(v)] for fi, v in zip(cfi, nds)]
             trajectory_axes["internal.chunk_consistency"] = {
-                "severity":     chunk.severity.value,
-                "scalar_score": chunk.scalar_score,
-                "explanation":  chunk.explanation,
-                "raw_mean_delta": chunk.raw.get("raw_mean_delta"),
+                "severity":         chunk.severity.value,
+                "scalar_score":     chunk.scalar_score,
+                "explanation":      chunk.explanation,
+                "raw_mean_delta":   chunk.raw.get("raw_mean_delta"),
+                "per_frame_series": chunk_series,
             }
             print(f"      chunk_consistency: {chunk.severity.value} "
                   f"(normalized mean_delta={chunk.scalar_score:.3f}, "
                   f"raw={chunk.raw['raw_mean_delta']:.3f})", flush=True)
 
     # --- 6. Per-frame diagnostics with shared baseline -------------------
-    print(f"[6/7] per-frame diagnostics (shared baseline) ...", flush=True)
+    print("[6/7] per-frame diagnostics (shared baseline) ...", flush=True)
     per_axis: dict = {}
 
     if "vision.memorization" not in enabled:
@@ -482,7 +500,7 @@ def run_story(args) -> None:
             "disabled by --diagnostics / --skip-diagnostics"
         )
     elif cached_detector is not None:
-        print(f"      memorization (per camera, calibrated) ...", flush=True)
+        print("      memorization (per camera, calibrated) ...", flush=True)
         memo = TrajectoryDiagnostic(
             MemorizationDiagnostic(
                 target_detector=cached_detector, calibration=calibration,
@@ -503,7 +521,7 @@ def run_story(args) -> None:
             "disabled by --diagnostics / --skip-diagnostics"
         )
     else:
-        print(f"      building modality dropout pool from other episodes ...", flush=True)
+        print("      building modality dropout pool from other episodes ...", flush=True)
         from emboviz.modality_pools import build_modality_pool
         declared_mods = {
             "state":          model.required_inputs.state,
@@ -569,7 +587,7 @@ def run_story(args) -> None:
         )
 
     # --- 7. prompt paraphrase on frame 0 ---------------------------------
-    print(f"[7/7] prompt paraphrase on frame 0...", flush=True)
+    print("[7/7] prompt paraphrase on frame 0...", flush=True)
     pp = PromptParaphrasePerturber()
     paraphrase_deltas = {}
     baseline_action = baselines[0].action   # reuse the precomputed frame-0 baseline
@@ -599,7 +617,7 @@ def run_story(args) -> None:
     #     populated during memorization. We reconstruct the masked image
     #     here via the same _apply_fill helper the diagnostic used — pure
     #     CPU, no model forward.
-    print(f"[8/8] collect per-camera Rerun overlays from caches ...", flush=True)
+    print("[8/8] collect per-camera Rerun overlays from caches ...", flush=True)
     attention_per_frame_out: dict[int, dict[str, np.ndarray]] = {}
     sensitivity_per_frame: dict[int, dict[str, np.ndarray]] = {}
     target_mask_per_frame: dict[int, dict[str, np.ndarray]] = {}
@@ -689,17 +707,17 @@ def run_story(args) -> None:
 
     if not show_imitation:
         if has_expert:
-            print(f"[9/9] imitation L2 vs expert: HIDDEN "
-                  f"(dataset has recorded expert actions but "
-                  f"--show-imitation was not passed; this is a BC "
-                  f"validation metric, not a VLA diagnostic).", flush=True)
+            print("[9/9] imitation L2 vs expert: HIDDEN "
+                  "(dataset has recorded expert actions but "
+                  "--show-imitation was not passed; this is a BC "
+                  "validation metric, not a VLA diagnostic).", flush=True)
         else:
-            print(f"[9/9] imitation L2 vs expert: N/A "
-                  f"(deployment data has no expert actions to compare to).",
+            print("[9/9] imitation L2 vs expert: N/A "
+                  "(deployment data has no expert actions to compare to).",
                   flush=True)
     else:
-        print(f"[9/9] expert delta (imitation accuracy) + Rerun export "
-              f"[--show-imitation enabled]...", flush=True)
+        print("[9/9] expert delta (imitation accuracy) + Rerun export "
+              "[--show-imitation enabled]...", flush=True)
     profile = trajectory.frames[0].profile
     dim_names: list[str] = (
         list(profile.action.dim_names)
@@ -761,7 +779,7 @@ def run_story(args) -> None:
         expert_delta_per_frame=expert_delta_per_frame if show_imitation else None,
         min_critical_axes=2,
     )
-    print(f"      failure moments (≥2 critical):", flush=True)
+    print("      failure moments (≥2 critical):", flush=True)
     print(format_failure_moments(moments, max_show=10), flush=True)
 
     # --- 10. JSON summary (written BEFORE Rerun export) -----------------

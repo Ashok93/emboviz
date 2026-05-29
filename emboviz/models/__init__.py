@@ -1,20 +1,22 @@
-"""Model abstraction layer.
+"""Model abstraction layer (host side).
 
 Public surface:
     VLAModel        — the protocol every adapter implements
     Capability      — flags for what an adapter supports
     RequiredInputs  — what a model needs from a Scene
     NotSupported    — raised when a diagnostic requests an unsupported op
-    REGISTRY        — name → adapter factory
+    REGISTRY        — name → in-process adapter factory
 
-Adapters live in this package as one file each. Day-one ship list:
+This package holds only the LIGHT, in-process adapter that runs in the
+host venv:
 
-    - mock          — deterministic, GPU-free; supports state/gripper/history-blind modes
-    - openvla-7b    — OpenVLA-7B + variants (set hf_repo)
-    - lerobot       — LeRobotPolicyAdapter: any policy on the LeRobot Hub
-                       (ACT, Diffusion Policy, TDMPC2, VQ-BeT)
+    - mock     — deterministic, GPU-free; state/gripper/history-blind modes
 
-Planned: π0/π0.5, GR00T-N1, RDT-1B, Octo, OpenVLA-OFT (one file each).
+The VLA families (OpenVLA, OpenVLA-OFT, π0/π0.5, GR00T-N1.7) live in their
+own ``emboviz-<name>`` adapter packages and run as isolated ZMQ workers —
+reached through ``emboviz.adapters`` (registry + lifecycle), not this
+in-process registry. (A LeRobot-policy adapter — ACT / Diffusion Policy /
+etc. — is planned as a future isolated worker, not an in-process model.)
 """
 
 from emboviz.models.protocol import (
