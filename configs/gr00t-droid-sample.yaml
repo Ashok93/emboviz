@@ -11,6 +11,13 @@ model:
     model_path: nvidia/GR00T-N1.7-3B               # REQUIRED — your fine-tune or the base checkpoint
     embodiment_tag: OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT   # REQUIRED — selects state/action interpretation
     device: "cuda:0"
+    # This embodiment declares 2 video keys, so the mapping is REQUIRED —
+    # the adapter never silently auto-maps multiple cameras. Keys are our
+    # Scene camera roles (the LEFT side of dataset.cameras below); values
+    # are GR00T's declared video keys.
+    camera_mapping:
+      primary:    exterior_image_1_left
+      wrist_left: wrist_image_left
 
 dataset:
   format: lerobot
@@ -37,10 +44,11 @@ dataset:
     from: tasks                     # DROID is teleop; ~20% of episodes are unlabeled — pick a labeled one
 
 analysis:
-  episodes: "0"
+  episodes: "1"                     # ep1 is LABELED ("Put the blue block in the green bowl");
+                                    # ep0 in this demo is one of DROID's unlabeled teleop episodes.
   frame_start: 0
   n_frames: 4
-  mask_query: "the object"          # EDIT to an object in your chosen episode's instruction
+  mask_query: "the blue block"      # object from ep1's instruction; EDIT for your chosen episode
   detector: sam3
   diagnostics: all
 
