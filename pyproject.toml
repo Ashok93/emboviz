@@ -48,11 +48,18 @@ dependencies = [
     # interactive Rerun export (exporters/rerun.py). The exporter targets
     # the rerun-sdk >=0.23 API — RecordingStream(application_id=,
     # recording_id=), the unified set_time(sequence=|duration=), and the
-    # Scalars archetype. No upper bound: core no longer installs
-    # ``lerobot`` (its v2.x reader lives in the isolated ``emboviz-lerobot``
-    # worker venv, which keeps lerobot's ``rerun-sdk<0.27`` pin OUT of
-    # core), so the exporter rides whatever current rerun resolves to.
-    "rerun-sdk>=0.32",
+    # Scalars archetype. core no longer installs ``lerobot`` (its v2.x
+    # reader lives in the isolated ``emboviz-lerobot`` worker venv, which
+    # keeps lerobot's ``rerun-sdk<0.27`` pin OUT of core), so the exporter
+    # is free of that cap. We pin the MINOR (>=0.33,<0.34) on purpose: the
+    # .rrd on-disk format is tied to rerun's minor version, and the host
+    # installs via ``uv pip install -e`` (which ignores uv.lock and takes
+    # the latest match). A floating ``>=0.x`` therefore lets the WRITER
+    # (whatever the pod resolved) drift ahead of the local VIEWER and emit
+    # an .rrd the viewer can't parse ("data stream newer than local …").
+    # Pinning the minor keeps writer and reader on one format; bump it
+    # deliberately (and upgrade the viewer in lockstep), never by drift.
+    "rerun-sdk>=0.33,<0.34",
     # COCO RLE mask decoder (used by both the SAM 3 client and the
     # CocoAnnotationConnector for user-supplied per-frame annotations).
     "pycocotools>=2.0",
