@@ -160,15 +160,22 @@ class MemorizationDiagnostic(Diagnostic):
     executes a coherent action.
 
     Args:
-        target_detector: how to locate the target. Default = GD+SAM with
-            scene.instruction as the query phrase. Pass a custom
-            ``GroundingDINOSAMDetector(target_text="the pipe")`` to
-            scope to a specific referent in multi-object instructions.
+        target_detector: how to locate the target. REQUIRED — there is NO
+            default: the constructor raises unless one of ``target_detector``,
+            ``bbox``, or a runner-supplied target_text is given (the
+            diagnostic refuses to guess what to mask). Pass e.g.
+            ``SAM3Detector(target_text="the pipe")`` to scope to a specific
+            referent in multi-object instructions.
         bbox: shortcut — fixed bbox in every camera (only valid when
             cameras share resolution/intrinsics).
-        fill_modes: which fills to ensemble. Default both — agreement
-            required for CRITICAL verdict. Pass ``["channel_mean"]`` to
-            skip the blur fill if scipy is unavailable.
+        fill_modes: which fills to ensemble. Default =
+            ``["channel_mean", "gaussian_blur"]`` (agreement across fills is
+            required for a CRITICAL verdict). LIMITATION: LITERATURE.md §1
+            prescribes a THIRD, on-manifold ``lama_inpaint`` fill; it is not
+            yet implemented, so the shipped ensemble is 2 of 3 and the
+            agreement gate runs over two non-on-manifold fills only. This is
+            surfaced in the result's raw output (``fill_ensemble``). Pass
+            ``["channel_mean"]`` to skip the blur fill if scipy is missing.
         min_mask_contrast: refuse to emit CRITICAL when ALL fills
             produce a normalized contrast below this on a frame. Default
             ``DEFAULT_MIN_MASK_CONTRAST`` (0.05).
@@ -397,6 +404,18 @@ class MemorizationDiagnostic(Diagnostic):
             "ignored_threshold":      self.noise_floor_score,
             "grounded_threshold":     self.grounded_threshold,
             "fills":                  list(per_fill_results),
+            "fill_ensemble": {
+                "fills_used":       list(per_fill_results),
+                "literature_fills": ["channel_mean", "gaussian_blur", "lama_inpaint"],
+                "note": (
+                    "LITERATURE.md §1 prescribes 3 fills including the "
+                    "on-manifold lama_inpaint; lama_inpaint is NOT yet "
+                    "implemented, so the agreement gate ran over the fills in "
+                    "'fills_used' only (2 of 3 with the default ensemble). "
+                    "Read a CRITICAL 'memorization' verdict as agreement "
+                    "across non-on-manifold fills until the 3rd fill ships."
+                ),
+            },
             "detected_cameras":       detected_cams,
             "detection_confidences":  confs,
         }
