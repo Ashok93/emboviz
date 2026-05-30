@@ -175,6 +175,42 @@ class LeRobotEpisodeSource(EpisodeSource):
     def _open(self, indices: list[int]):
         """Construct the underlying ``LeRobotDataset``.
 
+        For HUB datasets we pass ``force_cache_sync=True``. This is
+        required to work around a lerobot v0.5.x bug, NOT an optimisation
+        we can drop:
+
+          ``LeRobotDataset.__init__`` does
+          ``if force_cache_sync or not self.reader.try_load(): _download(); load_and_activate()``.
+          ``DatasetReader.try_load`` loads the parquet via
+          ``Dataset.from_parquet(all_globbed_files, filters=episode_index.isin(episodes))``
+          and catches ONLY ``(FileNotFoundError, NotADirectoryError)``.
+
+          lerobot downloads episodes SELECTIVELY into a SHARED hub cache
+          (``allow_patterns=get_episodes_file_paths()``). So once any
+          earlier load (e.g. the episode-0 diagnostic) has populated the
+          cache with episode 0's chunk file, a later open for OTHER,
+          not-yet-downloaded episodes finds parquet files on disk (no
+          ``FileNotFoundError``) but the ``isin`` filter matches ZERO rows
+          → HF ``datasets`` raises ``ValueError: Instruction "train"
+          corresponds to no data!``. That ValueError escapes ``try_load``'s
+          narrow except and crashes ``__init__`` BEFORE ``_download`` ever
+          runs to fetch the right files. This is exactly what made the
+          cross-episode modality pool fail while the episode-0 path worked.
+
+          ``force_cache_sync=True`` short-circuits past the buggy
+          ``try_load`` straight to ``_download`` (which fetches precisely
+          the requested episodes' files) then ``load_and_activate`` — so
+          the filter always has its rows. ``snapshot_download`` is
+          idempotent, so already-cached files are not re-fetched; the only
+          cost is the hub etag check, and we construct one dataset per
+          unique episode set (cached below), so this is a couple of calls
+          per run.
+
+        It must NOT be set for LOCAL datasets: with ``repo_id="local"`` it
+        would force ``_download`` to ``snapshot_download("local")`` → 404.
+        Local datasets are complete on disk, ``try_load`` succeeds, and
+        there is nothing to sync.
+
         On a local failure we surface the REAL cause: lerobot falls back
         to an HF lookup when it can't read local metadata, and since we
         hand it the placeholder repo_id ``"local"`` that surfaces as a
@@ -187,7 +223,7 @@ class LeRobotEpisodeSource(EpisodeSource):
         try:
             if is_local:
                 return LeRobotDataset("local", root=self.repo_id, episodes=indices)
-            return LeRobotDataset(self.repo_id, episodes=indices)
+            return LeRobotDataset(self.repo_id, episodes=indices, force_cache_sync=True)
         except Exception as e:
             if not is_local:
                 raise
