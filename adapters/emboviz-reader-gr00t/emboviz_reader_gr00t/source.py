@@ -531,6 +531,29 @@ def build_gr00t_source(
                 "gripper or fix modality.json. We do not guess the index."
             )
 
+    # State field layout from modality.json → {field: slice} into the packed
+    # observation.state. This is the dataset's OWN, authoritative declaration
+    # of how the state vector splits into named fields — the GR00T model
+    # routes each declared state key through it (and cross-checks each slice
+    # against the checkpoint's expected dim). We never assume a contiguous /
+    # sequential layout: modality.json may order fields any way.
+    state_segment_layout = None
+    if state_dim is not None:
+        state_segment_layout = {}
+        for field, spec in (modality.get("state") or {}).items():
+            if not isinstance(spec, dict) or "start" not in spec or "end" not in spec:
+                raise ValueError(
+                    f"modality.json state.{field}={spec!r} is malformed; "
+                    "expected {'start': int, 'end': int}."
+                )
+            s, e = int(spec["start"]), int(spec["end"])
+            if not (0 <= s < e <= int(state_dim)):
+                raise ValueError(
+                    f"modality.json state.{field} range [{s}:{e}] is out of "
+                    f"bounds for the {state_dim}-dim observation.state."
+                )
+            state_segment_layout[field] = slice(s, e)
+
     profile = build_profile(
         name=info.get("robot_type") or path,
         cameras=cameras,
@@ -538,6 +561,7 @@ def build_gr00t_source(
         convention=(state or {}).get("convention"),
         action_dim=action_dim, action_names=action_names,
         gripper=gripper,
+        segment_layout=state_segment_layout,
     )
     return Gr00tDatasetSource(
         repo_id=path,

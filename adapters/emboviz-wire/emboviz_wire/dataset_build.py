@@ -58,6 +58,7 @@ def build_profile(
     action_dim: Optional[int],
     action_names: Optional[list[str]],
     gripper: Optional[dict],
+    segment_layout: Optional[dict] = None,
 ) -> RobotProfile:
     """Build a :class:`RobotProfile` from declared + read-from-dataset info.
 
@@ -67,6 +68,11 @@ def build_profile(
     ``convention`` and ``gripper`` come from the run config. We refuse to
     guess the state convention — a format never encodes joint-angles vs
     ee-pose, so the user must state it.
+
+    ``segment_layout`` (optional ``{field: slice}``) names slices of the
+    state vector. The GR00T reader fills it from ``modality.json`` so the
+    model can route each declared state key to its exact slice; most readers
+    leave it None.
     """
     state_spec = None
     if state_dim is not None:
@@ -78,6 +84,7 @@ def build_profile(
             )
         state_spec = StateSpec(
             dim=int(state_dim), convention=convention, joint_names=state_names,
+            segment_layout=segment_layout,
         )
     action_spec = (
         ActionSpec(dim=int(action_dim), dim_names=action_names)

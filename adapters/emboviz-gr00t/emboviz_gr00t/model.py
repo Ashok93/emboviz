@@ -121,6 +121,10 @@ class Gr00tAdapter(VLAModel):
             raise ValueError(
                 f"Unknown embodiment_tag '{embodiment_tag}'. Available: {available}"
             ) from e
+        # The checkpoint's normalization stats (norm_params) are keyed by the
+        # embodiment's .value (e.g. LIBERO_PANDA.value == "libero_sim"), NOT
+        # its .name — _state_key_dim looks up dims under this key.
+        self._embodiment_value = embodiment_enum.value
 
         # Resolve model_path → a LOCAL checkpoint dir. Gr00tPolicy does
         # ``AutoModel.from_pretrained(Path(model_path))``, which loads a
@@ -660,53 +664,46 @@ class Gr00tAdapter(VLAModel):
         )
 
     def _state_key_dim(self, state_key: str) -> int:
-        """Dim of a GR00T state key, read from the policy's normalization
-        metadata (per-key min/max) — the single source of truth.
+        """Dim of a GR00T state key, read from the checkpoint's normalization
+        metadata — the single source of truth. We REFUSE to guess.
 
-        We REFUSE to guess. If the metadata path is absent, shaped
-        differently in this gr00t version, or has no entry for this key, we
-        RAISE. A fabricated dim would silently mis-route the state vector:
-        the equality gate in ``_build_observation`` would then either reject
-        a correctly-routed segment or accept a wrong one — exactly the kind
-        of confident-wrong-answer this tool must never produce. Fix the
-        introspection path (or pin a compatible gr00t) instead of guessing.
+        The processor exposes per-(embodiment, modality, key) stats in
+        ``state_action_processor.norm_params``, keyed by the embodiment's
+        ``.value`` (e.g. LIBERO_PANDA.value == "libero_sim"), each group
+        carrying a ``"dim"`` field (and matching min/max arrays). This is the
+        value ``_build_observation`` cross-checks each modality.json-declared
+        state slice against. If the path/key is absent we RAISE rather than
+        fabricate a dim — a wrong dim would mis-route the state vector.
         """
         try:
-            sap = self.policy.processor.state_action_processor
-            embodiments = getattr(sap, "state_norm", None)
+            norm = self.policy.processor.state_action_processor.norm_params
         except AttributeError as e:
             raise RuntimeError(
-                f"Cannot determine the dim of GR00T state key '{state_key}': "
-                "the policy.processor.state_action_processor path is absent "
-                f"({type(e).__name__}: {e}). This gr00t version exposes "
-                "normalization metadata differently. Update this "
-                "introspection path for the installed gr00t — we do not guess."
+                f"Cannot read GR00T normalization metadata for state key "
+                f"'{state_key}': {type(e).__name__}: {e}. The "
+                "policy.processor.state_action_processor.norm_params path is "
+                "absent in this gr00t version — update this introspection path."
             ) from e
-        if not embodiments:
+        emb = norm.get(self._embodiment_value) if norm else None
+        if not emb or "state" not in emb or state_key not in emb["state"]:
+            avail = sorted(emb["state"]) if (emb and "state" in emb) else []
             raise RuntimeError(
-                f"Cannot determine the dim of GR00T state key '{state_key}': "
-                "the processor's state_norm is empty/None. We do not guess."
+                f"GR00T norm_params has no state entry for key '{state_key}' "
+                f"under embodiment '{self._embodiment_value}' (available state "
+                f"keys: {avail}). Cannot determine its dim; refusing to guess. "
+                "Check the embodiment_tag matches the checkpoint."
             )
-        params = (
-            embodiments.get(self._embodiment_name.lower())
-            or next(iter(embodiments.values()))
-        )
-        if not params or state_key not in params:
+        group = emb["state"][state_key]
+        dim = group.get("dim")
+        if dim is None:
+            mn = group.get("min")
+            dim = len(mn) if mn is not None else None
+        if dim is None:
             raise RuntimeError(
-                f"GR00T normalization metadata has no entry for state key "
-                f"'{state_key}' (available: "
-                f"{sorted(params) if params else []}). Cannot determine its "
-                f"dim. Check that embodiment '{self._embodiment_name}' "
-                "declares this state key — we do not guess."
+                f"GR00T norm_params state entry for '{state_key}' has neither "
+                "a 'dim' field nor a length-bearing 'min'; cannot read its dim."
             )
-        mn = getattr(params[state_key], "min", None)
-        if mn is None or not hasattr(mn, "__len__"):
-            raise RuntimeError(
-                f"GR00T normalization entry for state key '{state_key}' has "
-                "no length-bearing 'min' field; cannot read its dim. We do "
-                "not guess."
-            )
-        return int(len(mn))
+        return int(dim)
 
     # ----- helpers -------------------------------------------------------
 
