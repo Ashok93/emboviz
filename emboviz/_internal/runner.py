@@ -796,6 +796,7 @@ def run_story(args) -> None:
     summary = {
         "story_id":          args.story_id,
         "model":             model.model_id,
+        "episode_index":     int(args.episode_idx),
         "required_cameras":  sorted(model.required_inputs.cameras),
         "scene_cameras":     sorted(trajectory.frames[0].observations.images),
         "trajectory_source": trajectory.source,

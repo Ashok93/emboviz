@@ -167,7 +167,7 @@ def render_episode_html(
     tpl = env.get_template("episode.html.j2")
     findings = _sorted_findings(summary.get("per_axis") or {})
     return tpl.render(
-        episode_idx       = summary.get("frame_indices", [0])[0] if summary.get("frame_indices") else "?",
+        episode_idx       = summary.get("episode_index", "?"),
         model_id          = summary.get("model", "?"),
         trajectory_source = summary.get("trajectory_source", "?"),
         n_frames          = summary.get("n_frames", 0),
