@@ -14,7 +14,7 @@ model:
 
 dataset:
   format: lerobot
-  path: aopolin-lv/libero_spatial_no_noops_lerobot_v21
+  path: lerobot/libero_spatial_image     # official LIBERO-Spatial suite, LeRobot v3.0
 
   cameras:                   # OFT needs two views
     primary: observation.images.image
