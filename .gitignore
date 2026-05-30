@@ -112,4 +112,4 @@ WORK_LOG.md
 # ──────────────────────────────────────────────────────────────────────
 # Internal dev / VM-testing tooling (not part of the published product)
 # ──────────────────────────────────────────────────────────────────────
-/scripts/
+/vm_scripts/
