@@ -50,6 +50,13 @@ class Gr00tAdapter(VLAModel):
     translates our Scene camera names into GR00T's embodiment-specific
     video keys; it auto-maps only when the embodiment declares exactly
     one video key (otherwise it is required).
+
+    ``model_path`` accepts the base model, a user's single-checkpoint
+    finetune of it, or a local dir — all loaded directly. ``model_subfolder``
+    (optional) is only for multi-checkpoint repos that ship one checkpoint
+    per subfolder (e.g. nvidia/GR00T-N1.7-LIBERO → libero_spatial/, …): set
+    it to the subfolder and we fetch just that checkpoint. Left unset (the
+    common case), loading is unchanged.
     """
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
@@ -79,6 +86,7 @@ class Gr00tAdapter(VLAModel):
         embodiment_tag: Optional[str] = None,
         device: str = "cuda:0",
         camera_mapping: Optional[dict[str, str]] = None,
+        model_subfolder: Optional[str] = None,
     ):
         if not model_path:
             raise ValueError(
@@ -114,8 +122,24 @@ class Gr00tAdapter(VLAModel):
                 f"Unknown embodiment_tag '{embodiment_tag}'. Available: {available}"
             ) from e
 
+        # Resolve model_path → a LOCAL checkpoint dir. Gr00tPolicy does
+        # ``AutoModel.from_pretrained(Path(model_path))``, which loads a
+        # local dir or a *plain* HF repo — it cannot reach an HF subfolder.
+        # Multi-suite repos (e.g. nvidia/GR00T-N1.7-LIBERO) ship one
+        # checkpoint per suite in a subfolder (libero_spatial/, ...). When
+        # model_subfolder is set we fetch just that subfolder and point the
+        # policy at the local copy. A plain repo / local dir passes through.
+        resolved_path = model_path
+        if model_subfolder:
+            import os
+            from huggingface_hub import snapshot_download
+            local_root = snapshot_download(
+                model_path, allow_patterns=f"{model_subfolder}/*",
+            )
+            resolved_path = os.path.join(local_root, model_subfolder)
+
         self.policy = Gr00tPolicy(
-            model_path=model_path,
+            model_path=resolved_path,
             embodiment_tag=embodiment_enum,
             device=device,
         )
