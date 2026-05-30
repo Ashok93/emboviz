@@ -236,16 +236,23 @@ class Gr00tAdapter(VLAModel):
                 key_chunk = arr[np.newaxis, :]
             chunks_per_key.append(key_chunk.astype(np.float32))
 
-        if chunks_per_key:
-            # Align time dim across keys (take min T) then concat along D.
-            min_t = min(c.shape[0] for c in chunks_per_key)
-            chunk = np.concatenate(
-                [c[:min_t] for c in chunks_per_key], axis=-1,
-            ).astype(np.float32)
-            action = chunk[0]
-        else:
-            chunk = np.zeros((1, 0), dtype=np.float32)
-            action = np.zeros(0, dtype=np.float32)
+        if not chunks_per_key:
+            # No declared action key produced an array. Refuse to emit a
+            # zero-length action: a 0-dim vector would feed a meaningless
+            # (or silently broadcast) comparison into the diagnostics. Raise
+            # with the mismatch instead of fabricating an empty verdict.
+            raise RuntimeError(
+                f"GR00T returned no arrays for any declared action key "
+                f"{list(self._action_keys)} (policy output keys: "
+                f"{sorted(action_dict)}). Cannot build an action — check the "
+                f"embodiment's action modality vs. the policy output."
+            )
+        # Align time dim across keys (take min T) then concat along D.
+        min_t = min(c.shape[0] for c in chunks_per_key)
+        chunk = np.concatenate(
+            [c[:min_t] for c in chunks_per_key], axis=-1,
+        ).astype(np.float32)
+        action = chunk[0]
 
         self._action_dim = int(action.size)
         return ActionResult(
