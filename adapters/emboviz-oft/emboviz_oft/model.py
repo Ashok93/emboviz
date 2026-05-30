@@ -384,10 +384,12 @@ class OpenVLAOFTAdapter(VLAModel):
             query_pos = first_action_pos
 
         # Query-position attention to all keys, per layer & head, with the
-        # CONTENT-INDEPENDENT attention-sink component removed: subtract the
-        # query-averaged attention (any token attended-to regardless of query —
-        # BOS/sink — cancels; query-specific grounding survives). Same pipeline
-        # as OpenVLA/π0/GR00T. (Xiao et al. 2309.17453.)
+        # CONTENT-INDEPENDENT component removed: subtract the query-averaged
+        # attention (any token attended-to regardless of query — a BOS/sink —
+        # cancels; query-specific grounding survives). Same pipeline as
+        # OpenVLA/π0/GR00T. Attention sinks are documented by Xiao et al.
+        # 2309.17453 (whose remedy is KV-retention, not this); the
+        # mean-over-queries subtraction is our adapter-local heuristic.
         per_layer = []
         for layer_attn in outputs.attentions:
             a = layer_attn[0]                               # (n_heads, seq, seq)

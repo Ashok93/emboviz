@@ -372,13 +372,15 @@ class Gr00tAdapter(VLAModel):
             )
 
         # Last text token's attention to the image, per layer & head, with the
-        # CONTENT-INDEPENDENT attention-sink component removed. An attention
-        # sink / ViT register token (Xiao et al. 2309.17453; Darcet et al.
-        # "ViTs Need Registers" ICLR'24) is attended-to regardless of the query
-        # — e.g. Qwen's corner patches. We isolate the instruction-SPECIFIC
-        # grounding by subtracting the query-averaged attention (the
-        # content-independent component) from the last-token row, per (layer,
-        # head): sink tokens are high in BOTH and cancel; grounding survives.
+        # CONTENT-INDEPENDENT component removed. Attention sinks / ViT register
+        # tokens — attended-to regardless of the query, e.g. Qwen's corner
+        # patches — are documented by Xiao et al. 2309.17453 and Darcet et al.
+        # "ViTs Need Registers" ICLR'24 (their remedies are KV-retention /
+        # added register tokens, NOT this subtraction). We isolate the
+        # instruction-SPECIFIC grounding with an adapter-local heuristic:
+        # subtract the query-averaged attention from the last-token row, per
+        # (layer, head) — sink tokens are high in BOTH and cancel; grounding
+        # survives.
         full_seq = int(attentions[0].shape[-1])
         query_pos = full_seq - 1
         per_layer = []
@@ -570,14 +572,19 @@ class Gr00tAdapter(VLAModel):
                 ehs = hidden_states if encoder_hidden_states is None else encoder_hidden_states
                 if encoder_hidden_states is not None and attn.norm_cross:
                     ehs = attn.norm_encoder_hidden_states(ehs)
-                k = attn.to_k(ehs); v = attn.to_v(ehs)
-                q = attn.head_to_batch_dim(q); k = attn.head_to_batch_dim(k); v = attn.head_to_batch_dim(v)
+                k = attn.to_k(ehs)
+                v = attn.to_v(ehs)
+                q = attn.head_to_batch_dim(q)
+                k = attn.head_to_batch_dim(k)
+                v = attn.head_to_batch_dim(v)
                 probs = attn.get_attention_scores(q, k, None)
-                bh, tq, tk = probs.shape; h = attn.heads
+                bh, tq, tk = probs.shape
+                h = attn.heads
                 dit_attns.append(probs.detach().float().cpu().reshape(bh // h, h, tq, tk)[0].numpy())
                 out = torch.bmm(probs, v)
                 out = attn.batch_to_head_dim(out)
-                out = attn.to_out[0](out); out = attn.to_out[1](out)
+                out = attn.to_out[0](out)
+                out = attn.to_out[1](out)
                 return out
 
         original_procs = {}
@@ -653,44 +660,53 @@ class Gr00tAdapter(VLAModel):
         )
 
     def _state_key_dim(self, state_key: str) -> int:
-        """Inferred dim for a GR00T state key.
+        """Dim of a GR00T state key, read from the policy's normalization
+        metadata (per-key min/max) — the single source of truth.
 
-        GR00T's normalization metadata stores per-key min/max — that's the
-        truth. We walk into the policy's processor to read it; if the
-        processor's introspection path is shaped differently (different
-        gr00t version), we warn and fall back to name-based heuristics
-        (9d → 9, joint → 7, gripper → 1) so the user knows we are
-        guessing.
+        We REFUSE to guess. If the metadata path is absent, shaped
+        differently in this gr00t version, or has no entry for this key, we
+        RAISE. A fabricated dim would silently mis-route the state vector:
+        the equality gate in ``_build_observation`` would then either reject
+        a correctly-routed segment or accept a wrong one — exactly the kind
+        of confident-wrong-answer this tool must never produce. Fix the
+        introspection path (or pin a compatible gr00t) instead of guessing.
         """
-        import warnings as _warnings
         try:
-            proc = self.policy.processor
-            sap = proc.state_action_processor
+            sap = self.policy.processor.state_action_processor
             embodiments = getattr(sap, "state_norm", None)
-            if embodiments:
-                params = (
-                    embodiments.get(self._embodiment_name.lower())
-                    or next(iter(embodiments.values()))
-                )
-                if params and state_key in params:
-                    p = params[state_key]
-                    mn = getattr(p, "min", None)
-                    if mn is not None and hasattr(mn, "__len__"):
-                        return int(len(mn))
-        except (AttributeError, KeyError, TypeError) as e:
-            _warnings.warn(
-                f"GR00T state-dim introspection failed for "
-                f"key='{state_key}': {type(e).__name__}: {e}. Falling back "
-                "to name-based heuristic; verify the dim matches your "
-                "embodiment's normalization spec.",
-                stacklevel=2,
+        except AttributeError as e:
+            raise RuntimeError(
+                f"Cannot determine the dim of GR00T state key '{state_key}': "
+                "the policy.processor.state_action_processor path is absent "
+                f"({type(e).__name__}: {e}). This gr00t version exposes "
+                "normalization metadata differently. Update this "
+                "introspection path for the installed gr00t — we do not guess."
+            ) from e
+        if not embodiments:
+            raise RuntimeError(
+                f"Cannot determine the dim of GR00T state key '{state_key}': "
+                "the processor's state_norm is empty/None. We do not guess."
             )
-        k = state_key.lower()
-        if "9d" in k:
-            return 9
-        if "gripper" in k:
-            return 1
-        return 7
+        params = (
+            embodiments.get(self._embodiment_name.lower())
+            or next(iter(embodiments.values()))
+        )
+        if not params or state_key not in params:
+            raise RuntimeError(
+                f"GR00T normalization metadata has no entry for state key "
+                f"'{state_key}' (available: "
+                f"{sorted(params) if params else []}). Cannot determine its "
+                f"dim. Check that embodiment '{self._embodiment_name}' "
+                "declares this state key — we do not guess."
+            )
+        mn = getattr(params[state_key], "min", None)
+        if mn is None or not hasattr(mn, "__len__"):
+            raise RuntimeError(
+                f"GR00T normalization entry for state key '{state_key}' has "
+                "no length-bearing 'min' field; cannot read its dim. We do "
+                "not guess."
+            )
+        return int(len(mn))
 
     # ----- helpers -------------------------------------------------------
 

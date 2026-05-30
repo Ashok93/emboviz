@@ -34,12 +34,15 @@ SPEC = AdapterSpec(
     #   • transformers — OpenVLA's modeling code targets the 4.40–4.49
     #     window; 4.50 dropped APIs it still uses.
     #   • timm 0.9.x — OpenVLA's prismatic-vlm hard-checks this range.
-    #   • lerobot 0.3.x — Bridge / LIBERO datasets are exposed through
-    #     LeRobotDataset; pinned below 0.5 because 0.5 reshuffled the
-    #     dataset module hierarchy.
     #   • Core + this shim. The lifecycle layer rewrites both to
     #     ``-e <local_path>`` if installed editable in the caller's
     #     main venv (dev mode); user-mode pulls both from PyPI.
+    #
+    # NO lerobot / torchcodec / av / pandas: this is an inference-only
+    # worker. It does NOT read datasets — Scenes arrive pre-decoded over
+    # the ZMQ wire — and OpenVLA's hub modeling + processing code import
+    # none of them (only torch/transformers/timm/tokenizers). They were
+    # dead weight here, same as the OFT spec already documents.
     runtime_pip=(
         "torch>=2.2,<2.10",
         "torchvision>=0.17",
@@ -51,10 +54,6 @@ SPEC = AdapterSpec(
         "sentencepiece>=0.2",
         "einops>=0.8",
         "safetensors>=0.4",
-        "lerobot>=0.3,<0.5",
-        "torchcodec>=0.5",
-        "av>=14",
-        "pandas>=2.0",
         "emboviz-wire",
         "emboviz-openvla",
     ),

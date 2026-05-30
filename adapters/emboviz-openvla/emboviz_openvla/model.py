@@ -225,10 +225,14 @@ class OpenVLAAdapter(VLAModel):
         grid_side = int(np.sqrt(n_image))
 
         # Query-position attention to all keys, per layer & head, with the
-        # CONTENT-INDEPENDENT attention-sink component removed: subtract the
-        # query-averaged attention so any token attended-to regardless of query
-        # (BOS/sink) cancels and the query-specific grounding survives. (Xiao
-        # et al. 2309.17453; near no-op for LLaMA, which has weak image sinks.)
+        # CONTENT-INDEPENDENT component removed: subtract the query-averaged
+        # attention so any token attended-to regardless of query (a BOS/sink)
+        # cancels and the query-specific grounding survives. Attention sinks
+        # (tokens attended-to regardless of content) are documented by Xiao
+        # et al. 2309.17453, whose own remedy is KV-retention (StreamingLLM) —
+        # the mean-over-queries SUBTRACTION here is our adapter-local
+        # baseline-removal heuristic, not that paper's method. Near no-op for
+        # LLaMA, which has weak image sinks.
         per_layer_per_head = []
         for layer_attn in outputs.attentions:
             a = layer_attn[0]                               # (n_heads, seq, seq)

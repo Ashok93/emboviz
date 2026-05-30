@@ -61,7 +61,11 @@ class Capability(Flag):
     NEURON_ABLATION = auto()       # predict_with_neuron_ablation()
     GRADIENT = auto()              # backprop possible (for captum-style attribution)
     BATCH_INFERENCE = auto()
-    CHUNK_PREDICTION = auto()      # predict_chunk() — multi-step action chunks
+    CHUNK_PREDICTION = auto()      # reserved for a dedicated predict_chunk() API.
+                                   # No diagnostic gates on this flag: chunk
+                                   # diagnostics key off ActionResult.action_chunk
+                                   # being populated (which OFT / pi0 / GR00T do
+                                   # from predict()), so they need not declare it.
     ACTIVATION_PATCHING = auto()   # predict_with_residual_patch() — causal mediation
 
 

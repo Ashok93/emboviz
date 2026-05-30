@@ -597,9 +597,11 @@ class Pi0Adapter(VLAModel):
         query_pos = int(valid_positions[-1])    # last instruction token
 
         # Last instruction token's attention to image, per layer & head, with
-        # the CONTENT-INDEPENDENT attention-sink component removed (subtract the
-        # query-averaged attention; sinks are high for every query and cancel,
-        # instruction-specific grounding survives). Xiao et al. 2309.17453.
+        # the CONTENT-INDEPENDENT component removed (subtract the query-averaged
+        # attention; sinks are high for every query and cancel,
+        # instruction-specific grounding survives). Attention sinks are
+        # documented by Xiao et al. 2309.17453 (whose remedy is KV-retention);
+        # the mean-over-queries subtraction is our adapter-local heuristic.
         per_layer = []
         for layer in range(n_layers):
             a = prefix_attns[layer][0]                          # (H, S, S)

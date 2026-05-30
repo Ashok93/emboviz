@@ -227,9 +227,13 @@ def average_action_results(results: list[ActionResult]) -> ActionResult:
     in-worker ``VLAModel.predict_batch`` n-sample expansion, so both reduce
     noise identically.
 
-    ``action`` and ``action_chunk`` are averaged. A model that emits
-    chunks of inconsistent shape across samples of one scene has a real
-    bug (truncated / diverged decoding) — we raise rather than silently
+    ``action`` and ``action_chunk`` are averaged. ``action_tokens`` and
+    ``action_distribution`` are deliberately NOT carried onto the averaged
+    result: discrete tokens / logits do not average meaningfully across
+    stochastic samples. (Only OpenVLA populates ``action_tokens`` and it is
+    deterministic, so it is never averaged with n>1 in practice.) A model
+    that emits chunks of inconsistent shape across samples of one scene has a
+    real bug (truncated / diverged decoding) — we raise rather than silently
     truncate, so a chunk-based diagnostic never runs on garbage.
 
     A single-element list is returned unchanged (no copy, no metadata
