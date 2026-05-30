@@ -92,17 +92,29 @@ class AttentionDriftDiagnostic(Diagnostic):
                 "camera in the dataset adapter — never falling back silently."
             )
 
-        centroids: list[tuple[float, float]] = []   # (cy_norm, cx_norm) in [0,1]
+        # Collect centroids ONLY for frames with usable attention, tracking
+        # each frame's trajectory index. A frame whose attention failed
+        # upstream is absent from ``attention_per_frame_clean`` (the runner
+        # records it); we SKIP it rather than re-extract into the same failure,
+        # and we never measure drift across the gap it leaves (that would
+        # conflate >1 frame of motion). With no pre-extracted dict (standalone
+        # use) we extract here.
+        indexed_centroids: list[tuple[int, float, float]] = []   # (traj_idx, cy_norm, cx_norm)
+        skipped_frames: list[int] = []
         for i, scene in enumerate(trajectory.frames):
             img_attn: Optional[np.ndarray] = None
             if attention_per_frame_clean is not None:
                 per_cam = attention_per_frame_clean.get(i)
                 if per_cam is not None and self.camera in per_cam:
                     img_attn = np.asarray(per_cam[self.camera], dtype=np.float32)
-            if img_attn is None:
-                # Fall back to extracting attention ourselves only when
-                # the runner didn't provide it (e.g. standalone use of
-                # the diagnostic outside the integrated runner).
+                else:
+                    # Dict supplied but this frame is absent → its extraction
+                    # failed upstream. Skip it (do NOT re-extract); it simply
+                    # contributes no centroid.
+                    skipped_frames.append(int(trajectory.frame_indices[i]))
+                    continue
+            else:
+                # Standalone use: extract here.
                 try:
                     attn = model.extract_attention(scene, self.query)
                 except NotSupported as e:
@@ -126,20 +138,48 @@ class AttentionDriftDiagnostic(Diagnostic):
             yy, xx = np.meshgrid(np.arange(side), np.arange(side), indexing="ij")
             cy = float((img_norm * yy).sum()) / max(side - 1, 1)
             cx = float((img_norm * xx).sum()) / max(side - 1, 1)
-            centroids.append((cy, cx))
+            indexed_centroids.append((i, cy, cx))
+
+        if len(indexed_centroids) < 2:
+            return self._not_applicable(
+                model, first_scene,
+                f"need ≥2 frames with usable attention for drift; only "
+                f"{len(indexed_centroids)} of {len(trajectory.frames)} frames "
+                f"had it (attention failed/absent on dataset frames "
+                f"{skipped_frames}).",
+            )
 
         # Pixel-space conversion uses the configured camera's image size.
         h, w = np.asarray(first_scene.observations.images[self.camera].data).shape[:2]
-        centroids_px = [(cy * h, cx * w) for cy, cx in centroids]
+        centroids_px = [
+            (i, cy * h, cx * w) for i, cy, cx in indexed_centroids
+        ]
 
-        # Compute frame-to-frame centroid displacement in pixels.
+        # Frame-to-frame centroid displacement in pixels — ONLY between frames
+        # adjacent in the trajectory (index gap == 1). Each point is
+        # (later-frame dataset index, displacement_px) so the rerun series maps
+        # correctly even when frames were skipped.
         displacements: list[float] = []
-        for i in range(1, len(centroids_px)):
-            cy0, cx0 = centroids_px[i - 1]
-            cy1, cx1 = centroids_px[i]
-            displacements.append(float(np.hypot(cy1 - cy0, cx1 - cx0)))
-        mean_drift = float(np.mean(displacements)) if displacements else 0.0
-        max_drift = float(np.max(displacements)) if displacements else 0.0
+        displacement_points: list[tuple[int, float]] = []
+        for k in range(1, len(centroids_px)):
+            i_prev, cy0, cx0 = centroids_px[k - 1]
+            i_cur, cy1, cx1 = centroids_px[k]
+            if i_cur - i_prev != 1:
+                continue   # a frame between them was skipped — don't span the gap
+            d = float(np.hypot(cy1 - cy0, cx1 - cx0))
+            displacements.append(d)
+            displacement_points.append((int(trajectory.frame_indices[i_cur]), d))
+
+        if not displacements:
+            return self._not_applicable(
+                model, first_scene,
+                f"{len(indexed_centroids)} frames had attention but no two were "
+                f"adjacent in the trajectory (every consecutive pair straddled a "
+                f"frame whose attention failed: {skipped_frames}); cannot measure "
+                "frame-to-frame drift.",
+            )
+        mean_drift = float(np.mean(displacements))
+        max_drift = float(np.max(displacements))
 
         raw_numbers = {
             "mean_drift_px":     mean_drift,
@@ -149,6 +189,8 @@ class AttentionDriftDiagnostic(Diagnostic):
             "image_size_hw":     [h, w],
             "camera":            self.camera,
             "n_frame_pairs":     len(displacements),
+            "n_frames_skipped":  len(skipped_frames),
+            "skipped_frames":    skipped_frames,
         }
         if mean_drift >= self.drift_critical_px:
             sev = Severity.CRITICAL
@@ -236,11 +278,14 @@ class AttentionDriftDiagnostic(Diagnostic):
             direction="higher_is_worse",
             explanation=verdict,
             finding=finding,
-            per_variant={f"drift_{i}_to_{i+1}": d for i, d in enumerate(displacements)},
+            per_variant={
+                f"drift_to_frame_{fi}": d for fi, d in displacement_points
+            },
             raw={
-                "centroids_normalized": centroids,
-                "centroids_pixel": centroids_px,
-                "displacements_pixel": displacements,
+                "centroids_normalized": [[i, cy, cx] for i, cy, cx in indexed_centroids],
+                "centroids_pixel": [[i, cyp, cxp] for i, cyp, cxp in centroids_px],
+                "displacements_pixel": [[fi, d] for fi, d in displacement_points],
+                "skipped_frames": skipped_frames,
                 "image_size_hw": [h, w],
                 "camera": self.camera,
                 "drift_warn_px": self.drift_warn_px,

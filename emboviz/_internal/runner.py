@@ -397,6 +397,7 @@ def run_story(args) -> None:
     has_attention = bool(model.capabilities & Capability.ATTENTION)
     baselines: list[ActionResult] = []
     attention_per_frame_clean: dict[int, dict[str, np.ndarray]] = {}
+    attention_failed_frames: list[int] = []
     for i, scene in enumerate(trajectory.frames):
         baselines.append(averaged_predict(model, scene, calibration.n_samples))
         if has_attention:
@@ -415,12 +416,16 @@ def run_story(args) -> None:
                 # from a clean GPU.
                 del am
             except Exception as e:
-                print(f"      attn frame {i} failed: {type(e).__name__}: {e}",
-                      flush=True)
-                # Mark attention as not-applicable from this point; the
-                # drift diagnostic will fall through cleanly.
-                attention_per_frame_clean.clear()
-                has_attention = False
+                # A SINGLE frame's failure (e.g. a transient OOM) must NOT
+                # wipe the whole episode's attention. Record the failed frame
+                # and continue: the drift diagnostic skips absent frames (and
+                # never measures drift across the gap), and the exporter shows
+                # the overlay on the frames that succeeded. Only if EVERY frame
+                # fails does attention_per_frame_clean stay empty — handled by
+                # the not-applicable branch below.
+                print(f"      attn frame {i} failed (skipped, kept the rest): "
+                      f"{type(e).__name__}: {e}", flush=True)
+                attention_failed_frames.append(int(trajectory.frame_indices[i]))
         _maybe_collect(i)
         if (i + 1) % 10 == 0:
             print(f"      baseline+attn {i + 1}/{len(trajectory.frames)}",
@@ -438,12 +443,13 @@ def run_story(args) -> None:
             f"model {model.model_id} does not expose Capability.ATTENTION"
         )
     elif not has_attention or not attention_per_frame_clean:
-        # Pre-extraction failed earlier — don't double-fail by running the
-        # diagnostic, which would call extract_attention again and hit
-        # the same adapter bug. Record it once with the actual reason.
+        # Attention extraction failed on EVERY frame (not just some) — don't
+        # double-fail by running the diagnostic, which would re-extract and
+        # hit the same adapter bug. Record it once with the actual reason.
         not_applicable["internal.attention_drift"] = (
-            "model declares Capability.ATTENTION but per-frame attention "
-            "pre-extraction failed in step 4 — see runner stderr for the "
+            f"model declares Capability.ATTENTION but attention extraction "
+            f"failed on all {len(trajectory.frames)} frames (dataset frames "
+            f"{attention_failed_frames}) — see runner stderr for the "
             "underlying error. The diagnostic refuses to retry into the "
             "same failure."
         )
@@ -455,14 +461,13 @@ def run_story(args) -> None:
         if drift.severity == Severity.UNKNOWN:
             not_applicable["internal.attention_drift"] = drift.explanation
         else:
-            # Per-frame-pair drift series for the Rerun time-series plot.
-            # displacement[i] is the centroid move between analyzed frames
-            # i and i+1, so it belongs to the LATER frame's dataset index.
-            disp = drift.raw.get("displacements_pixel", [])
+            # Per-frame-pair drift series for the Rerun time-series plot. The
+            # diagnostic emits displacements_pixel as [later_frame_dataset_idx,
+            # px] pairs (gap-aware: only frames adjacent in the trajectory), so
+            # we map it straight through.
             drift_series = [
-                [int(trajectory.frame_indices[i + 1]), float(d)]
-                for i, d in enumerate(disp)
-                if i + 1 < len(trajectory.frame_indices)
+                [int(fi), float(d)]
+                for fi, d in drift.raw.get("displacements_pixel", [])
             ]
             trajectory_axes["internal.attention_drift"] = {
                 "severity":         drift.severity.value,
@@ -600,6 +605,7 @@ def run_story(args) -> None:
     print("[7/7] prompt paraphrase on frame 0...", flush=True)
     pp = PromptParaphrasePerturber()
     paraphrase_deltas = {}
+    paraphrase_failed: list[str] = []   # variants whose predict raised — surfaced in summary
     baseline_action = baselines[0].action   # reuse the precomputed frame-0 baseline
     for variant in pp.variants(trajectory.frames[0]):
         try:
@@ -609,6 +615,7 @@ def run_story(args) -> None:
         except Exception as e:
             print(f"      paraphrase {variant.variant_id} failed: "
                   f"{type(e).__name__}: {e}", flush=True)
+            paraphrase_failed.append(variant.variant_id)
             continue
         paraphrase_deltas[variant.variant_id] = float(
             np.linalg.norm(pred - baseline_action)
@@ -808,6 +815,7 @@ def run_story(args) -> None:
         "trajectory_axes":   trajectory_axes,
         "not_applicable":    not_applicable,
         "paraphrase_deltas": paraphrase_deltas,
+        "paraphrase_failed": paraphrase_failed,
         "paraphrase_mean_delta": paraphrase_mean,
         "imitation_accuracy": (
             {
