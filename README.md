@@ -152,7 +152,7 @@ model:
     unnorm_key: bridge_orig
 
 dataset:
-  format: lerobot                  # lerobot | hdf5 | rlds  (the 3 self-describing formats)
+  format: lerobot                  # lerobot | gr00t | hdf5 | rlds  (self-describing formats)
   path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id, local dir, h5 file, or TFDS builder name
   cameras:
     primary: observation.images.image_0      # model camera role -> dataset key
@@ -172,8 +172,8 @@ analysis:
 output: ./report/my-run
 ```
 
-The schema is **identical for all three input formats** (`lerobot` / `hdf5`
-/ `rlds`) — only the reader behind each `key` changes. The dataset's own
+The schema is **identical for every input format** (`lerobot` / `gr00t` /
+`hdf5` / `rlds`) — only the reader behind each `key` changes. The dataset's own
 schema (dims, per-dim names) is read from the format itself (`meta/info.json`
 / HDF5 array shapes / the TFDS feature spec); you only declare what the
 format *can't* encode (which camera is `primary`, the state convention, the
@@ -246,12 +246,13 @@ field reference.
 
 | Format | Ingest | Export | Config `dataset.format` |
 |---|---|---|---|
-| LeRobot v2/v3 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | ✅ | — | `lerobot` |
+| LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | ✅ | — | `lerobot` |
+| GR00T format — LeRobot v2.1 + `modality.json` (NVIDIA Isaac-GR00T) | ✅ (pkg: `emboviz-reader-gr00t`) | — | `gr00t` |
 | HDF5 (Robomimic, ALOHA, NVIDIA Isaac Lab Mimic) | ✅ | — | `hdf5` |
 | RLDS / TFDS (Open-X-Embodiment, RT-X, Octo) | ✅ (extra: `rlds`) | — | `rlds` |
 | Rerun `.rrd` | — | ✅ **(killer feature)** | — (viz output, not a dataset input) |
 
-The three ingest formats are the self-describing "saved episode" formats:
+These ingest formats are the self-describing "saved episode" formats:
 emboviz reads dims/per-dim names from each format's own schema. Rerun `.rrd`
 and MCAP/rosbag2 are recording / debugging-viz formats, not dataset inputs.
 
@@ -362,7 +363,7 @@ emboviz/                 the lean host engine (no torch, no lerobot)
   probes/          trainable linear failure probes
   diagnostics/     the shipped diagnostics — perturb × metric × model
   exporters/       Rerun .rrd writer + failure-moment correlation
-  datasets/        manifest builder (hdf5/rlds in-process; lerobot → reader worker)
+  datasets/        manifest builder (hdf5/rlds in-process; lerobot/gr00t → reader workers)
   taxonomy/        canonical failure-mode / preposition lists
   adapters/        worker registry + lifecycle (connect / connect_reader)
   _internal/       runner (run_story) + multi-episode aggregation + report.md/html

@@ -27,8 +27,8 @@ emboviz analyze --config configs/my-run.yaml
 
 ## The contract is identical for every format
 
-`dataset.format` may be `lerobot | hdf5 | rlds` — the three self-describing
-"saved episode" formats. The **schema you fill in is the same** regardless —
+`dataset.format` may be `lerobot | gr00t | hdf5 | rlds` — the self-describing
+"saved episode" formats (`gr00t` = LeRobot v2.1 + `modality.json`). The **schema you fill in is the same** regardless —
 only the reader behind each `key` changes (a LeRobot key reads from parquet;
 an HDF5 key reads from an h5 dataset; an RLDS key reads from the TFDS step
 features). You never see that difference. The dims/per-dim-names are read from
