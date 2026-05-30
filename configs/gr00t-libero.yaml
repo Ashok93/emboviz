@@ -1,0 +1,65 @@
+# emboviz run config — NVIDIA GR00T-N1.7 (LIBERO finetune) on LIBERO-Spatial.
+#
+#   emboviz analyze --config configs/gr00t-libero.yaml
+#
+# Uses the OFFICIAL LIBERO-finetuned checkpoint nvidia/GR00T-N1.7-LIBERO,
+# which carries the LIBERO_PANDA embodiment head (the base GR00T-N1.7-3B
+# does NOT — its only sim embodiments are OXE/DROID).
+#
+# Dataset is the GR00T-format LIBERO-Spatial set: a LeRobot **v2.1** dataset
+# + meta/modality.json. Prepare it once (Isaac-GR00T's own workflow):
+#
+#   hf download --repo-type dataset \
+#     IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
+#     --local-dir ~/data/libero_spatial_no_noops_gr00t
+#   cp Isaac-GR00T/examples/LIBERO/modality.json \
+#     ~/data/libero_spatial_no_noops_gr00t/meta/
+#
+# Then point dataset.path at that local dir. (The published dataset is plain
+# LeRobot v2.1 and does NOT ship modality.json — the reader requires it.)
+
+model:
+  adapter: gr00t
+  kwargs:
+    model_path: nvidia/GR00T-N1.7-LIBERO          # LIBERO-finetuned checkpoint (has the LIBERO_PANDA head)
+    model_subfolder: libero_spatial               # this repo ships one checkpoint per suite in a subfolder
+    embodiment_tag: LIBERO_PANDA                  # state/action interpretation for LIBERO Panda
+    device: "cuda:0"
+    # Map our Scene camera roles (left) → LIBERO_PANDA's declared video
+    # keys (right). Required: this embodiment declares 2 video keys.
+    camera_mapping:
+      primary: image
+      wrist:   wrist_image
+
+dataset:
+  format: gr00t                                   # LeRobot v2.1 + meta/modality.json → emboviz-reader-gr00t
+  path: ~/data/libero_spatial_no_noops_gr00t      # local dir prepared as above (must contain meta/modality.json)
+
+  cameras:                                        # LIBERO ships agentview + eye-in-hand
+    primary: observation.images.image
+    wrist:   observation.images.wrist_image
+
+  state:
+    key: observation.state                        # [8]: eef pos(3) + axis-angle rot(3) + gripper(2)
+    convention: ee_pose                           # position + 3 rotation params; rotation is axis-angle here
+
+  action:
+    key: action                                   # [7]: pos(3) + axis-angle(3) + gripper(1)
+
+  gripper:                                         # the gripper INDEX comes from meta/modality.json
+    kind: parallel_jaw                            #   (state.gripper range); the config supplies only the
+    units: unit                                   #   physical kind/units/range. No hand-typed source.
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"
+  frame_start: 0
+  n_frames: 4
+  mask_query: "the black bowl"                    # VERIFY against ep0's actual instruction at smoke time
+  detector: sam3
+  diagnostics: all
+
+output: ./report/gr00t-libero

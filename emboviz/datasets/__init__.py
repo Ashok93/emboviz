@@ -1,11 +1,14 @@
 """Episode source adapters — one per dataset input format.
 
-The framework reads three self-describing dataset formats:
-  • LeRobot v2.x   — read by the ISOLATED ``emboviz-lerobot`` worker
-                     (its venv pins lerobot; core never imports it). The
-                     host gets a ``ZMQReaderClient`` via
+The framework reads these self-describing dataset formats:
+  • LeRobot v3.0   — read by the ISOLATED ``emboviz-lerobot`` worker
+                     (its venv pins the latest lerobot; core never imports
+                     it). The host gets a ``ZMQReaderClient`` via
                      ``emboviz.adapters.connect_reader`` — see
                      ``emboviz.datasets.manifest``.
+  • GR00T          — LeRobot v2.1 + ``meta/modality.json`` (NVIDIA
+                     Isaac-GR00T); read by the ISOLATED
+                     ``emboviz-reader-gr00t`` worker (pins lerobot 0.3.x).
   • HDF5           — Robomimic / ALOHA / Isaac Lab Mimic; read in-process.
   • RLDS / TFDS    — Open-X-Embodiment / RT-X / Octo; read in-process.
 

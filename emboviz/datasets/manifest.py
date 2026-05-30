@@ -17,12 +17,14 @@ What the manifest declares (uniform across formats):
 The dataset's own schema (dims + per-dim names) is read from the source —
 never hand-typed, never guessed.
 
-Format coverage — the three real "saved episode" dataset formats:
-  • ``lerobot`` — read by the ISOLATED ``emboviz-lerobot`` worker (its
-    venv pins a lerobot version that matches the dataset's on-disk
-    format; core never imports lerobot). ``build_source`` connects to
-    that worker and returns its :class:`ZMQReaderClient`, which IS an
-    EpisodeSource over the wire.
+Format coverage — the "saved episode" dataset formats:
+  • ``lerobot`` — LeRobot v3.0, read by the ISOLATED ``emboviz-lerobot``
+    worker (its venv pins the latest lerobot; core never imports lerobot).
+    ``build_source`` connects to that worker and returns its
+    :class:`ZMQReaderClient`, which IS an EpisodeSource over the wire.
+  • ``gr00t``   — LeRobot v2.1 + ``meta/modality.json`` (NVIDIA Isaac-GR00T),
+    read by the ISOLATED ``emboviz-reader-gr00t`` worker (its venv pins the
+    last v2.1-capable lerobot, 0.3.x). Same wire mechanism as ``lerobot``.
   • ``hdf5``    — read in-process (h5py is light + conflict-free).
   • ``rlds``    — read in-process (the ``rlds`` extra pulls tensorflow).
 
@@ -64,6 +66,9 @@ def build_source(
     if format == "lerobot":
         return _build_lerobot(path, cameras, state, action, gripper,
                               instruction, n_episodes)
+    if format == "gr00t":
+        return _build_gr00t(path, cameras, state, action, gripper,
+                            instruction, n_episodes)
     if format == "hdf5":
         return _build_hdf5(path, cameras, state, action, gripper,
                            instruction, extra)
@@ -71,9 +76,10 @@ def build_source(
         return _build_rlds(path, cameras, state, action, gripper,
                            instruction, extra)
     raise ValueError(
-        f"unknown dataset.format={format!r} — emboviz reads the three "
-        "self-describing dataset formats: 'lerobot', 'hdf5', 'rlds'. "
-        "(Rerun/MCAP are recording-viz formats, not dataset inputs.)"
+        f"unknown dataset.format={format!r} — emboviz reads these "
+        "self-describing dataset formats: 'lerobot' (v3.0), 'gr00t' "
+        "(LeRobot v2.1 + modality.json), 'hdf5', 'rlds'. (Rerun/MCAP are "
+        "recording-viz formats, not dataset inputs.)"
     )
 
 
@@ -102,6 +108,35 @@ def _build_lerobot(path, cameras, state, action, gripper, instruction, n_episode
         "n_episodes": n_episodes,
     }
     return connect_reader("lerobot", reader_kwargs=reader_kwargs)
+
+
+# ── GR00T — isolated reader worker (LeRobot v2.1 + modality.json) ─────
+
+def _build_gr00t(path, cameras, state, action, gripper, instruction, n_episodes):
+    """Connect to the isolated ``emboviz-reader-gr00t`` reader worker.
+
+    A GR00T dataset is a LeRobot **v2.1** dataset plus ``meta/modality.json``.
+    lerobot >=0.4 cannot read v2.x, so this reader's venv pins the last
+    v2.1-capable lerobot (0.3.x); it is a SEPARATE reader from the v3.0
+    ``lerobot`` one and from the GR00T *model* adapter. The reader's spec
+    name is ``reader-gr00t`` (its own venv); the user-facing format is
+    ``gr00t``. Same lifecycle as the lerobot reader: spawn the worker in
+    its own venv and return its :class:`ZMQReaderClient` (an
+    ``EpisodeSource`` over the wire). The worker reads ``info.json`` +
+    ``modality.json`` and builds the RobotProfile itself.
+    """
+    from emboviz.adapters import connect_reader
+
+    reader_kwargs = {
+        "path": path,
+        "cameras": dict(cameras),
+        "state": state,
+        "action": action,
+        "gripper": gripper,
+        "instruction": instruction,
+        "n_episodes": n_episodes,
+    }
+    return connect_reader("reader-gr00t", reader_kwargs=reader_kwargs)
 
 
 # ── HDF5 — in-process (h5py is light, conflict-free) ──────────────────

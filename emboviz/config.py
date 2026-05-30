@@ -7,8 +7,8 @@ encode), and the analysis parameters (episodes, memorization target,
 diagnostics, output). There is no CLI flag soup — `emboviz analyze
 --config run.yaml` reads it all from here.
 
-The schema is identical for every dataset ``format`` (lerobot / hdf5 /
-rlds — the three self-describing "saved episode" formats): only the
+The schema is identical for every dataset ``format`` (lerobot / gr00t /
+hdf5 / rlds — the self-describing "saved episode" formats): only the
 *reader* behind each ``key`` changes, not what the user writes. Things
 the formats never encode — the state convention, the camera-role→source-key
 binding, the gripper spec — are always declared here, the same way
@@ -36,7 +36,7 @@ _STATE_CONVENTIONS = {
 }
 _GRIPPER_KINDS = {"parallel_jaw", "suction", "binary", "magnetic", "multi_finger"}
 _GRIPPER_UNITS = {"unit", "m", "mm", "rad", "binary"}
-_DATASET_FORMATS = {"lerobot", "hdf5", "rlds"}
+_DATASET_FORMATS = {"lerobot", "gr00t", "hdf5", "rlds"}
 
 
 class _Strict(BaseModel):
@@ -69,7 +69,12 @@ class ActionCfg(_Strict):
 
 
 class GripperCfg(_Strict):
-    source: Union[int, str]                       # index (or per-dim name) of the gripper within the state vector
+    # index (or per-dim name) of the gripper within the state vector.
+    # Optional: the ``gr00t`` reader derives it from the dataset's own
+    # meta/modality.json (its single source of truth), so a gr00t config
+    # omits it. The lerobot / hdf5 / rlds readers require it and raise
+    # clearly if it is absent.
+    source: Optional[Union[int, str]] = None
     kind: str = "parallel_jaw"
     units: str = "unit"
     range: tuple[float, float] = (0.0, 1.0)
@@ -104,7 +109,7 @@ class InstructionCfg(_Strict):
 
 
 class DatasetCfg(_Strict):
-    format: str                                   # lerobot | hdf5 | rlds
+    format: str                                   # lerobot | gr00t | hdf5 | rlds
     path: str                                     # the dataset's identity: LeRobot HF repo id / local dir,
                                                   # HDF5 file path, or RLDS TFDS builder name
     # model logical camera role -> this dataset's actual image/source key.

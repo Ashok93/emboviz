@@ -492,7 +492,8 @@ def _ensure_runtime_venv(
             "pi0":     "~8 GB (downloads checkpoint + Triton autotune ~5-10 min on first inference)",
             "gr00t":   "~7 GB",
             "sam3":    "~5 GB (downloads facebook/sam3 ~3.4 GB; gated, needs HF_TOKEN)",
-            "lerobot": "~3 GB (lerobot 0.3.x + torch + video-decode stack)",
+            "lerobot": "~3 GB (lerobot 0.5.x / v3.0 + torch + video-decode stack)",
+            "reader-gr00t": "~3 GB (lerobot 0.3.x / v2.1 + torch + video-decode stack)",
         }.get(spec.name, "")
         print(
             f"[emboviz] first run for '{spec.name}' — materialising the "

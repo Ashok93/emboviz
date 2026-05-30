@@ -11,7 +11,8 @@
 #   /root/venvs/pi0                         π0 / π0.5 runtime venv
 #   /root/venvs/gr00t                       GR00T-N1.7 runtime venv
 #   /root/venvs/sam3                        SAM 3 detector runtime venv (Python 3.12)
-#   /root/venvs/lerobot                     LeRobot dataset-reader venv (lerobot 0.3.x / v2.1)
+#   /root/venvs/lerobot                     LeRobot v3.0 dataset-reader venv (lerobot 0.5.x)
+#   /root/venvs/reader-gr00t                GR00T-format dataset-reader venv (lerobot 0.3.x / v2.1 + modality.json)
 #
 # Every runtime venv is independent — each pins its own Python + torch +
 # transformers / lerobot + adapter deps. ZeroMQ over Unix sockets is the
@@ -42,8 +43,11 @@ bash "$DIR/04_install_gr00t_venv.sh"
 echo "########## 05 sam3 ##########"
 bash "$DIR/05_install_sam3_venv.sh"
 
-echo "########## 06 lerobot reader ##########"
+echo "########## 06 lerobot reader (v3.0) ##########"
 bash "$DIR/06_install_lerobot_venv.sh"
+
+echo "########## 07 gr00t-format reader (v2.1 + modality.json) ##########"
+bash "$DIR/07_install_reader_gr00t_venv.sh"
 
 echo "########## ALL DONE ##########"
 cat <<'EOM'

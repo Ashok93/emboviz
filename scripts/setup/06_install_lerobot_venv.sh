@@ -7,13 +7,14 @@
 #     emboviz install-lerobot
 #
 # Builds the ISOLATED reader venv (/root/venvs/lerobot via
-# EMBOVIZ_VENVS_DIR) holding lerobot 0.3.x — codebase v2.1, which reads
-# LeRobot v2.0 AND v2.1 datasets. Core never installs lerobot: its
-# transitive ``rerun-sdk<0.27`` pin would collide with core's own
-# ``rerun>=0.32`` .rrd exporter. The reader talks to the host over the
-# SAME ZMQ wire as a model worker; ``emboviz analyze`` spawns it
-# automatically for any ``dataset.format: lerobot`` config (this script
-# just pre-warms the venv so the first run doesn't pay the install).
+# EMBOVIZ_VENVS_DIR) holding the LATEST lerobot (0.5.x) — codebase v3.0,
+# the current official format. (Older LeRobot v2.1 + modality.json GR00T
+# datasets are read by the separate reader-gr00t venv; see script 07.)
+# Core never installs lerobot: its transitive torch / video-decode stack
+# stays out of the host. The reader talks to the host over the SAME ZMQ
+# wire as a model worker; ``emboviz analyze`` spawns it automatically for
+# any ``dataset.format: lerobot`` config (this script just pre-warms the
+# venv so the first run doesn't pay the install).
 set -euo pipefail
 source /root/.bashrc.emboviz
 
@@ -30,5 +31,5 @@ uv pip install --python "$MAIN_VENV/bin/python" \
 EMBOVIZ_VENVS_DIR=/root/venvs "$MAIN_VENV/bin/emboviz" install-lerobot --force
 
 echo "[lerobot] DONE"
-echo "Reader venv ready: /root/venvs/lerobot (lerobot 0.3.x, codebase v2.1)"
+echo "Reader venv ready: /root/venvs/lerobot (lerobot 0.5.x, codebase v3.0)"
 echo "Used automatically when a run config has dataset.format: lerobot"

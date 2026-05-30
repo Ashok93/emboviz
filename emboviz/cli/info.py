@@ -40,8 +40,11 @@ _INPROC_MODELS: dict[str, str] = {
 # is indicated by the reader SHIM in the host (emboviz_lerobot), not an
 # in-host lerobot. HDF5's h5py ships in core. RLDS needs the rlds extra.
 _DATASET_FORMATS: dict[str, tuple[str, str, str]] = {
-    "lerobot": ("LeRobot v2.x (BridgeV2, LIBERO, DROID, ALOHA, custom HF)",
+    "lerobot": ("LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF)",
                 "emboviz_lerobot", "uv pip install emboviz-lerobot && emboviz install-lerobot"),
+    "gr00t":   ("GR00T format — LeRobot v2.1 + modality.json (NVIDIA Isaac-GR00T)",
+                "emboviz_reader_gr00t",
+                "uv pip install emboviz-reader-gr00t && emboviz install-reader-gr00t"),
     "hdf5":    ("Robomimic / ALOHA / Isaac Lab Mimic HDF5", "h5py", ""),
     "rlds":    ("RLDS / TFDS (Open-X-Embodiment, RT-X, Octo)",
                 "tensorflow_datasets", "uv pip install 'emboviz[rlds]'"),

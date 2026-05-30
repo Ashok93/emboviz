@@ -1,0 +1,42 @@
+[project]
+name = "emboviz-reader-gr00t"
+version = "0.1.0"
+description = "GR00T-format dataset reader for emboviz — reads LeRobot v2.1 + modality.json datasets in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# This is the THIN SHIM that goes in the user's MAIN (host) venv. It
+# carries zero heavy deps — its only job is to (a) advertise an
+# AdapterSpec via the ``emboviz.readers`` entry point so
+# ``emboviz install-reader-gr00t`` knows what to install in the isolated
+# reader venv, and (b) expose the ``emboviz-reader-gr00t`` console entry
+# point that becomes available on the reader venv's PATH once that venv
+# is materialised.
+#
+# The heavy stuff (lerobot 0.3.x + its torch / video-decode stack) lives
+# in ``AdapterSpec.runtime_pip`` and ships into
+# ``~/.emboviz/venvs/reader-gr00t/`` — NEVER into the host venv. This
+# reader reads LeRobot v2.1 datasets; the v3.0 datasets are read by the
+# separate ``emboviz-lerobot`` reader. The two readers' lerobot versions
+# are mutually incompatible (v2.1 vs v3.0), which is exactly why they live
+# in separate venvs.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.readers"]
+reader-gr00t = "emboviz_reader_gr00t.spec:SPEC"
+
+[project.scripts]
+emboviz-reader-gr00t = "emboviz_reader_gr00t.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# runtime_pip on the AdapterSpec may use PEP 508 direct refs; Hatch must
+# allow them in metadata even though the SHIM itself doesn't pull them.
+[tool.hatch.metadata]
+allow-direct-references = true

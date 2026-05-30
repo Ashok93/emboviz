@@ -111,7 +111,14 @@ def make_gripper_extractor(
     """
     if gripper is None:
         return lambda s: (s, None)
-    src = gripper["source"]
+    src = gripper.get("source")
+    if src is None:
+        raise ValueError(
+            "dataset.gripper is set but dataset.gripper.source is missing. "
+            "This reader needs the gripper's index (or per-dim name) within "
+            "the state vector. (Only the 'gr00t' reader derives it from "
+            "meta/modality.json; every other format requires gripper.source.)"
+        )
     if isinstance(src, str):
         if not state_names or src not in state_names:
             raise ValueError(

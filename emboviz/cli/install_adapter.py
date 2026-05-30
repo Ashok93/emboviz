@@ -125,7 +125,8 @@ INSTALLABLE_ADAPTERS = {
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
     # Dataset readers register under the ``emboviz.readers`` group but
     # install into a runtime venv identically — same command, same flow.
-    "lerobot":  "LeRobot dataset reader (isolated; reads v2.x datasets)",
+    "lerobot":      "LeRobot dataset reader (isolated; reads LeRobot v3.0 datasets)",
+    "reader-gr00t": "GR00T-format dataset reader (isolated; LeRobot v2.1 + modality.json)",
 }
 
 
