@@ -284,7 +284,7 @@ class MemorizationDiagnostic(Diagnostic):
                     f"detection without a pixel-accurate mask (got "
                     f"mask={detection.mask!r}). Memorization requires a "
                     "pixel mask; bbox-only is too coarse. Use a detector "
-                    "that produces a mask (GroundingDINOSAMDetector default)."
+                    "that produces a mask (SAM3Detector / GroundingDINOSAMDetector)."
                 )
             per_cam_original[cam] = arr
 
@@ -294,7 +294,8 @@ class MemorizationDiagnostic(Diagnostic):
                 "could not confidently locate the manipulated target in ANY "
                 f"of the scene's cameras ({sorted(scene.observations.images)}). "
                 "Try providing an explicit ``target_text`` to "
-                "GroundingDINOSAMDetector, or a custom TargetDetector. We "
+                "SAM3Detector / GroundingDINOSAMDetector, or a custom "
+                "TargetDetector. We "
                 "never fabricate a centred rectangle.",
             )
 

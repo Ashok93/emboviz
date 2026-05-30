@@ -24,7 +24,9 @@ kinds of process**:
  │  + emboviz-wire       │ ◀───────▶ │ emboviz-gr00t    → Isaac-GR00T         │
  │  (NO torch/lerobot)   │  (bytes)  │ emboviz-sam3     → SAM 3 (Python 3.12) │
  │                       │           │ emboviz-lerobot  → lerobot (dataset    │
- │                       │           │                    reader, v2.x)       │
+ │                       │           │                    reader, v3.0)       │
+ │                       │           │ emboviz-reader-gr00t → lerobot v2.1     │
+ │                       │           │                    reader (dataset)    │
  └───────────────────────┘           └──────────────────────────────────────┘
         DEALER                                      ROUTER (one per worker)
 ```
@@ -70,7 +72,7 @@ adapters/emboviz-<name>/ one per backend: a shim (AdapterSpec + server entry
                          point) the host installs, plus the heavy code that
                          runs only inside the runtime venv.
                          openvla · oft · pi0 · gr00t (VLAs, group emboviz.adapters)
-                         sam3 (detector) · lerobot (dataset reader, group emboviz.readers)
+                         sam3 (detector) · lerobot · reader-gr00t (dataset readers, group emboviz.readers)
 
 emboviz/                 the host engine (no model deps)
   core/                  re-exports emboviz_wire types + DiagnosticResult/Finding,
@@ -164,6 +166,8 @@ read from the format's own schema, never hand-typed:
   `ZMQReaderClient` (an `EpisodeSource` over the wire) via
   `connect_reader("lerobot", ...)`. Scenes carry their `RobotProfile`
   across the wire so the host has action dim-names + conventions.
+* **`gr00t`** → the isolated `emboviz-reader-gr00t` worker (LeRobot v2.1 +
+  `meta/modality.json`), via `connect_reader("reader-gr00t", ...)`.
 * **`hdf5`** / **`rlds`** → in-process in the host (no conflicting pins).
 
 Rerun `.rrd` and MCAP are recording / viz formats, not dataset inputs.

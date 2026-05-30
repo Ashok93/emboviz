@@ -13,78 +13,71 @@ on transformers 4.49, OFT on a vendored fork, π0 on 4.53, GR00T on 4.57
 (with its own Python 3.11 pin).
 
 The fix is the same one every multi-runtime production setup uses:
-**isolate SAM 3 in its own Python 3.12 venv and expose it over HTTP**.
-Every adapter venv only needs `httpx` (pure-Python, no torch/transformers)
-to talk to it.
+**isolate SAM 3 in its own Python 3.12 venv and reach it over the ZeroMQ
+wire** — the same DEALER/UDS transport the VLA model workers use. No
+adapter venv needs torch/transformers to talk to it; the wire carries
+bytes + msgpack and is Python-version-agnostic.
 
 ## Install
 
 ```bash
-uv venv /root/venvs/sam3 --python 3.12
-uv pip install --python /root/venvs/sam3/bin/python -e .
+uv pip install emboviz emboviz-sam3
+emboviz install-sam3          # builds the isolated Python 3.12 reader venv
 ```
 
-Or use the bundled installer (called by emboviz's `install_all.sh`):
-
-```bash
-bash ../scripts/setup/05_install_sam3_venv.sh
-```
+`emboviz install-sam3` materialises `~/.emboviz/venvs/sam3` from this
+adapter's `AdapterSpec` — the same path a PyPI user follows. (The dev
+recipe `scripts/setup/05_install_sam3_venv.sh` is a thin wrapper around
+this exact command.)
 
 ## Run
 
 ```bash
-# preload the model BEFORE accepting requests (so first /detect doesn't
-# pay the ~30 s warmup)
-/root/venvs/sam3/bin/emboviz-sam3 serve --preload
+# preload the model BEFORE accepting requests (so the first detect()
+# doesn't pay the ~30 s warmup)
+emboviz-sam3 serve
 ```
 
-Defaults to `127.0.0.1:8311`. Override the model with
-`EMBOVIZ_SAM3_MODEL_ID=<hf_repo>` env var if you have a fine-tuned SAM 3
-checkpoint.
-
-The emboviz client (`emboviz.perturb._target_detection.SAM3Detector`)
-talks to this server. Override the URL with
-`EMBOVIZ_SAM3_URL=http://...` if the server runs on a non-default port
-or another host.
+`emboviz-sam3 serve` starts a **ZMQ worker** over a Unix-domain socket
+`ipc://~/.emboviz/sockets/sam3.sock`. Override the endpoint with the
+`EMBOVIZ_SAM3_ENDPOINT` env var (e.g. `tcp://...` for a remote host).
+There is no HTTP server, no port, no `EMBOVIZ_SAM3_URL`.
 
 ## API
 
-### `GET /health`
+The typed client is `emboviz_sam3.client.Sam3Client` (extends the wire's
+`RpcClient` over the ZMQ DEALER/UDS transport). The emboviz-side caller
+`emboviz.perturb._target_detection.SAM3Detector` wraps it.
 
-```json
+```python
+from emboviz_sam3.client import Sam3Client
+
+client = Sam3Client()                       # endpoint from EMBOVIZ_SAM3_ENDPOINT
+result = client.detect(
+    image_bytes,                            # PNG/JPEG bytes
+    target_text="the mug",                  # the concept phrase
+    score_threshold=0.30,                   # optional
+    mask_threshold=0.50,                    # optional
+)
+```
+
+`detect(...)` returns:
+
+```python
 {
-  "alive": true,
-  "model_loaded": true,
-  "model_id": "facebook/sam3",
-  "device": "cuda:0",
-  "version": "0.1.0"
+    "instances": [
+        {
+            "bbox": (x0, y0, x1, y1),
+            "score": 0.91,
+            "mask": <uint8 ndarray, shape (H, W)>,
+        },
+        ...
+    ],
+    "image_size": [H, W],
+    "label": "the mug",
 }
 ```
 
-### `POST /detect` (multipart)
-
-Form fields:
-- `image`: PNG/JPEG bytes
-- `target_text`: the concept phrase (e.g. `"the mug"`)
-- `score_threshold`: optional, default 0.30
-- `mask_threshold`: optional, default 0.50
-
-Response (JSON):
-```json
-{
-  "instances": [
-    {
-      "bbox": [x0, y0, x1, y1],
-      "score": 0.91,
-      "mask": {"size": [H, W], "counts": "<COCO RLE>"}
-    },
-    ...
-  ],
-  "image_size": [H, W],
-  "label": "the mug"
-}
-```
-
-Masks are COCO RLE-encoded so the JSON payload stays small (a 480×640
-boolean mask is ~5 KB compressed vs ~300 KB raw). Decode client-side
-with `pycocotools.mask.decode`.
+Each instance's `mask` is a raw `uint8` ndarray of shape `(H, W)` sent
+over the ZMQ wire (msgpack-numpy) — not COCO RLE, not pycocotools, not
+an HTTP payload.

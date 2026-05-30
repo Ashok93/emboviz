@@ -13,8 +13,8 @@ host over the same ZeroMQ wire that model workers use.
   so emboviz can discover the reader's `AdapterSpec` via the
   `emboviz.readers` entry point.
 - **Reader venv** (`~/.emboviz/venvs/lerobot`, built by
-  `emboviz install-lerobot`) holds `lerobot 0.3.x` (codebase v2.1 →
-  reads LeRobot v2.0 and v2.1 datasets) and its decode stack.
+  `emboviz install-lerobot`) holds `lerobot >=0.5,<0.6` (codebase v3.0 →
+  reads LeRobot v3.0 datasets; Python 3.12) and its decode stack.
 
 The worker wraps the canonical `lerobot.datasets.LeRobotDataset` — we do
 not reimplement any decoding — and emits the universal emboviz `Scene` /
@@ -28,7 +28,7 @@ emboviz spawns the reader automatically:
 ```yaml
 dataset:
   format: lerobot
-  path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id or local path
+  path: lerobot/libero   # HF repo id or local path (LeRobot v3.0)
   cameras:
     primary: observation.images.image_0
   state: {key: observation.state, convention: ee_pose}

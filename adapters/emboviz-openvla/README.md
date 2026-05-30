@@ -2,10 +2,11 @@
 
 The OpenVLA-7B adapter for [emboviz](https://github.com/Ashok93/botsigil).
 
-OpenVLA's deps (transformers 4.40-4.49, lerobot 0.3, torch, OpenVLA's
+OpenVLA's deps (transformers >=4.40,<4.50, lerobot 0.3, torch, OpenVLA's
 prismatic checkpoint code) conflict with several other VLA adapters'
-deps. This package solves that by running the model in an **isolated
-runtime venv** spawned via Ray's per-actor `runtime_env`.
+deps. This package solves that by running the model in an isolated venv
+(`~/.emboviz/venvs/openvla`) spawned as a subprocess and reached over the
+ZMQ wire.
 
 ## Install
 
@@ -13,8 +14,8 @@ runtime venv** spawned via Ray's per-actor `runtime_env`.
 # Core (small, no torch):
 uv pip install emboviz
 
-# This adapter (still small — a thin shim):
-uv pip install emboviz-openvla
+# This adapter + the dataset-reader shim (still small — thin shims):
+uv pip install emboviz-lerobot emboviz-openvla
 
 # Materialise the isolated runtime venv (one-time, downloads torch +
 # transformers + lerobot + OpenVLA's prismatic into ~/.emboviz/venvs/openvla):

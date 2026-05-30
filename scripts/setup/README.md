@@ -5,24 +5,41 @@ tests on a fresh GPU pod (RunPod RTX 3090 or similar). Each VLA pins
 incompatible transformers + lerobot versions, so each lives in its own
 uv venv.
 
-Snapshot taken from a working pod on 2026-05-26:
+The layout: 7 independent runtime venvs, all under `/root/venvs/<name>`,
+each spawned by `emboviz install-<name>`. The host main venv (core +
+lightweight shims, no torch/lerobot) is `/root/.venv-emboviz`. Version
+pins are NOT listed here — pyproject extras are the single source of truth.
 
-| Venv path | Python | Key pins | Repo clone |
-|---|---|---|---|
-| `/root/venvs/openvla` | 3.10 | torch 2.12.0, transformers 4.49.0, lerobot 0.3.2 | — (loads from HF) |
-| `/root/repos/openvla-oft/.venv` | 3.10 | torch 2.7.1, lerobot 0.3.3, moojink fork (vendored transformers) | github.com/moojink/openvla-oft |
-| `/root/repos/openpi/.venv` | 3.11 | torch 2.7.1, transformers 4.53.2, jax 0.5.3 | github.com/Physical-Intelligence/openpi |
-| `/root/venvs/gr00t` | 3.11 | torch 2.12.0, transformers 4.57.3 (pin matters — newer GroundingDINO API) | github.com/NVIDIA/Isaac-GR00T |
+| Venv path | Role |
+|---|---|
+| `/root/.venv-emboviz` | host main venv — core + lightweight shims only (no torch, no lerobot) |
+| `/root/venvs/openvla` | OpenVLA-7B runtime venv |
+| `/root/venvs/oft` | OpenVLA-OFT runtime venv |
+| `/root/venvs/pi0` | π0 / π0.5 runtime venv |
+| `/root/venvs/gr00t` | GR00T-N1.7 runtime venv |
+| `/root/venvs/sam3` | SAM 3 detector runtime venv |
+| `/root/venvs/lerobot` | LeRobot v3.0 dataset-reader venv |
+| `/root/venvs/reader-gr00t` | GR00T-format dataset-reader venv (v2.1 + modality.json) |
 
 ## One-shot install
 
+The bootstrap does NOT clone from GitHub — it requires the dev checkout
+to be present at `/root/emboviz` first (so we test local, often unpushed,
+changes) and errors out if it is absent.
+
 ```bash
-# 1. SSH into fresh pod, then:
-curl -fsSL https://raw.githubusercontent.com/Ashok93/emboviz/main/scripts/setup/install_all.sh | bash
+# 1. From your dev machine, scp the checkout to the pod:
+git archive --format=tar.gz HEAD -o /tmp/emboviz.tgz
+scp -O /tmp/emboviz.tgz <pod>:/root/
+ssh <pod> 'mkdir -p /root/emboviz && tar xzf /root/emboviz.tgz -C /root/emboviz'
 
 # 2. Drop your HF token in /root/emboviz/.env (one line: HF_TOKEN=hf_...)
-# 3. source /root/.bashrc.emboviz  (or restart shell)
-# 4. ready to run integration tests
+
+# 3. SSH into the pod and run the installer:
+bash /root/emboviz/scripts/setup/install_all.sh
+
+# 4. source /root/.bashrc.emboviz  (or restart shell)
+# 5. ready to run integration tests
 ```
 
 ## Manual install (per venv)
@@ -30,12 +47,13 @@ curl -fsSL https://raw.githubusercontent.com/Ashok93/emboviz/main/scripts/setup/
 If you only need one model, run just that script:
 
 ```bash
-bash scripts/setup/01_install_openvla_venv.sh   # OpenVLA-7B on Bridge
-bash scripts/setup/02_install_oft_venv.sh       # OpenVLA-OFT on LIBERO
-bash scripts/setup/03_install_pi0_venv.sh       # pi0 on LIBERO
-bash scripts/setup/04_install_gr00t_venv.sh     # GR00T-N1.7 on DROID
-bash scripts/setup/05_install_sam3_venv.sh      # SAM 3 detector (memorization target)
-bash scripts/setup/06_install_lerobot_venv.sh   # LeRobot dataset reader (isolated)
+bash scripts/setup/01_install_openvla_venv.sh        # OpenVLA-7B on Bridge
+bash scripts/setup/02_install_oft_venv.sh            # OpenVLA-OFT on LIBERO
+bash scripts/setup/03_install_pi0_venv.sh            # pi0 on LIBERO
+bash scripts/setup/04_install_gr00t_venv.sh          # GR00T-N1.7 on LIBERO
+bash scripts/setup/05_install_sam3_venv.sh           # SAM 3 detector (memorization target)
+bash scripts/setup/06_install_lerobot_venv.sh        # LeRobot v3.0 dataset reader (isolated)
+bash scripts/setup/07_install_reader_gr00t_venv.sh   # GR00T-format dataset reader (v2.1 + modality.json)
 ```
 
 Each model script also installs the lightweight host shims (`emboviz-wire`,
@@ -54,5 +72,7 @@ skip `06`.
 
 ```bash
 source /root/.bashrc.emboviz
-bash scripts/final_integration_test.sh   # ~25 min, runs all 4 models end-to-end
+uv run python scripts/dev/verify_w2_batching.py    # batched-diagnostic gather/submit
+uv run python scripts/dev/verify_reader_wire.py    # dataset reader wire round-trip
+uv run python scripts/dev/deadcode_audit.py        # import-graph dead-code audit
 ```

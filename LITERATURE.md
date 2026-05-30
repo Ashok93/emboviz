@@ -32,7 +32,8 @@ Inputs:
     instruction I (natural-language referring expression)
     observation o = {image_per_camera, state, gripper, action_history}
     detection confidence threshold τ_det     (default 0.30)
-    intervention magnitude threshold τ_in    (LPIPS, default 0.15)
+    intervention magnitude threshold τ_in    (normalized pixel-L2,
+                                              default 0.05)
     response magnitude threshold τ_out       (normalized action,
                                               default 0.05 of typical)
 
@@ -40,28 +41,33 @@ Inputs:
     if MLLM_parse cannot find a manipulated object → return INCONCLUSIVE
     (no fabricated noun; we refuse to guess from a fixed taxonomy)
 
-2.  per-camera detection:
+2.  per-camera detection (default detector = SAM 3, text → mask):
     for each camera c in observation:
-        box_c, score_c ← GroundingDINO_1.6(o[c], phrase)
+        mask_c, score_c ← SAM3(o[c], phrase)
         if score_c < τ_det: skip camera c (record reason)
-        mask_c ← SAM2(o[c], box_c)
+    -- the legacy GroundingDINO + SAM combo is the `--detector gd-sam`
+       fallback for environments where SAM 3 isn't available.
 
     if no camera had a confident detection:
         return INCONCLUSIVE ("could not locate target on any view")
 
-3.  fill ensemble — three independent perturbations:
+3.  fill ensemble — TWO independent perturbations:
         o'_mean[c] = paste(o[c], mask_c, channel_mean(o[c]))
         o'_blur[c] = paste(o[c], mask_c, gaussian_blur(o[c], σ=diag/24))
-        o'_inpaint[c] = paste(o[c], mask_c, lama_inpaint(o[c], mask_c))
+    -- the on-manifold lama_inpaint fill the literature prescribes as a
+       THIRD fill is NOT implemented (see the 2-of-3 caveat below); the
+       agreement gate runs over these two non-on-manifold fills only.
 
 4.  for each fill F:
-        Δ_in[F] = LPIPS(o, o'[F]) restricted to ∪mask_c
+        Δ_in[F] = normalized_pixel_L2(o, o'[F]) over ∪mask_c
+                  -- approximates LPIPS; a learned perceptual metric is
+                     not used (no LPIPS model loaded)
         A      = mean of K samples π(o)
         A'     = mean of K samples π(o'[F])
         Δ_out[F] = normalized_L2(A − A')      -- using ModelCalibration
 
 5.  intervention validity gate:
-        if min(Δ_in[F]) < τ_in:
+        if max(Δ_in[F]) < τ_in:
             return INCONCLUSIVE ("masks too low-contrast to test;
                                   target is itself near-mean colored")
 
@@ -95,6 +101,13 @@ Inputs:
   Inpaint-Anything) stays on the data manifold but is *less aggressive*,
   while channel-mean is more aggressive but OOD. Reporting BOTH and
   requiring agreement neutralizes both failure modes.
+  *Shipped-status caveat (2-of-3 fills):* the implemented ensemble is
+  channel-mean + Gaussian-blur only. The on-manifold `lama_inpaint`
+  fill — the literature-prescribed THIRD, less-aggressive fill — is
+  NOT yet implemented, so the agreement gate currently runs over two
+  OOD-leaning fills rather than spanning the on-manifold/OOD axis.
+  This is surfaced (not hidden) in `memorization.py`'s
+  `literature_fills` metadata.
 - **K-sample averaging for stochastic policies** — π0 (flow-matching),
   Diffusion Policy, GR00T's flow-matching head all have non-trivial
   sample-to-sample variance. BYOVLA [Hancock et al. 2024] samples K
@@ -382,27 +395,41 @@ For each camera c in C:
     3. Aggregate overlapping patches to per-pixel attribution map
        (mean over occluders covering each pixel).
 
-    4. Per-pixel signal above noise:
+    4. Per-cell signal above noise:
          signal = max(map - calibration.noise_floor, 0)
 
-    5. Sparsity scalar (Hoyer):
-         hoyer = (sqrt(N) - L1(signal) / L2(signal)) / (sqrt(N) - 1)
-       Hoyer = 1 → spike (single-pixel focus)
-       Hoyer = 0 → uniform (diffuse)
-
-    6. Calibrate threshold per (model, image distribution):
-         Compute Hoyer on null grids = shuffled cells of the same map.
-         Get μ_0, σ_0 across many shuffles.
-         z = (hoyer_observed - μ_0) / σ_0
-         PASS  if z > 3
-         INFO  if 1 < z <= 3
-         MODERATE if z <= 1
-
-    7. Camera-consumed test:
+    5. Camera-consumed gate (calibration-aware):
          max_cell_signal = max(signal)
-         consumed iff max_cell_signal > 5% * typical_action_magnitude
-         (i.e. above the calibration noise floor by a meaningful
-         signal margin).
+         cell_signal_threshold = 0.05 * typical_action_magnitude
+         consumed iff max_cell_signal >= cell_signal_threshold
+                      AND total signal >= noise_floor
+         (cameras that never clear this are reported as
+          ignored_cameras, NOT folded into the headline as a
+          misleading zero)
+
+    6. Top-K concentration scalar (per consumed camera):
+         concentration = sum(top grid_side cells of signal) / sum(signal)
+         scalar = mean(concentration) over consumed cameras
+
+    7. Verdict (FIXED concentration thresholds):
+         scalar > 0.5   → PASS     (focused on a few regions)
+         scalar > 0.25  → INFO     (visible focus, long tail)
+         else           → MODERATE (diffuse — background-statistics risk)
+         no consumed camera → UNKNOWN (response below sampling noise)
+```
+
+**Design target — NOT yet implemented.** The richer
+sparsity-and-calibration methodology below is the intended design and
+is NOT in the shipped code today:
+
+```
+- Sparsity scalar (Hoyer) instead of top-K share:
+      hoyer = (sqrt(N) - L1(signal)/L2(signal)) / (sqrt(N) - 1)
+      Hoyer = 1 → spike (single-pixel focus); 0 → uniform (diffuse).
+- z-score-calibrated threshold against a null grid:
+      compute Hoyer on null grids = shuffled cells of the same map;
+      get μ_0, σ_0 across many shuffles; z = (hoyer - μ_0)/σ_0;
+      PASS if z > 3, INFO if 1 < z <= 3, MODERATE if z <= 1.
 ```
 
 ### Why this and not the alternatives
@@ -457,6 +484,16 @@ For each camera c in C:
 4. **`direction` thresholds (0.5, 0.25) that collide with grid
    noise expectation** — for 4×4, top-4 / 16 = 0.25 is uniform
    noise; MODERATE threshold there is at noise floor.
+   *Current-implementation note:* the shipped diagnostic uses
+   top-K concentration with FIXED thresholds (0.5 / 0.25) — the same
+   class of fixed threshold this antipattern warns about. It is made
+   safe in practice by the calibration-aware consumed-gate
+   (`cell_signal_threshold` + noise-floor subtraction in step 5),
+   which removes pure-noise cameras BEFORE the concentration is
+   scored, so a noise-only grid reads UNKNOWN rather than
+   borderline-MODERATE. The Hoyer + z-score-vs-null calibration
+   (per the "Design target — not yet implemented" note above) is the
+   intended replacement for the fixed concentration thresholds.
 
 ### Citations
 
@@ -514,59 +551,70 @@ the README "GR00T attention" caveat and `Gr00tAdapter.extract_attention`.
 
 ### Algorithm we implement
 
+The shipped diagnostic (`emboviz/diagnostics/attention_drift.py`)
+computes ONLY the per-frame attention centroid and the frame-to-frame
+centroid displacement in pixels, against fixed thresholds:
+
 ```
 Inputs:
-    OpenVLA-style model with extract_attention()
+    model with extract_attention()
     trajectory T with N frames
-    target bbox per-frame (from memorization diagnostic's detector)
-    layer_set L_v = mid-layers identified by visual-grounding
-        probing (default: layers 5-13 for LLaMA-7B)
-    sink-mask M_sink = pre-computed BOS + image-border tokens to
-        ignore
+    camera (default "primary") — used only for pixel-space conversion
+    drift_warn_px      = 30.0   (fixed threshold)
+    drift_critical_px  = 70.0   (fixed threshold)
 
-1. Per-frame attention extraction:
+1. Per-frame attention extraction + cleaning (delegated to the
+   adapter's extract_attention, which applies layer-adaptive
+   interior-concentration selection within the model's mid-stack
+   fractional band — OpenVLA 0.25–0.75; π0 0.25–0.85 — meaned over
+   heads; sink handling is model-dependent, OpenVLA applies none):
    for each frame f:
-       attn_raw[f] = extract_attention(model, scene_f,
-                                       query=before_action)
-       attn_v[f] = attn_raw[f].image_weights()[L_v]
-                   .mean(over heads in L_v's heads-of-interest)
-       attn_v[f] = attn_v[f].masked_to_zero_on(M_sink)
-       attn_v[f] /= attn_v[f].sum()      -- normalize to distribution
+       attn_v[f] = cleaned per-camera image heatmap (normalized)
+       if attn_v[f].sum() <= 0: RAISE  (zero-sum is a real adapter
+            bug — we refuse to fabricate a (0.5, 0.5) centroid)
 
-2. Per-frame metrics:
-   pointing_accuracy[f] = sum(attn_v[f] inside target_bbox[f])
-   centroid[f] = E_{(y,x) ~ attn_v[f]}[(y, x)]
+2. Per-frame centroid (center of mass):
+   centroid[f] = E_{(y,x) ~ attn_v[f]}[(y, x)]   in [0,1], then
+                 scaled to the configured camera's pixel size
 
-3. Frame-to-frame stability metrics:
-   wasserstein[f] = W_2(attn_v[f], attn_v[f+1])
-                    -- 2-Wasserstein on the 2D distribution
-   top_k_iou[f]   = IoU(top-K-patches(attn_v[f]),
-                        top-K-patches(attn_v[f+1]))
-                    -- K = 10% of total patches
-   centroid_drift_px[f] = ||centroid[f+1] - centroid[f]||
-                          (legacy metric — kept for interpretability)
+3. Frame-to-frame displacement (PIXELS), only between frames that are
+   ADJACENT in the trajectory (no spanning of skipped frames):
+   displacement_px[f] = || centroid[f] - centroid[f-1] ||_2
 
-4. Normalization:
-   bbox_diag = mean diagonal of target_bbox across frames
-   normalized_drift = centroid_drift_px / bbox_diag
+4. Verdict (fixed pixel thresholds):
+   mean_drift_px = mean(displacement_px); max_drift_px = max(...)
+   < drift_warn_px      → PASS    (anchored)
+   < drift_critical_px  → MODERATE (some drift)
+   ≥ drift_critical_px  → CRITICAL (unanchored)
+```
 
-5. Threshold calibration:
-   Compute drift distribution on a held-out set of SUCCESSFUL
-   trajectories for this (model, dataset). Anchor thresholds at
-   the 85th and 95th percentile of that distribution.
+**Design target — NOT yet implemented.** The richer methodology below
+is the intended design; none of it is in the shipped code today. It is
+recorded here so the gap is explicit and the "why" citations stay
+attached to it:
 
-6. Per-camera analysis (multi-stream models like OFT):
-   For each camera stream:
-       repeat steps 1-5 within the stream's token range
-   Cross-stream allocation:
-       fraction_mass[c, f] = sum of attn over camera c's tokens
-       at frame f, normalized across cameras
-       — report time-series
-
-7. Ablation sanity check (run on calibration set, not per frame):
-   For each "drifting" frame, zero the attended patch and confirm
-   action prediction changes. If not → the attention metric is
-   measuring image structure, not model behaviour.
+```
+- pointing_accuracy[f] = sum(attn_v[f] inside target_bbox[f])
+      (requires per-frame target bbox from the detector — not wired)
+- Frame-to-frame stability beyond centroid:
+      wasserstein[f] = W_2(attn_v[f], attn_v[f+1])     (2-Wasserstein
+                       on the 2D distribution)
+      top_k_iou[f]   = IoU(top-K-patches(attn_v[f]),
+                           top-K-patches(attn_v[f+1])), K = 10% patches
+- Normalization by target scale:
+      bbox_diag = mean diagonal of target_bbox across frames
+      normalized_drift = centroid_drift_px / bbox_diag
+- Calibrated thresholds (replacing the current fixed pixel values):
+      compute drift distribution on a held-out set of SUCCESSFUL
+      trajectories for this (model, dataset); anchor at the 85th /
+      95th percentile of that distribution.
+- Per-camera + cross-stream allocation for multi-stream models
+      (OFT primary + wrist): per-stream stability conditional on the
+      "active" (highest-mass) stream; report cross-stream mass
+      time-series.
+- Ablation sanity check (calibration set, not per frame): zero the
+      attended patch and confirm the action prediction changes; if not,
+      the metric is measuring image structure, not model behaviour.
 ```
 
 ### Why this and not the alternatives
@@ -630,6 +678,13 @@ Inputs:
    sum is a real adapter bug, not a metric to absorb).
 5. **Fixed pixel thresholds** for "drift" — must be normalized
    to image or target bbox scale.
+   *Current-implementation note:* the shipped diagnostic deliberately
+   USES fixed pixel thresholds (`drift_warn_px=30.0`,
+   `drift_critical_px=70.0`) as a documented simplification.
+   Normalized / calibrated thresholds (per the "Design target —
+   not yet implemented" note above) are the intended replacement;
+   until then this antipattern is knowingly present and surfaced
+   here rather than hidden.
 
 ### Citations
 
@@ -788,9 +843,11 @@ units. To compare across models (OpenVLA's 7-DOF Bridge actions vs
 GR00T's 17-DOF state-action vs π0's chunk[0] subset) we normalize each
 raw distance against two model-specific anchors:
 
-- **noise_floor**: the model's intrinsic sample-to-sample variation on
-  identical input (single-sample noise reduced by `n_samples` averaging
-  per the math).
+- **noise_floor**: the model's residual sample-to-sample variation,
+  measured directly between two `n_samples`-averaged predictions on
+  identical input (frame 0) — i.e. already the post-averaging floor.
+  (The √N reduction appears only in the `n_samples` derivation, Step 3,
+  and in `signal_threshold` as 2σ/√k — not in `noise_floor` itself.)
 - **typical_action_magnitude**: the median `||action||` of the model's
   averaged predictions across the trajectory.
 
@@ -855,21 +912,26 @@ raw distance against two model-specific anchors:
   (`do_sample=False`).
 - **Capabilities**: full mechanistic-interp suite — attention,
   hidden states, FFN activations, residual patching, neuron
-  ablation. All other adapters expose only INFERENCE.
+  ablation. All four VLA adapters now expose ATTENTION; OpenVLA's
+  distinction is the FULL mechanistic-interp suite (hidden states /
+  FFN activations / residual patching / neuron ablation), not
+  attention alone.
 - **Calibration**: `n_samples = 1` always (deterministic).
 - **Chunk consistency**: N/A (no chunk).
-- **Attention drift**: applies. Mid-layer (5-27) visual-grounding
-  heads, sink-masked.
+- **Attention drift**: applies. Layer-adaptive selection within a
+  mid-stack fractional band (OpenVLA 0.25–0.75; π0 0.25–0.85), meaned
+  over heads; sink handling is model-dependent (OpenVLA: none —
+  LLaMA-2 has no image-patch spatial sinks).
 - **Action space**: bridge_orig 7-DOF [dx, dy, dz, drx, dry, drz,
   gripper], gripper ∈ {0, 1} after un-normalization.
 
 ### OpenVLA-OFT
 - **Output**: 7-DOF chunk of 8 steps, parallel decoding,
   L1-regression head. Deterministic.
-- **Capabilities**: INFERENCE only.
+- **Capabilities**: INFERENCE + ATTENTION.
 - **Calibration**: `n_samples = 1`.
 - **Chunk consistency**: chunk_len=8, comparison meaningful per BID.
-- **Attention drift**: not exposed.
+- **Attention drift**: exposed (multi-stream — primary + wrist).
 - **Action space**: libero_spatial_no_noops 7-DOF, gripper ∈
   {0, 1}.
 
@@ -878,10 +940,11 @@ raw distance against two model-specific anchors:
   STOCHASTIC — every `predict()` call yields a different chunk.
   Recommended `n_samples = 4-8` per calibration math (typical noise
   σ ≈ 0.08, typical magnitude ≈ 1.2 → n ≈ 4 for 5% precision).
-- **Capabilities**: INFERENCE only.
+- **Capabilities**: INFERENCE + ATTENTION (when use_pytorch=True).
 - **Chunk consistency**: stochastic — average N samples first then
   compare averaged chunks.
-- **Attention drift**: not exposed.
+- **Attention drift**: exposed when use_pytorch=True (PyTorch-converted
+  checkpoint; PaliGemma/Gemma backbone); not on the JAX backend.
 - **Action space**: pi0_libero 7-DOF, gripper ∈ {-1, +1}.
 - **State convention**: pi_libero state is 8-dim
   [x, y, z, roll, pitch, yaw, gripper_l, gripper_r]. Distinct from
@@ -890,7 +953,8 @@ raw distance against two model-specific anchors:
 ### GR00T-N1.7-3B (NVIDIA)
 - **Output**: 17-dim chunk of 16 steps via DiT flow-matching head
   (4 Euler steps). STOCHASTIC.
-- **Capabilities**: INFERENCE only.
+- **Capabilities**: INFERENCE + ATTENTION (DiT motor-pathway
+  cross-attention — dispersed; see §4 caveat).
 - **Action layout**: per `_action_keys` = [eef_9d (0:9),
   gripper_position (9:10), joint_position (10:17)]. The 6D rotation
   inside eef_9d uses the continuous representation of Zhou et al.

@@ -13,7 +13,7 @@ Non-VLA adapter clients (SAM 3 and any future detector / perception
 worker) inherit from :class:`RpcClient` directly and ship their own
 typed method wrappers in the adapter package.
 
-Wire protocol (matches :mod:`emboviz.adapters.server_base`)::
+Wire protocol (matches :mod:`emboviz_wire.server`)::
 
     [req_id (8 bytes), msgpack({"method": str, "args": dict})]
 
@@ -236,8 +236,8 @@ class ZMQAdapterClient(RpcClient, VLAModel):
 
     Every VLAModel protocol method is implemented as one
     :meth:`request` call with the matching wire encode / decode. The
-    server side is :class:`emboviz.adapters.server_base.VLAModelHandler`
-    — the two file must be kept on the SAME method list.
+    server side is :class:`emboviz_wire.server.VLAModelHandler`
+    — the two files must be kept on the SAME method list.
     """
 
     def __init__(

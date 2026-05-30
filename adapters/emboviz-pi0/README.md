@@ -11,7 +11,7 @@ runs the openpi git install inside the isolated runtime venv.
 ## Install
 
 ```bash
-uv pip install emboviz emboviz-pi0
+uv pip install emboviz emboviz-lerobot emboviz-pi0
 emboviz install-pi0
 ```
 

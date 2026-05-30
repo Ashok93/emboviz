@@ -15,8 +15,9 @@ gr00t dependency installs normally.
 ## Install
 
 ```bash
-uv pip install emboviz emboviz-gr00t
+uv pip install emboviz emboviz-gr00t emboviz-reader-gr00t
 emboviz install-gr00t
+emboviz install-reader-gr00t     # GR00T-format dataset reader (format: gr00t)
 ```
 
 ## Use
@@ -24,7 +25,7 @@ emboviz install-gr00t
 ```bash
 emboviz-gr00t serve &
 
-emboviz analyze --config configs/gr00t-droid-sample.yaml
+emboviz analyze --config configs/gr00t-libero.yaml
 ```
 
 Copy the template and set `model.kwargs.model_path` to your own fine-tune.

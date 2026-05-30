@@ -73,7 +73,7 @@ via `torchcodec` which needs FFmpeg system libraries.
 # Main venv — emboviz core + lightweight shims (~10 KB each; no model
 # deps, no torch, no lerobot).
 uv venv --python 3.11
-uv pip install emboviz emboviz-lerobot emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
+uv pip install emboviz emboviz-lerobot emboviz-reader-gr00t emboviz-openvla emboviz-pi0 emboviz-gr00t emboviz-oft emboviz-sam3
 ```
 
 `emboviz-lerobot` is the **shim** for the LeRobot dataset reader — its
@@ -106,8 +106,9 @@ If you want to do the install step ahead of time (e.g. in CI, before a
 long benchmark run), the explicit subcommand is still available:
 
 ```bash
-emboviz install-openvla    # a model's runtime venv (explicit; same as the lazy path)
-emboviz install-lerobot    # the isolated LeRobot dataset-reader venv
+emboviz install-openvla       # a model's runtime venv (explicit; same as the lazy path)
+emboviz install-lerobot       # the isolated LeRobot dataset-reader venv
+emboviz install-reader-gr00t  # the isolated GR00T-format dataset-reader venv
 ```
 
 ### Optional: PyTorch backend for π0's attention diagnostic
@@ -153,7 +154,7 @@ model:
 
 dataset:
   format: lerobot                  # lerobot | gr00t | hdf5 | rlds  (self-describing formats)
-  path: IPEC-COMMUNITY/bridge_orig_lerobot   # HF repo id, local dir, h5 file, or TFDS builder name
+  path: Jackie1/bridge_data_v2_convert_to_lerobot   # HF repo id (LeRobot v3.0), local dir, h5 file, or TFDS builder name
   cameras:
     primary: observation.images.image_0      # model camera role -> dataset key
   state:
@@ -191,11 +192,11 @@ optional `extra: {data_dir, split}`.
 
 ### What you get back, per episode
 
-In every `report/episode_<idx>/`:
+In every `report/episode_<idx:05d>/` (e.g. `episode_00537/`):
 
 - **`summary.json`** — every metric the diagnostics produced, with the per-frame numbers.
 - **`report.md` / `report.html`** — plain-English findings ("masked the bowl, action barely moved — memorized-trajectory signature, try an unseen episode") sorted worst-first. No internal severity words.
-- **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention heatmaps, GroundingDINO bbox + per-fill masked images for memorization, per-modality response timeline, per-camera occlusion grids, action plots with abrupt-shift markers.
+- **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention heatmaps, SAM 3 mask + bbox + per-fill masked images for memorization, per-modality response timeline, per-camera occlusion grids, action plots with abrupt-shift markers.
 
 Across all the episodes you analyzed, at the top of `report/`:
 
@@ -225,7 +226,7 @@ Each adapter declares which interpretability surfaces it exposes — inference, 
 
 **Attention is core, not a nice-to-have.** Modern policies are transformers; their visual attention IS the interpretability surface most teams want. We extract it for every VLA we support — even when the upstream inference helper wraps it away. Per-adapter extraction work is non-trivial, but it's the work the product exists to do.
 
-> **⚠️ GR00T attention is a special case — read it with care.** OpenVLA, OFT and π0 are *single-stack* VLAs: the action is produced *through* the VLM's own attention, so "where the last token looks" genuinely *is* where it acts, and the map locks onto the manipulated object. **GR00T is dual-system** — a *frozen* Qwen/Eagle reasoning VLM feeds a **separate** diffusion-transformer (DiT) action head. We extract GR00T's map from that **DiT action→image cross-attention** (the only action-grounded signal — the VLM's own self-attention is frozen and attention-sink dominated). But the DiT attention is the **motor pathway**, and it is spatially **dispersed**: it spreads across the workspace/trajectory rather than locking onto the target object. **This is a documented property of VLAs, not a bug in emboviz** — ReconVLA ([arXiv:2508.10333](https://arxiv.org/abs/2508.10333)) and the VLA survey ([arXiv:2507.10672](https://arxiv.org/abs/2507.10672)) show VLA visual attention is generally dispersed/sink-prone, and the GR00T-N1.5 mechanistic study ([arXiv:2603.19233](https://arxiv.org/abs/2603.19233)) finds the expert/DiT pathway encodes the *motor program* while object/goal information lives in VLM *features* (probed with SAEs), not in attention weights. **Treat GR00T's attention as "where the action pathway attends across the scene," not a reliable object localizer.** (The single-stack VLAs above do not carry this caveat.) The map is seeded for reproducibility.
+> **⚠️ GR00T attention is a special case — read it with care.** OpenVLA, OFT and π0 are *single-stack* VLAs: the action is produced *through* the VLM's own attention, so "where the last token looks" genuinely *is* where it acts, and the map locks onto the manipulated object. **GR00T is dual-system** — a *frozen* Qwen3-VL (Eagle on N1/N1.5) reasoning VLM feeds a **separate** diffusion-transformer (DiT) action head. We extract GR00T's map from that **DiT action→image cross-attention** (the only action-grounded signal — the VLM's own self-attention is frozen and attention-sink dominated). But the DiT attention is the **motor pathway**, and it is spatially **dispersed**: it spreads across the workspace/trajectory rather than locking onto the target object. **This is a documented property of VLAs, not a bug in emboviz** — ReconVLA ([arXiv:2508.10333](https://arxiv.org/abs/2508.10333)) and the VLA survey ([arXiv:2507.10672](https://arxiv.org/abs/2507.10672)) show VLA visual attention is generally dispersed/sink-prone, and the GR00T-N1.5 mechanistic study ([arXiv:2603.19233](https://arxiv.org/abs/2603.19233)) finds the expert/DiT pathway encodes the *motor program* while object/goal information lives in VLM *features* (probed with SAEs), not in attention weights. **Treat GR00T's attention as "where the action pathway attends across the scene," not a reliable object localizer.** (The single-stack VLAs above do not carry this caveat.) The map is seeded for reproducibility.
 
 > **Why separate venvs?** Several upstream VLA/robotics packages pin
 > different (and incompatible) versions of `transformers` and `torch`. We
@@ -266,7 +267,7 @@ Plain-English: what each diagnostic answers, what we do, what you get back.
 
 ### 1. Memorization — *"Is my policy actually looking at the object, or playing back a memorized motor pattern?"*
 
-You tell us what object to mask (`"the mug"`, `"the lid"`, `"the welding torch"`). For every frame, we find that object in the image with GroundingDINO + SAM, mask it (channel-mean fill **and** Gaussian-blur fill — we require both to agree before calling memorization), and measure how much the predicted action changes.
+You tell us what object to mask (`"the mug"`, `"the lid"`, `"the welding torch"`). For every frame, we find that object in the image with SAM 3 (or GroundingDINO+SAM via `--detector gd-sam`), mask it (channel-mean fill **and** Gaussian-blur fill — we require both to agree before calling memorization), and measure how much the predicted action changes.
 
 **Output per frame:** action delta (normalized to % of typical action) under each fill, plus the masked image so you can eyeball that the mask actually covered the right thing.
 **Skips with reason when:** GroundingDINO can't confidently find the object, or the mask is too low-contrast to count as a real intervention. **No fabricated verdicts.**
