@@ -13,10 +13,6 @@ via entry points. This command reads that spec and:
   3. Runs a one-line ``python -c "import <server_module>"`` sanity
      check inside the runtime venv so failures surface here instead
      of mid-analyze.
-
-Because the dev-path and user-path are the same (CLAUDE.md "Dev path
-is the user path"), the scripts/setup/0N_install_<name>_venv.sh dev
-recipes just call this command — no separate provisioning logic.
 """
 
 from __future__ import annotations

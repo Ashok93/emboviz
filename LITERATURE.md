@@ -1,14 +1,11 @@
-# Emboviz — methodology literature reference
+# Emboviz — Methodology and References
 
-**Purpose.** Every diagnostic Emboviz emits must be defensible against
-published methodology. This document records the literature behind each
-diagnostic, the algorithms we implement, and the *antipatterns* we
-deliberately avoid (with citations). When a future contributor asks
-"why does Emboviz do X this way?", the answer should be a paper, not
-"because we shipped it like that."
+This document records the published methodology behind each Emboviz
+diagnostic: the algorithm implemented, the rationale for the design
+choices, the approaches excluded, and the supporting citations.
 
-**Scope.** Five diagnostics, plus shared calibration. Per-model
-methodology notes follow. Master citation list at the end.
+It covers the five diagnostics and the shared calibration procedure,
+followed by per-model methodology notes and a master citation list.
 
 ---
 
@@ -16,7 +13,7 @@ methodology notes follow. Master citation list at the end.
 
 ### Question being answered
 
-If we mask the manipulated target object in the input image and the
+If the manipulated target object is masked in the input image and the
 policy's predicted action is unchanged, the policy is replaying a
 memorized motor pattern conditioned on non-visual signals (proprio,
 instruction, action history) rather than reading the scene. This
@@ -24,7 +21,7 @@ matters because such policies pass training-distribution success
 metrics by surface-mimicking demonstrations, then fail catastrophically
 on any visual variation.
 
-### Algorithm we implement
+### Method
 
 ```
 Inputs:
@@ -39,7 +36,7 @@ Inputs:
 
 1.  phrase ← MLLM_parse(I) -- extract the manipulated-object phrase
     if MLLM_parse cannot find a manipulated object → return INCONCLUSIVE
-    (no fabricated noun; we refuse to guess from a fixed taxonomy)
+    (no fabricated noun; guessing from a fixed taxonomy is not permitted)
 
 2.  per-camera detection (default detector = SAM 3, text → mask):
     for each camera c in observation:
@@ -83,7 +80,7 @@ Inputs:
         mask_with_perturbed_proprio → proprio-confounder check
 ```
 
-### Why this and not the alternatives
+### Rationale
 
 - **Free-form referring expressions** (e.g. "the bottom-right tip of
   the duvet to the left") — GroundingDINO's block-diagonal phrase
@@ -121,7 +118,7 @@ Inputs:
 - **Detector confidence gate** — Adebayo et al. 2018 ("Sanity Checks
   for Saliency Maps") established that interpretability methods must
   explicitly fail on null inputs. A low-confidence detection IS a null
-  input; we refuse the verdict rather than fabricate one.
+  input; the verdict is refused rather than fabricated.
 - **Proprio-confounder control** — Lin et al. 2025 ("Do You Need
   Proprioceptive States in Visuomotor Policies?", arXiv:2509.18644)
   showed that policies frequently overfit to proprio and "ignore"
@@ -130,15 +127,13 @@ Inputs:
   proprio perturbed; if Δ_out remains zero only with original proprio,
   the policy's invariance is proprio-driven, not target-blind.
 
-### Antipatterns we explicitly avoid
+### Excluded approaches
 
-1. **Fixed noun taxonomy** (the *previous* Emboviz implementation
-   matched only `{utensil, food, toy, cloth, tool, container}` —
-   silently skipped any out-of-taxonomy task). Real robot tasks
-   reference "the lid", "the pipe", "the recycling bin", "the bottom
-   right tip of the duvet" — a six-category lookup table covers maybe
-   30% of real-world instructions and silently degrades for the
-   other 70%.
+1. **Fixed noun taxonomy** — matching the instruction against a small
+   closed set of categories silently skips any out-of-taxonomy task.
+   Real robot tasks reference arbitrary objects ("the lid", "the pipe",
+   "the recycling bin", "the bottom right tip of the duvet"), which a
+   closed lookup table does not cover.
 2. **Centered-rectangle fallback** when detection fails (silently
    masks the gripper or empty space).
 3. **Black-fill masking** (triggers vision-encoder "lights-off" prior;
@@ -193,7 +188,7 @@ leaves the action unchanged. The model's `required_inputs` declaration
 tells us what it CLAIMS to consume — this test verifies whether it
 actually does.
 
-### Algorithm we implement
+### Method
 
 ```
 Inputs:
@@ -259,7 +254,7 @@ For each modality M_i:
 | Action history | Action histories from different-episode frames | Direct substitute (no zero) |
 | Instruction | Instructions from DIFFERENT TASKS in the same dataset | Sample one |
 
-### Why this and not the alternatives
+### Rationale
 
 - **Marginal-distribution sampling**, not single-value substitution,
   is the unique attribution that satisfies Shapley axioms (local
@@ -302,17 +297,16 @@ For each modality M_i:
   masks for image attribution and showed variance scales as O(1/√N).
   Below ~20 samples the verdict is unstable; above ~200 is overkill
   for online use.
-- **Intervention magnitude reporting and the right to abstain** —
-  the most underdeveloped principle in the literature and the most
-  load-bearing for our use case. Causal abstraction work
-  [Geiger et al. 2023] makes the principle explicit: an intervention's
-  response is only interpretable when the intervention itself is
-  large enough to matter relative to the modality's natural scale.
-  We always report both `mean_Δ_in` and `mean_Δ_out`, plus their
-  ratio. We refuse to emit `IGNORED` when `mean_Δ_in` is below the
-  25th percentile of dataset pairwise distances.
+- **Intervention magnitude reporting and abstention** — causal
+  abstraction work [Geiger et al. 2023] makes the principle explicit:
+  an intervention's response is only interpretable when the
+  intervention itself is large enough to matter relative to the
+  modality's natural scale. Both `mean_Δ_in` and `mean_Δ_out` are
+  reported, along with their ratio, and `IGNORED` is withheld when
+  `mean_Δ_in` is below the 25th percentile of dataset pairwise
+  distances.
 
-### Antipatterns we explicitly avoid
+### Excluded approaches
 
 1. **Zeros for structured state** (rotations, quaternions, normalized
    embeddings) — crashes structured decoders or silently passes
@@ -324,8 +318,8 @@ For each modality M_i:
 4. **Last-frame substitution for state in autocorrelated
    trajectories** — intervention magnitude ≈ 0.
 5. **Single substitution sample** (no marginal averaging).
-6. **Reporting `Δ_out` without `Δ_in`** — every false-IGNORED bug we
-   identified in audit was a missing `Δ_in` report.
+6. **Reporting `Δ_out` without `Δ_in`** — produces false-IGNORED
+   verdicts when the intervention is too weak to register.
 7. **Permuting correlated features without acknowledging
    extrapolation** (Hooker & Mentch).
 8. **Reporting "do nothing" as a neutral instruction.**
@@ -373,7 +367,7 @@ policy's action? Distinguishes "model focuses on the target" from
 "model relies on background / distractor" from "model ignores camera X
 entirely."
 
-### Algorithm we implement
+### Method
 
 ```
 Inputs:
@@ -432,7 +426,7 @@ is NOT in the shipped code today:
       PASS if z > 3, INFO if 1 < z <= 3, MODERATE if z <= 1.
 ```
 
-### Why this and not the alternatives
+### Rationale
 
 - **Sliding occluder with overlap** [Zeiler & Fergus 2014] —
   disjoint-grid is a degenerate special case (occluder = cell,
@@ -449,44 +443,43 @@ is NOT in the shipped code today:
   Gini) that satisfy the six axioms a sparsity metric should satisfy
   (Robin Hood, Scaling, Rising Tide, Cloning, Bill Gates,
   Babies). Top-K share has an arbitrary K and a noise-expectation
-  baseline of K/N — for a 4×4 grid (N=16) and K=4, that's exactly
-  0.25, which is precisely where the *previous* MODERATE threshold
-  sat — a coincidence that meant pure-noise grids read borderline-
-  MODERATE.
+  baseline of K/N — for a 4×4 grid (N=16) and K=4 that is 0.25, so a
+  pure-noise grid reads as borderline-MODERATE under a fixed 0.25
+  threshold.
 - **z-score calibrated threshold against null grid** — Adebayo et
   al. 2018 ("Sanity Checks for Saliency Maps") established that
   saliency methods must explicitly fail on null inputs (randomized
-  weights, shuffled labels) to be trustworthy. We bake this in: per
-  `(model, grid_size, image distribution)` we compute the null Hoyer
-  distribution once via cell-shuffling on a calibration set, and
-  every observed score is z-scored against it.
-- **Camera-consumed test in action-std units** — old test was
-  `total_sensitivity < 1e-9`. Real noise floors are 1e-4 to 1e-2;
-  the old threshold was never reached so cameras always read as
-  consumed even when the grid was pure noise. New test: max
-  signal-above-noise per cell must exceed 5% of typical action
-  magnitude (same "meaningful intervention" criterion as elsewhere).
+  weights, shuffled labels) to be trustworthy. This is incorporated:
+  per `(model, grid_size, image distribution)` the null Hoyer
+  distribution is computed once via cell-shuffling on a calibration
+  set, and every observed score is z-scored against it.
+- **Camera-consumed test in action-std units** — an absolute
+  threshold such as `total_sensitivity < 1e-9` is never reached for
+  real noise floors (1e-4 to 1e-2), so every camera reads as consumed
+  even on a pure-noise grid. The test instead requires the maximum
+  signal-above-noise per cell to exceed 5% of typical action magnitude
+  (the same meaningful-intervention criterion used elsewhere).
 - **For stochastic VLAs** (π0, GR00T, Diffusion Policy) the right
   target signal is the KL between predicted action distributions at
-  fixed noise level, not the L2 between mean actions. We approximate
-  via K-sample averaging through `averaged_predict` (consistent with
-  every other diagnostic).
+  fixed noise level, not the L2 between mean actions. It is
+  approximated via K-sample averaging through `averaged_predict`
+  (consistent with every other diagnostic).
 
-### Antipatterns we explicitly avoid
+### Excluded approaches
 
 1. **Disjoint grid with no occluder overlap** (aliased / blocky
    maps).
 2. **Absolute thresholds (`< 1e-9`) for "ignored"** — should be in
    action-std units from calibration.
-3. **`higher_is_worse` direction with concentration as scalar** — the
-   *previous* implementation had this inverted; the framework's
-   `worst_frame_idx` selected the most-focused frame as worst.
-4. **`direction` thresholds (0.5, 0.25) that collide with grid
-   noise expectation** — for 4×4, top-4 / 16 = 0.25 is uniform
-   noise; MODERATE threshold there is at noise floor.
+3. **Inverted severity direction with concentration as the scalar** —
+   treating higher concentration as worse ranks the most-focused frame
+   as the worst.
+4. **Fixed thresholds (0.5, 0.25) that collide with grid noise
+   expectation** — for 4×4, top-4 / 16 = 0.25 is uniform noise, so a
+   MODERATE threshold at 0.25 sits at the noise floor.
    *Current-implementation note:* the shipped diagnostic uses
    top-K concentration with FIXED thresholds (0.5 / 0.25) — the same
-   class of fixed threshold this antipattern warns about. It is made
+   class of fixed threshold described in this list. It is made
    safe in practice by the calibration-aware consumed-gate
    (`cell_signal_threshold` + noise-floor subtraction in step 5),
    which removes pure-noise cameras BEFORE the concentration is
@@ -529,13 +522,13 @@ model's visual attention stay anchored on a coherent region, or does it
 drift frame-to-frame? Drift correlates with brittle policies that grasp
 adjacent to the target.
 
-**GR00T caveat — the attention signal differs by architecture (load-bearing).**
+**GR00T caveat — the attention signal differs by architecture.**
 OpenVLA / OFT / π0 are *single-stack*: the action is produced through the VLM's
 own attention, so the last-token→image map localizes the manipulated object.
 GR00T-N1.x is *dual-system* — a frozen Qwen/Eagle VLM feeds a SEPARATE
 diffusion-transformer (DiT) action head (GR00T-N1, arXiv:2503.14734, which
-conditions the DiT on intermediate-layer VLM embeddings via cross-attention). We
-extract GR00T's map from that **DiT action→image cross-attention** (the only
+conditions the DiT on intermediate-layer VLM embeddings via cross-attention).
+Emboviz extracts GR00T's map from that **DiT action→image cross-attention** (the only
 action-grounded signal; the VLM's frozen self-attention is attention-sink
 dominated). That DiT signal is the **motor pathway** and is spatially
 **dispersed** — it is NOT a reliable object localizer, and this is a documented
@@ -543,13 +536,13 @@ VLA property rather than an emboviz defect: ReconVLA (arXiv:2508.10333) and the
 VLA survey (arXiv:2507.10672) report VLA visual attention is generally
 dispersed/sink-prone, and the GR00T-N1.5 mechanistic study (arXiv:2603.19233)
 shows the expert/DiT pathway encodes the *motor program* while goal/object info
-lives in VLM *features* (SAEs/linear probes), not attention weights. emboviz
-therefore extracts the most defensible signal (seeded DiT cross-attention,
-meaned over denoise steps + image-cross blocks + heads) and labels it honestly
-as the dispersed motor pathway — it does not fabricate a tight object map. See
-the README "GR00T attention" caveat and `Gr00tAdapter.extract_attention`.
+lives in VLM *features* (SAEs/linear probes), not attention weights. Emboviz
+therefore extracts the seeded DiT cross-attention (meaned over denoise steps,
+image-cross blocks, and heads) and labels it as the dispersed motor pathway
+rather than as an object localizer. See the README "GR00T attention" note and
+`Gr00tAdapter.extract_attention`.
 
-### Algorithm we implement
+### Method
 
 The shipped diagnostic (`emboviz/diagnostics/attention_drift.py`)
 computes ONLY the per-frame attention centroid and the frame-to-frame
@@ -571,7 +564,7 @@ Inputs:
    for each frame f:
        attn_v[f] = cleaned per-camera image heatmap (normalized)
        if attn_v[f].sum() <= 0: RAISE  (zero-sum is a real adapter
-            bug — we refuse to fabricate a (0.5, 0.5) centroid)
+            bug — fabricating a (0.5, 0.5) centroid is refused)
 
 2. Per-frame centroid (center of mass):
    centroid[f] = E_{(y,x) ~ attn_v[f]}[(y, x)]   in [0,1], then
@@ -617,7 +610,7 @@ attached to it:
       the metric is measuring image structure, not model behaviour.
 ```
 
-### Why this and not the alternatives
+### Rationale
 
 - **Mid-layer visual-grounding heads, not all-layers-all-heads
   average** — "How Multimodal LLMs Solve Image Tasks" (2508.20279)
@@ -635,8 +628,8 @@ attached to it:
   Tokens in MLLMs" documents that BOS / padding / image-border
   tokens absorb disproportionate attention as a softmax artifact.
   Centroids computed without masking sinks are dominated by these
-  artifacts. We pre-identify sink tokens (high baseline activation
-  on a calibration set) and mask them to zero before normalizing.
+  artifacts. Sink tokens are pre-identified (high baseline activation
+  on a calibration set) and masked to zero before normalizing.
 - **Wasserstein-2 + top-K IoU + centroid drift** (three metrics)
   rather than centroid drift alone — centroid is lossy (2D
   distribution → point) and easily corrupted by sink residuals. W_2
@@ -664,7 +657,7 @@ attached to it:
   metric is measuring image structure (sink positions, edge density)
   rather than model behaviour.
 
-### Antipatterns we explicitly avoid
+### Excluded approaches
 
 1. **Treating raw attention as causal evidence** (Jain & Wallace
    2019 / Wiegreffe & Pinter 2019 debate) — always validate with an
@@ -673,9 +666,9 @@ attached to it:
    specialized visual-grounding signal.
 3. **Computing centroid without masking sink tokens** — centroid is
    dominated by BOS / border artifacts.
-4. **Silently filling (0.5, 0.5) when attention sums to zero** — the
-   *previous* implementation did this; the new one raises (a zero
-   sum is a real adapter bug, not a metric to absorb).
+4. **Silently filling (0.5, 0.5) when attention sums to zero** — a
+   zero sum is an adapter bug and is raised, not absorbed into a
+   fabricated centroid.
 5. **Fixed pixel thresholds** for "drift" — must be normalized
    to image or target bbox scale.
    *Current-implementation note:* the shipped diagnostic deliberately
@@ -683,8 +676,8 @@ attached to it:
    `drift_critical_px=70.0`) as a documented simplification.
    Normalized / calibrated thresholds (per the "Design target —
    not yet implemented" note above) are the intended replacement;
-   until then this antipattern is knowingly present and surfaced
-   here rather than hidden.
+   until then this simplification is documented here rather than
+   left implicit.
 
 ### Citations
 
@@ -712,12 +705,12 @@ attached to it:
 
 ---
 
-## 5. Internal chunk consistency — can we trust the multi-step lookahead?
+## 5. Internal chunk consistency — can the multi-step lookahead be trusted?
 
 ### Question being answered
 
 For VLAs that predict ACTION CHUNKS (OpenVLA-OFT k=8, π0 k=50,
-GR00T-N1.7 H=16, Diffusion Policy, ACT, RDT), we measure: at frame t
+GR00T-N1.7 H=16, Diffusion Policy, ACT, RDT), the comparison is: at frame t
 the model predicts `chunk = [a_t, a_{t+1}, ...]`; at frame t+1 the
 model predicts `chunk' = [a'_{t+1}, ...]`. Does `a_{t+1}` (the
 prediction for t+1 made at time t) match `a'_{t+1}` (the prediction
@@ -725,14 +718,14 @@ for t+1 made at time t+1)? If yes → stable multi-step planning. If
 no → resampling each frame, chunks beyond first step are noise,
 running multi-step controllers will hurt.
 
-### Algorithm we implement
+### Method
 
 ```
 Inputs:
     policy π (sample N=10-20 chunks per frame for stochastic policies)
     trajectory T with frames
     decay weight ρ = 0.9
-    n_steps_to_compare k (default 1 — but we report the full curve)
+    n_steps_to_compare k (default 1 — the full curve is reported)
 
 1. For each frame f:
        chunks[f] = N samples of π(scene_f).action_chunk
@@ -769,20 +762,20 @@ Inputs:
                                                     normal step)
 ```
 
-### Why this and not the alternatives
+### Rationale
 
 - **Backward coherence with exponential decay** — Bidirectional
   Decoding [Liu et al. ICLR 2025, arXiv:2408.17355] gives the
-  cleanest formal definition for chunk-vs-chunk agreement; we
-  inherit it directly with ρ = 0.9.
+  cleanest formal definition for chunk-vs-chunk agreement; it is
+  used directly with ρ = 0.9.
 - **N samples per frame for stochastic models** — π0 (flow-matching),
   GR00T (DiT flow-matching head), Diffusion Policy, RDT all have
   non-trivial sample-to-sample variance. Without averaging, single-
   sample "drift" between frames is mostly resampling noise.
   Adaptive Action Chunking [arXiv:2604.04161] samples N=20 chunks
   per frame for the same reason.
-- **Three normalizations** — no paper has consolidated this; it's the
-  gap Emboviz fills. Per-dim std normalizes gripper-vs-translation
+- **Three normalizations** — combined here rather than drawn from a
+  single source. Per-dim std normalizes gripper-vs-translation
   mismatches; per-step delta gives physical interpretability
   ("drift = 50% of a normal action step"); within-sample std gives
   the model's own sampling floor (drift below this is
@@ -790,13 +783,13 @@ Inputs:
 - **Safely-committable horizon `h*`** — directly answers the
   user-facing question "how many steps can I trust?" Mixture-of-
   Horizons [arXiv:2511.19433] formalizes this self-calibrating
-  threshold (r=1.1 × mean of first 5 steps). We report it as the
+  threshold (r=1.1 × mean of first 5 steps). It is reported as the
   headline scalar.
 - **Cross-model normalization via `h*/chunk_len`** — π0's 50 and
   OFT's 8 are physical horizons; their RATIOS are comparable, their
   raw values are not.
 
-### Antipatterns we explicitly avoid
+### Excluded approaches
 
 1. **Single-sample chunk comparison for stochastic policies** —
    conflates decoding noise with plan revision.
@@ -840,8 +833,8 @@ Inputs:
 
 Every diagnostic produces a raw L2 distance in the model's action
 units. To compare across models (OpenVLA's 7-DOF Bridge actions vs
-GR00T's 17-DOF state-action vs π0's chunk[0] subset) we normalize each
-raw distance against two model-specific anchors:
+GR00T's 17-DOF state-action vs π0's chunk[0] subset), each raw distance
+is normalized against two model-specific anchors:
 
 - **noise_floor**: the model's residual sample-to-sample variation,
   measured directly between two `n_samples`-averaged predictions on
@@ -879,7 +872,7 @@ raw distance against two model-specific anchors:
        score = max(0, raw_delta - noise_floor) / typical_action_magnitude
 ```
 
-### Why this and not the alternatives
+### Rationale
 
 - **Per-trajectory calibration**, not global — different trajectories
   have different action magnitudes (approach vs grasp vs lift). A
@@ -890,12 +883,13 @@ raw distance against two model-specific anchors:
 - **`n_samples` derived from the math, not picked** — `n` is exactly
   enough to bound averaged noise below `precision_target × typical`.
   Deterministic models get `n=1` automatically (zero noise → divide
-  blows up only if mag is also zero, which we check). Highly
+  blows up only if mag is also zero, which is checked). Highly
   stochastic models get whatever the math says, capped at 64.
 - **Raise on degenerate `typical_action_magnitude`** — for a model
   that produces near-zero actions on every baseline frame, there's
-  no scale to normalize against. We raise rather than silently
-  return 0 because the user needs to know calibration is degenerate.
+  no scale to normalize against. This raises rather than silently
+  returning 0, so a degenerate calibration is surfaced rather than
+  hidden.
 - **Single-sample magnitude in `n_samples` derivation**, averaged
   magnitude in the denominator — derivation is in terms of single
   samples; downstream comparisons are between averaged actions; the
@@ -912,9 +906,9 @@ raw distance against two model-specific anchors:
   (`do_sample=False`).
 - **Capabilities**: full mechanistic-interp suite — attention,
   hidden states, FFN activations, residual patching, neuron
-  ablation. All four VLA adapters now expose ATTENTION; OpenVLA's
-  distinction is the FULL mechanistic-interp suite (hidden states /
-  FFN activations / residual patching / neuron ablation), not
+  ablation. All four VLA adapters expose ATTENTION; OpenVLA's
+  distinction is the full mechanistic-interp suite (hidden states,
+  FFN activations, residual patching, neuron ablation), not
   attention alone.
 - **Calibration**: `n_samples = 1` always (deterministic).
 - **Chunk consistency**: N/A (no chunk).

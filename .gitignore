@@ -108,3 +108,8 @@ story_outputs/
 PLAN.md
 WORK_LOG.md
 /from_vm/
+
+# ──────────────────────────────────────────────────────────────────────
+# Internal dev / VM-testing tooling (not part of the published product)
+# ──────────────────────────────────────────────────────────────────────
+/scripts/

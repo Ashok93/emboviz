@@ -26,9 +26,7 @@ emboviz install-sam3          # builds the isolated Python 3.12 reader venv
 ```
 
 `emboviz install-sam3` materialises `~/.emboviz/venvs/sam3` from this
-adapter's `AdapterSpec` — the same path a PyPI user follows. (The dev
-recipe `scripts/setup/05_install_sam3_venv.sh` is a thin wrapper around
-this exact command.)
+adapter's `AdapterSpec` — the same path a PyPI user follows.
 
 ## Run
 
