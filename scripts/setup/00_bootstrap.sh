@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bootstrap a fresh GPU pod: install uv, clone emboviz, set up env.
-# Idempotent — safe to re-run.
+# Bootstrap a fresh GPU pod: install uv, set up env. The emboviz code is
+# scp'd from the dev checkout (NOT cloned — see below). Idempotent.
 set -euo pipefail
 
 echo "[bootstrap] system packages — ffmpeg for torchcodec, git-lfs for Isaac-GR00T demo_data"
@@ -14,9 +14,17 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 uv --version
 
-echo "[bootstrap] cloning emboviz"
+# We scp the dev checkout to /root/emboviz so we test LOCAL (often unpushed)
+# changes — we never clone from GitHub (it would be stale). Fail loudly if
+# the code isn't here yet rather than silently proceeding without it.
+echo "[bootstrap] checking emboviz code is present (scp'd from dev, never cloned)"
 if [ ! -d /root/emboviz ]; then
-    git clone https://github.com/Ashok93/emboviz.git /root/emboviz
+    echo "[bootstrap] ERROR: /root/emboviz not found." >&2
+    echo "[bootstrap]   scp your dev checkout first, e.g.:" >&2
+    echo "[bootstrap]     git archive --format=tar.gz HEAD -o /tmp/emboviz.tgz" >&2
+    echo "[bootstrap]     scp -O /tmp/emboviz.tgz <pod>:/root/" >&2
+    echo "[bootstrap]     ssh <pod> 'mkdir -p /root/emboviz && tar xzf /root/emboviz.tgz -C /root/emboviz'" >&2
+    exit 1
 fi
 
 echo "[bootstrap] setting up bashrc"
