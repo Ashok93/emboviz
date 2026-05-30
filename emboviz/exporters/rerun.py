@@ -31,9 +31,10 @@ Design rules (locked):
     heatmap) use ``turbo`` because the underlying signal is continuous
     and the user reads "hot region = used by model" naturally.
 
-Targets rerun-sdk >= 0.23 (unified ``set_time``; ``Scalars`` /
-``BarChart`` archetypes; ``RecordingStream`` constructor; blueprint
-``Tabs``/``Vertical``/``Grid``). Tested against 0.32.x.
+Targets the pinned rerun-sdk >= 0.33, < 0.34 (unified ``set_time``;
+``Scalars`` / ``BarChart`` archetypes; ``RecordingStream`` constructor;
+blueprint ``Tabs``/``Vertical``/``Grid``). The .rrd on-disk format is tied
+to rerun's minor version, so the pin is exact-minor on purpose.
 """
 
 from __future__ import annotations
@@ -269,36 +270,28 @@ def export_rerun(
         raise ImportError(
             "Rerun export requires the `rerun-sdk` package. It ships with "
             "emboviz core — reinstall with: uv pip install 'emboviz' "
-            "(rerun-sdk>=0.32)."
+            "(rerun-sdk>=0.33,<0.34)."
         ) from e
 
     if not hasattr(rr, "RecordingStream"):
         raise RuntimeError(
             "rerun-sdk too old for the export API. Install the pinned range: "
-            "uv pip install 'rerun-sdk>=0.32'"
+            "uv pip install 'rerun-sdk>=0.33,<0.34'"
         )
 
     # rerun-sdk 0.23 renamed Scalar → Scalars (plural) and unified the
     # per-axis ``set_time_sequence`` / ``set_time_seconds`` calls into a
-    # single ``set_time(name, *, sequence|duration)``. The host pin
-    # (rerun-sdk>=0.32 — see pyproject; core no longer carries lerobot's
-    # <0.27 cap) always takes the modern path; these getattr/hasattr shims
-    # are a harmless defensive fallback for a 0.23–0.31 install.
-    Scalars = getattr(rr, "Scalars", None) or rr.Scalar
-    _has_unified_set_time = hasattr(rr, "set_time")
+    # single ``set_time(name, *, sequence|duration)``. Core pins
+    # rerun-sdk>=0.33,<0.34 (see pyproject), which always has the unified
+    # ``set_time`` and the ``Scalars`` archetype — so no version shim, and
+    # no support for the <0.33 the pin forbids.
+    Scalars = rr.Scalars
 
     def _set_time(name: str, *, sequence=None, duration=None) -> None:
-        if _has_unified_set_time:
-            if sequence is not None:
-                rr.set_time(name, sequence=sequence, recording=rec)
-            elif duration is not None:
-                rr.set_time(name, duration=duration, recording=rec)
-            return
-        # rerun-sdk 0.22 path: separate setter per axis kind.
         if sequence is not None:
-            rr.set_time_sequence(name, sequence, recording=rec)
+            rr.set_time(name, sequence=sequence, recording=rec)
         elif duration is not None:
-            rr.set_time_seconds(name, duration, recording=rec)
+            rr.set_time(name, duration=duration, recording=rec)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
