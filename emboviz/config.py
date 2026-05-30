@@ -156,6 +156,23 @@ class AnalysisCfg(_Strict):
             )
         return v
 
+    @field_validator("modality_k_samples")
+    @classmethod
+    def _check_modality_k(cls, v: int) -> int:
+        # The SHAP-marginal modality-dropout estimate has Monte-Carlo error
+        # ~1/sqrt(K). Below K=10 the per-modality response is noise dressed
+        # up as a number — a verdict we will not stand behind — so we refuse
+        # it loudly rather than silently emit it (this is a forbidden
+        # "de-risk" shortcut, per the honesty rule).
+        if v < 10:
+            raise ValueError(
+                f"analysis.modality_k_samples={v} is below the statistical "
+                "floor of 10. Modality dropout averages K real substitutions "
+                "per modality; K<10 gives a Monte-Carlo estimate too noisy to "
+                "trust. Use modality_k_samples >= 10 (default 10)."
+            )
+        return v
+
 
 class RunConfig(_Strict):
     model: ModelCfg

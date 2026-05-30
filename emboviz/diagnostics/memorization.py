@@ -385,8 +385,21 @@ class MemorizationDiagnostic(Diagnostic):
         # For a stochastic model (e.g. flow-matching DiT), per-call jitter
         # can dwarf the response to target masking — calling that
         # "memorization" would conflate signal with noise.
+        # Noise gate: is the response distinguishable from the model's own
+        # per-call jitter? The statistic compared below is max(deltas) over
+        # the fills — a MAX, not a mean — and the fills are DIFFERENT
+        # interventions, not repeated draws of one input. So we must NOT
+        # shrink the floor by sqrt(num_fills): that was a max-vs-mean mismatch
+        # that made the threshold ~sqrt(2)x too small and leaked decoding
+        # jitter through as a "memorization" verdict. calibration.noise_floor
+        # is already the POST-averaging floor (the Δ between two
+        # n_samples-averaged predictions), and each fill's delta is exactly
+        # one such averaged-prediction Δ — so the correct floor for a single
+        # delta is k_samples=1. (A max-of-K Bonferroni bump would be
+        # marginally more conservative; k=1 is the single-comparison floor and
+        # removes the erroneous shrinkage.)
         signal_threshold = (
-            self.calibration.signal_threshold_normalized(k_samples=len(per_fill_results))
+            self.calibration.signal_threshold_normalized(k_samples=1)
             if self.calibration is not None
             else self.noise_floor_score
         )
