@@ -486,11 +486,31 @@ For each camera c in C:
 
 ### Question being answered
 
-For VLAs that expose attention (currently just OpenVLA-7B in our
-adapter set), measure across a trajectory: does the model's visual
-attention stay anchored on a coherent region, or does it drift
-frame-to-frame? Drift correlates with brittle policies that grasp
+For VLAs that expose attention (OpenVLA-7B, OpenVLA-OFT, π0 with the
+PyTorch backend, and GR00T-N1.x), measure across a trajectory: does the
+model's visual attention stay anchored on a coherent region, or does it
+drift frame-to-frame? Drift correlates with brittle policies that grasp
 adjacent to the target.
+
+**GR00T caveat — the attention signal differs by architecture (load-bearing).**
+OpenVLA / OFT / π0 are *single-stack*: the action is produced through the VLM's
+own attention, so the last-token→image map localizes the manipulated object.
+GR00T-N1.x is *dual-system* — a frozen Qwen/Eagle VLM feeds a SEPARATE
+diffusion-transformer (DiT) action head (GR00T-N1, arXiv:2503.14734, which
+conditions the DiT on intermediate-layer VLM embeddings via cross-attention). We
+extract GR00T's map from that **DiT action→image cross-attention** (the only
+action-grounded signal; the VLM's frozen self-attention is attention-sink
+dominated). That DiT signal is the **motor pathway** and is spatially
+**dispersed** — it is NOT a reliable object localizer, and this is a documented
+VLA property rather than an emboviz defect: ReconVLA (arXiv:2508.10333) and the
+VLA survey (arXiv:2507.10672) report VLA visual attention is generally
+dispersed/sink-prone, and the GR00T-N1.5 mechanistic study (arXiv:2603.19233)
+shows the expert/DiT pathway encodes the *motor program* while goal/object info
+lives in VLM *features* (SAEs/linear probes), not attention weights. emboviz
+therefore extracts the most defensible signal (seeded DiT cross-attention,
+meaned over denoise steps + image-cross blocks + heads) and labels it honestly
+as the dispersed motor pathway — it does not fabricate a tight object map. See
+the README "GR00T attention" caveat and `Gr00tAdapter.extract_attention`.
 
 ### Algorithm we implement
 

@@ -61,23 +61,27 @@ class Gr00tAdapter(VLAModel):
 
     _CAPS = Capability.INFERENCE | Capability.ATTENTION
 
-    # GR00T-N1.7 is DUAL-SYSTEM: the Qwen3-VL backbone (System-2) PERCEIVES the
-    # scene; the System-1 DiT produces actions from its hidden states. The
-    # "where does the model look" map is the canonical VLM "last attention":
-    # the last instruction token's attention over the image tokens in the Qwen
-    # backbone — the SAME method that makes OpenVLA clean, just on Qwen instead
-    # of LLaMA. (The DiT action cross-attention is a separate "where it acts"
-    # view, exposed via extract_attention_trace, not this map.)
+    # GR00T-N1.7 is DUAL-SYSTEM: a FROZEN Qwen3-VL backbone (System-2) perceives
+    # the scene; a Diffusion-Transformer action head (System-1) generates the
+    # action by CROSS-ATTENDING to the backbone's VL token embeddings. The
+    # action-relevant "where is the model looking?" map is therefore the DiT's
+    # IMAGE cross-attention (action queries → image VL tokens) — NOT the frozen
+    # VLM's last-token self-attention (generic perception, dominated by Qwen
+    # corner sinks, and not what conditions the action). See extract_attention.
     #
-    # Aggregation = mean over mid-to-late layers + all heads (no head selection,
-    # no sink removal, no calibration). The DiT is truncated to `select_layer`
-    # kept layers; grounding sits in the late kept layers.
+    # The image-cross blocks have no early/late "stage structure" like a VLM
+    # transformer (each is action grounding, and attends to image tokens
+    # directly so there are no positional sinks to avoid). All blocks are valid
+    # candidates; image_weights_clean picks the block whose head-mean is most
+    # concentrated on the object interior.
     ATTENTION_PROFILE = {
-        "recommended_layer_range_fraction": (0.5, 1.0),
+        "recommended_layer_range_fraction": (0.0, 1.0),
         "literature_citation":
-            "Canonical VLM 'last attention': last text token → image tokens, "
-            "mean over mid-late layers + heads (LLaVA/Qwen-VL attention "
-            "visualizers; same recipe OpenVLA uses). Raw attention, no gradient.",
+            "GR00T N1 (arXiv:2503.14734): the System-1 DiT conditions on the "
+            "backbone's intermediate-layer (config.select_layer) VL token "
+            "embeddings via cross-attention. The 'where it looks to act' map is "
+            "the DiT image cross-attention (action queries → image VL tokens), "
+            "meaned over denoise steps + heads. Raw attention, no gradient.",
     }
 
     def __init__(
@@ -282,42 +286,53 @@ class Gr00tAdapter(VLAModel):
     def extract_attention(
         self, scene: Scene, query: TokenSelector,
     ) -> AttentionMaps:
-        """Extract per-camera attention from GR00T's System-2 Qwen3-VL backbone.
+        """Per-camera attention from GR00T's System-1 DiT image cross-attention.
 
-        GR00T-N1.7 is a DUAL-SYSTEM model. System-2 (Qwen3-VL / Cosmos-
-        Reason2) PERCEIVES the scene; System-1, a Diffusion Transformer
-        (DiT), cross-attends to its features to denoise the action chunk.
-        There are two attention signals, and they answer different
-        questions:
+        GR00T-N1.7 is DUAL-SYSTEM: a FROZEN Qwen3-VL backbone (System-2,
+        Cosmos-Reason2) perceives the scene, and a Diffusion-Transformer
+        action head (System-1) generates the action by CROSS-ATTENDING to the
+        backbone's vision-language token embeddings (the hidden states of
+        ``config.select_layer``; see gr00t_n1d7.py: the DiT is called with
+        ``encoder_hidden_states = vl_embeds`` and an ``image_mask``).
 
-          • Qwen3-VL last-instruction-token → image self-attention — "what
-            the model PERCEIVES." This is the user-facing "where is the
-            model looking?" map and the SAME canonical last-token recipe
-            that makes OpenVLA clean, just on Qwen instead of LLaMA. This
-            method extracts it.
-          • DiT action → image cross-attention — "where the policy reads
-            the image to ACT." That is the separate, per-denoise-step view
-            exposed by :meth:`extract_attention_trace`, not here.
+        So the action-relevant "where is the model looking?" signal is the
+        DiT's IMAGE cross-attention — action/noise queries attending to the
+        image VL tokens — NOT the backbone's last-text-token self-attention.
+        The frozen VLM's self-attention is generic perception attention
+        dominated by Qwen's corner sinks; it is NOT what conditions the action
+        (visualizing it produced misleading corner blobs). The DiT
+        cross-attention is the grounded, action-relevant map (GR00T N1 paper,
+        arXiv:2503.14734: the DiT conditions on intermediate-layer VLM
+        embeddings via cross-attention).
 
-        We force eager attention on the Qwen LM (sdpa/flash return no
-        weights), capture its per-layer ``output_attentions``, take the
-        last instruction token's row over the image columns, and subtract
-        the query-averaged attention per (layer, head) so the
-        content-independent attention-sink / register tokens (Xiao et al.
-        arXiv:2309.17453; Darcet et al. "ViTs Need Registers" ICLR'24)
-        cancel and the instruction-specific grounding survives.
-        ``AttentionMaps.image_weights_clean`` then applies the
-        layer-adaptive selection (the one mid-stack layer most concentrated
-        on the image interior, mean over heads). Raw attention, no gradient.
+        ``AlternateVLDiT`` (dit.py) interleaves action self-attention,
+        text-cross and image-cross blocks; we hook ``attn1`` on the image-cross
+        blocks, capture the action-query → VL-token probabilities across the
+        denoise steps, mean over steps + action queries (keeping heads), and map
+        the image-token columns to per-camera patch grids. The diffusion noise is
+        SEEDED so the map is reproducible. ``query`` is unused: the DiT's queries
+        ARE the action tokens, not a text position.
 
-        Multi-camera handling: image tokens are INLINE in ``input_ids``
-        (marked by ``image_token_id``, expanded to one id per merged patch);
-        ``image_grid_thw`` gives per-image ``(T, H, W)`` so each image consumes
-        ``T*(H//merge)*(W//merge)`` tokens. Tiles map to cameras in
-        ``video.modality_keys`` order. The VLM hidden-state sequence shares the
-        ``input_ids`` length (``qwen3_backbone.forward``: ``image_mask =
-        input_ids == image_token_id``), so these column indices index the
-        captured attention directly.
+        CAVEAT (load-bearing): this is GR00T's DiT MOTOR pathway. Unlike
+        single-stack VLAs (OpenVLA/OFT/π0) whose action flows THROUGH the VLM and
+        yields focused object attention, GR00T generates actions in a SEPARATE
+        diffusion head whose cross-attention is the spatially DISPERSED motor
+        program — it is NOT a reliable object localizer. This is the documented
+        "dispersed VLA attention" phenomenon (ReconVLA arXiv:2508.10333; survey
+        arXiv:2507.10672) and matches the GR00T-N1.5 mechanistic study
+        (arXiv:2603.19233: the expert pathway encodes the motor program; goals
+        live in VLM FEATURES, not attention). Read it as "where the action
+        pathway attends across the workspace," not a tight object map. The VLM's
+        own last-token self-attention is worse (frozen, attention-sink dominated),
+        and its instruction↔image attention is likewise dispersed. See README +
+        LITERATURE.md.
+
+        Multi-camera handling: image tokens are INLINE in ``input_ids`` (marked
+        by ``image_token_id``, one id per merged patch); ``image_grid_thw`` gives
+        per-image ``(T, H, W)`` so each image consumes ``T*(H//merge)*(W//merge)``
+        tokens. Tiles map to cameras in ``video.modality_keys`` order. The VL
+        token sequence shares the ``input_ids`` length, so these column indices
+        index the DiT cross-attention keys directly.
         """
         import torch
 
@@ -326,73 +341,133 @@ class Gr00tAdapter(VLAModel):
             raise ValueError(f"Gr00tAdapter.extract_attention: {reason}")
 
         observation = self._build_observation(scene)
-
         model = self.policy.model
-        qwen_model = model.backbone.model        # Qwen3-VL VLM (perception)
+        qwen_model = model.backbone.model        # Qwen3-VL VLM (System-2)
+        dit = model.action_head.model            # AlternateVLDiT (System-1)
 
-        # Force eager attention on the Qwen LM so output_attentions returns real
-        # per-head weights (sdpa/flash return None). Saved + restored below.
-        lang = getattr(qwen_model, "language_model", None)
-        if lang is None and hasattr(qwen_model, "model"):
-            lang = getattr(qwen_model.model, "language_model", None)
-        _attn_cfgs = [qwen_model.config, getattr(qwen_model.config, "text_config", None),
-                      getattr(lang, "config", None)]
-        _saved_impl = [(c, getattr(c, "_attn_implementation", None)) for c in _attn_cfgs if c is not None]
-        for c, _ in _saved_impl:
-            c._attn_implementation = "eager"
-
-        # Capture the VLM's per-layer attention + input_ids/grid by wrapping the
-        # backbone's call to the Qwen model with output_attentions=True. The
-        # return is unchanged (hidden_states intact) so get_action still runs.
-        captured_meta: dict = {"input_ids": None, "image_grid_thw": None, "attentions": None}
+        # Capture the VLM input_ids / image_grid_thw only — needed to map image
+        # tokens back to per-camera patch grids. We do NOT need the VLM's own
+        # attention; the action-grounding signal is the DiT cross-attention,
+        # captured below. The wrapper leaves the return unchanged.
+        captured_meta: dict = {"input_ids": None, "image_grid_thw": None}
         original_qwen_forward = qwen_model.forward
 
         def meta_capture_forward(*args, **kwargs):
             captured_meta["input_ids"] = kwargs.get("input_ids", args[0] if args else None)
             captured_meta["image_grid_thw"] = kwargs.get("image_grid_thw")
-            kwargs["output_attentions"] = True
-            out = original_qwen_forward(*args, **kwargs)
-            if getattr(out, "attentions", None) is not None:
-                captured_meta["attentions"] = tuple(a.detach() for a in out.attentions)
-            return out
+            return original_qwen_forward(*args, **kwargs)
 
+        # AlternateVLDiT (gr00t/model/modules/dit.py) interleaves blocks:
+        #   idx % 2 == 1                       -> action self-attention
+        #   idx % 2 == 0 and idx % (2*N) == 0  -> cross-attn to TEXT tokens
+        #   idx % 2 == 0 and idx % (2*N) != 0  -> cross-attn to IMAGE tokens
+        # (N = attend_text_every_n_blocks). We hook attn1 on the IMAGE-cross
+        # blocks and record the (head, action-query, vl-token) probabilities at
+        # every denoise step.
+        n_text_every = int(getattr(dit, "attend_text_every_n_blocks", 2))
+        image_block_idxs = [
+            i for i in range(len(dit.transformer_blocks))
+            if (i % 2 == 0) and (i % (2 * n_text_every) != 0)
+        ]
+        if not image_block_idxs:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: no DiT image-cross-attention "
+                f"blocks found (attend_text_every_n_blocks={n_text_every}, "
+                f"n_blocks={len(dit.transformer_blocks)})."
+            )
+        n_blocks = len(image_block_idxs)
+        dit_attns: list = []   # call order: [step0: blk0..blkN][step1: ...]...
+
+        class _CaptureCross:
+            """Diffusers AttentionProcessor: record the image-cross attention
+            probabilities (honouring the encoder image-mask), then run the real
+            attention so ``get_action`` proceeds unchanged."""
+
+            def __call__(self, attn, hidden_states, encoder_hidden_states=None,
+                         attention_mask=None, temb=None, **kwargs):
+                q = attn.to_q(hidden_states)
+                ehs = hidden_states if encoder_hidden_states is None else encoder_hidden_states
+                if encoder_hidden_states is not None and attn.norm_cross:
+                    ehs = attn.norm_encoder_hidden_states(ehs)
+                k = attn.to_k(ehs)
+                v = attn.to_v(ehs)
+                q = attn.head_to_batch_dim(q)
+                k = attn.head_to_batch_dim(k)
+                v = attn.head_to_batch_dim(v)
+                # Compute UNMASKED scores (mask=None): the DiT's image-cross
+                # mask is a BOOL tensor for the SDPA path, but get_attention_scores
+                # (baddbmm) needs an additive float mask. We only ever USE the
+                # image-token columns afterward, and softmax over image keys is
+                # identical up to a constant factor whether or not text keys are
+                # masked (exp(s_i)/Z_all vs exp(s_i)/Z_img) — so the per-camera
+                # spatial pattern (and the interior-fraction block selection) is
+                # unchanged after normalization. Avoids fragile mask plumbing.
+                probs = attn.get_attention_scores(q, k, None)
+                bh, tq, tk = probs.shape
+                h = attn.heads
+                dit_attns.append(
+                    probs.detach().float().cpu().reshape(bh // h, h, tq, tk)[0].numpy()
+                )
+                out = torch.bmm(probs, v)
+                out = attn.batch_to_head_dim(out)
+                out = attn.to_out[0](out)
+                out = attn.to_out[1](out)
+                return out
+
+        original_procs = {}
+        for i in image_block_idxs:
+            m = dit.transformer_blocks[i].attn1
+            original_procs[i] = m.processor
+            m.set_processor(_CaptureCross())
         qwen_model.forward = meta_capture_forward
         try:
             with torch.inference_mode():
+                # GR00T denoises the action chunk from RANDOM noise
+                # (gr00t_n1d7.py get_action_with_features: ``actions =
+                # torch.randn(...)``, no generator). Seed it so the captured
+                # cross-attention is REPRODUCIBLE — a diagnostic must not vary
+                # run-to-run on an unseeded RNG. (GR00T-specific: OFT/OpenVLA/π0
+                # attention is the VLM forward, already deterministic.)
+                torch.manual_seed(0)
                 _ = self.policy.get_action(observation)
         finally:
             qwen_model.forward = original_qwen_forward
-            for c, impl in _saved_impl:
-                c._attn_implementation = impl
+            for i, proc in original_procs.items():
+                dit.transformer_blocks[i].attn1.set_processor(proc)
 
         input_ids = captured_meta["input_ids"]
         image_grid_thw = captured_meta["image_grid_thw"]
-        attentions = captured_meta["attentions"]
-        if input_ids is None or image_grid_thw is None or not attentions:
+        if input_ids is None or image_grid_thw is None or not dit_attns:
             raise RuntimeError(
-                "Gr00tAdapter.extract_attention: VLM forward did not yield "
-                "output_attentions / input_ids / image_grid_thw (eager attention "
-                "may not have taken effect)."
+                "Gr00tAdapter.extract_attention: DiT image-cross attention or "
+                "VLM meta not captured (the cross-attention processor or the "
+                "qwen forward hook did not fire)."
             )
 
-        # Last text token's attention to the image, per layer & head, with the
-        # CONTENT-INDEPENDENT component removed. Attention sinks / ViT register
-        # tokens — attended-to regardless of the query, e.g. Qwen's corner
-        # patches — are documented by Xiao et al. 2309.17453 and Darcet et al.
-        # "ViTs Need Registers" ICLR'24 (their remedies are KV-retention /
-        # added register tokens, NOT this subtraction). We isolate the
-        # instruction-SPECIFIC grounding with an adapter-local heuristic:
-        # subtract the query-averaged attention from the last-token row, per
-        # (layer, head) — sink tokens are high in BOTH and cancel; grounding
-        # survives.
-        full_seq = int(attentions[0].shape[-1])
-        query_pos = full_seq - 1
-        per_layer = []
-        for a in attentions:
-            row = a[0, :, query_pos, :].float().cpu().numpy()       # (H, S)  last-token → keys
-            marg = a[0].float().mean(dim=1).cpu().numpy()           # (H, S)  query-averaged (sink)
-            per_layer.append(np.clip(row - marg, 0.0, None))        # content-specific
-        weights = np.stack(per_layer, axis=0)  # (L, H, full_seq)
+        # n_keys is the VL-token sequence length (== len(input_ids);
+        # backbone_features shares the input_ids length), so image-token columns
+        # line up with the per-camera map built below.
+        n_steps = len(dit_attns) // n_blocks
+        if n_steps == 0:
+            raise RuntimeError(
+                "Gr00tAdapter.extract_attention: fewer than one full denoise "
+                "sweep of the image-cross blocks was captured."
+            )
+        n_heads = int(dit_attns[0].shape[0])
+        n_keys = int(dit_attns[0].shape[2])
+        # Aggregate per image-cross block: mean over denoise steps + action
+        # queries, keep heads -> weights (n_blocks, H, n_keys). image_weights_clean
+        # then selects the most-interior block and means over heads.
+        # NOTE (load-bearing): this is GR00T's DiT (System-1) action->image
+        # cross-attention — the MOTOR pathway. It is known to be spatially
+        # DISPERSED, NOT a tight object localizer (see the class docstring +
+        # README + LITERATURE.md). Step aggregation barely changes that; mean is
+        # the stable, representative choice.
+        per_block = []
+        for b in range(n_blocks):
+            steps = [dit_attns[s * n_blocks + b].mean(axis=1) for s in range(n_steps)]  # (H, n_keys)
+            per_block.append(np.mean(steps, axis=0))      # (H, n_keys)
+        weights = np.stack(per_block, axis=0)             # (n_blocks, H, n_keys)
 
         # ---- Map image tokens to per-camera ranges ----
         image_token_id = qwen_model.config.image_token_id
@@ -514,15 +589,24 @@ class Gr00tAdapter(VLAModel):
 
         return AttentionMaps(
             weights=weights,
-            query_position=int(query_pos),   # last instruction token of the VLM
-            n_keys=full_seq,
+            query_position=0,   # N/A: DiT queries are the action tokens (pooled), not a text position
+            n_keys=n_keys,
             image_token_ranges=image_token_ranges,
             image_grid_sides=image_grid_sides,
             metadata={
                 "attention_profile": self.ATTENTION_PROFILE,
-                "attention_source": "Qwen3-VL backbone: last-instruction-token -> image (canonical last attention)",
-                "query_token": "last_instruction_token (Qwen3-VL VLM)",
-                "n_vlm_layers": int(weights.shape[0]),
+                "attention_source":
+                    "GR00T System-1 DiT image cross-attention (MOTOR pathway): "
+                    "action tokens (mean) -> image VL tokens, mean over (seeded) "
+                    "denoise steps, per image-cross block x head.",
+                "caveat":
+                    "DISPERSED motor-pathway attention, NOT a reliable object "
+                    "localizer (dispersed-VLA-attention: ReconVLA arXiv:2508.10333; "
+                    "GR00T-N1.5 mechanistic study arXiv:2603.19233). See README.",
+                "query_token": "DiT action/noise tokens (pooled)",
+                "n_dit_image_blocks": int(n_blocks),
+                "n_denoise_steps": int(n_steps),
+                "n_heads": int(n_heads),
                 "image_grid_thw": thw_np.tolist(),
                 "merge_size": merge_size,
                 "n_image_tokens_total": int(image_positions.size),

@@ -216,7 +216,7 @@ Each adapter declares which interpretability surfaces it exposes — inference, 
 | OpenVLA-7B | ✅ | ✅ shipped (HF `output_attentions`) | ✅ full mechanistic-interp suite | `uv pip install emboviz-openvla` + `emboviz install-openvla` |
 | **OpenVLA-OFT** | ✅ | ✅ shipped (moojink LLaMA backbone, BOS-aware token ranges) | — | `uv pip install emboviz-oft` + `emboviz install-oft` |
 | **π0 / π0.5** | ✅ | ✅ shipped (PaliGemma VLM inside openpi; needs `emboviz convert-pi0`) | — | `uv pip install emboviz-pi0` + `emboviz install-pi0` |
-| **GR00T-N1 / N1.7** | ✅ | ✅ shipped (Qwen3-VL backbone inside Gr00tPolicy) | — | `uv pip install emboviz-gr00t` + `emboviz install-gr00t` |
+| **GR00T-N1 / N1.7** | ✅ | ⚠️ shipped, but **dispersed** — DiT motor pathway, not a tight object localizer (see caveat below) | — | `uv pip install emboviz-gr00t` + `emboviz install-gr00t` |
 | Mock (no GPU) | ✅ — for diagnostic-side dev | N/A | N/A | base install |
 
 > Planned: LeRobot policies (ACT, Diffusion Policy, TDMPC2, VQ-BeT) as a future isolated adapter worker — not yet integrated.
@@ -224,6 +224,8 @@ Each adapter declares which interpretability surfaces it exposes — inference, 
 | Octo | 📅 planned (JAX backend) | | | |
 
 **Attention is core, not a nice-to-have.** Modern policies are transformers; their visual attention IS the interpretability surface most teams want. We extract it for every VLA we support — even when the upstream inference helper wraps it away. Per-adapter extraction work is non-trivial, but it's the work the product exists to do.
+
+> **⚠️ GR00T attention is a special case — read it with care.** OpenVLA, OFT and π0 are *single-stack* VLAs: the action is produced *through* the VLM's own attention, so "where the last token looks" genuinely *is* where it acts, and the map locks onto the manipulated object. **GR00T is dual-system** — a *frozen* Qwen/Eagle reasoning VLM feeds a **separate** diffusion-transformer (DiT) action head. We extract GR00T's map from that **DiT action→image cross-attention** (the only action-grounded signal — the VLM's own self-attention is frozen and attention-sink dominated). But the DiT attention is the **motor pathway**, and it is spatially **dispersed**: it spreads across the workspace/trajectory rather than locking onto the target object. **This is a documented property of VLAs, not a bug in emboviz** — ReconVLA ([arXiv:2508.10333](https://arxiv.org/abs/2508.10333)) and the VLA survey ([arXiv:2507.10672](https://arxiv.org/abs/2507.10672)) show VLA visual attention is generally dispersed/sink-prone, and the GR00T-N1.5 mechanistic study ([arXiv:2603.19233](https://arxiv.org/abs/2603.19233)) finds the expert/DiT pathway encodes the *motor program* while object/goal information lives in VLM *features* (probed with SAEs), not in attention weights. **Treat GR00T's attention as "where the action pathway attends across the scene," not a reliable object localizer.** (The single-stack VLAs above do not carry this caveat.) The map is seeded for reproducibility.
 
 > **Why separate venvs?** Several upstream VLA/robotics packages pin
 > different (and incompatible) versions of `transformers` and `torch`. We
