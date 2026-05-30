@@ -30,7 +30,6 @@ import numpy as np
 from emboviz.core.types import PerturbedScene, Scene, resolve_cameras
 from emboviz.perturb._target_detection import (
     BBoxDetector,
-    GroundingDINOSAMDetector,
     TargetDetector,
 )
 from emboviz.perturb.base import Perturber
@@ -60,7 +59,15 @@ class TargetRemovalPerturber(Perturber):
         elif target_detector is not None:
             self.detector = target_detector
         else:
-            self.detector = GroundingDINOSAMDetector()
+            raise ValueError(
+                "TargetRemovalPerturber needs one of ``bbox=(x0,y0,x1,y1)`` "
+                "or ``target_detector=...`` (SAM3Detector / "
+                "GroundingDINOSAMDetector / JSONAnnotationConnector / "
+                "CocoAnnotationConnector / CallableConnector). The "
+                "perturber refuses to invent a target — silent fallback "
+                "to a centred patch would mask the table or the gripper "
+                "and invalidate any downstream verdict."
+            )
         self.fill = fill
         self.cameras = cameras
 

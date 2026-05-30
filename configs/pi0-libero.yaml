@@ -1,0 +1,46 @@
+# emboviz run config — Physical Intelligence π0 on physical-intelligence/libero.
+#
+#   emboviz analyze --config configs/pi0-libero.yaml
+
+model:
+  adapter: pi0
+  kwargs:
+    config_name: pi0_libero        # REQUIRED — selects checkpoint + platform (no silent default)
+    # checkpoint_uri: /path/to/your/pi0_finetune   # your fine-tune; omit -> openpi's published pi0_libero
+
+dataset:
+  format: lerobot
+  path: lerobot/libero             # official full LIBERO suite, LeRobot v3.0
+
+  # The role on the LEFT is what π0 asks for (primary, wrist); the value is
+  # this dataset's image key. lerobot/libero ships agentview + eye-in-hand
+  # as observation.images.image + .image2.
+  cameras:                         # π0's LIBERO platform requires roles {primary, wrist}
+    primary: observation.images.image
+    wrist:   observation.images.image2
+
+  state:
+    key: observation.state         # [8]
+    convention: ee_pose
+
+  action:
+    key: action
+
+  gripper:
+    source: 7                      # gripper index in the 8-dim state
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"
+  frame_start: 20
+  n_frames: 4
+  mask_query: "the white mug"      # matches ep0: "put the white mug on the left plate ..."
+  detector: sam3
+  diagnostics: all
+
+output: ./report/pi0-libero

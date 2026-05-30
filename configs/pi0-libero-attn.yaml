@@ -1,0 +1,50 @@
+# emboviz run — Physical Intelligence π0 (LIBERO) ATTENTION-MAP ONLY, full episode.
+#
+#   emboviz convert-pi0 pi0_libero          # one-time JAX->PyTorch (done on the VM)
+#   emboviz analyze --config configs/pi0-libero-attn.yaml
+#
+# Comparison run for the GR00T / OFT attention overlays. π0 is a
+# flow-matching (diffusion-head) VLA like GR00T — its action is produced by
+# a separate action expert, NOT through the backbone's last-token attention.
+# So we expect a diffuse map, unlike single-brain OFT which localises on the
+# manipulated object. use_pytorch:true is REQUIRED — π0's JAX path is
+# JIT-compiled and surfaces no intermediate attention; the PyTorch-converted
+# checkpoint does.
+
+model:
+  adapter: pi0
+  kwargs:
+    config_name: pi0_libero        # selects checkpoint + LIBERO platform
+    use_pytorch: true              # load the converted PyTorch checkpoint (attention backend)
+
+dataset:
+  format: lerobot
+  path: lerobot/libero             # official full LIBERO suite, LeRobot v3.0
+
+  cameras:                         # π0's LIBERO platform requires roles {primary, wrist}
+    primary: observation.images.image
+    wrist:   observation.images.image2
+
+  state:
+    key: observation.state         # [8]
+    convention: ee_pose
+
+  action:
+    key: action
+
+  gripper:
+    source: 7                      # gripper index in the 8-dim state
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "1"              # ep1 loads cleanly; ep50 hits a LeRobot multi-episode-per-file fetch bug (separate fix pending)
+  frame_start: 0
+  n_frames: -1               # ENTIRE episode (all frames)
+  diagnostics: [attention]   # attention map / drift only
+
+output: ./report/pi0-libero-attn

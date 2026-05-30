@@ -12,7 +12,6 @@ detection for VLAs.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from emboviz.core.results import DiagnosticResult, Severity
 from emboviz.core.types import Scene, TokenSelector

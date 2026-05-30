@@ -101,3 +101,15 @@ CLAUDE.md
 .claude/
 
 story_outputs/
+
+# ──────────────────────────────────────────────────────────────────────
+# Internal planning / strategy notes (not for the public repo)
+# ──────────────────────────────────────────────────────────────────────
+PLAN.md
+WORK_LOG.md
+/from_vm/
+
+# ──────────────────────────────────────────────────────────────────────
+# Internal dev / VM-testing tooling (not part of the published product)
+# ──────────────────────────────────────────────────────────────────────
+/vm_scripts/

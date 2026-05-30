@@ -24,7 +24,6 @@ from emboviz.core.types import (
 )
 from emboviz.models.protocol import (
     Capability,
-    NotSupported,
     RequiredInputs,
     VLAModel,
 )
@@ -176,8 +175,18 @@ class MockVLA(VLAModel):
             weights=weights,
             query_position=n_keys - 1,
             n_keys=n_keys,
-            image_token_range=(1, 1 + self._n_image_tokens),
-            image_grid_side=self._grid_side,
+            image_token_ranges={"primary": [(1, 1 + self._n_image_tokens)]},
+            image_grid_sides={"primary": self._grid_side},
+            # Mid-layer range (literature default for LLaMA-class VLMs)
+            # is plenty for a mock that only exists to exercise the
+            # diagnostic plumbing. No sinks since the synthetic
+            # attention is dirichlet-sampled, never softmax-routed.
+            metadata={
+                "attention_profile": {
+                    "recommended_layer_range_fraction": (0.25, 0.75),
+                    "literature_citation": "mock VLA — synthetic attention",
+                },
+            },
         )
 
     def extract_hidden_states(

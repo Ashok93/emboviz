@@ -10,14 +10,15 @@ keeps every single-scene diagnostic trivially trajectory-able.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import inspect
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from tqdm import tqdm
 
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Trajectory
+from emboviz.core.types import ActionResult, Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import VLAModel
 
@@ -243,28 +244,61 @@ class TrajectoryDiagnosticResult:
 
 
 class TrajectoryDiagnostic:
-    """Wrapper: apply any single-scene Diagnostic across all frames of a Trajectory."""
+    """Wrapper: apply any single-scene Diagnostic across all frames of a Trajectory.
+
+    When ``baselines`` is supplied (one per frame, in trajectory order),
+    each per-frame ``Diagnostic.run`` is called with ``baseline=...`` so
+    the wrapped diagnostic skips recomputing the unperturbed prediction.
+    The runner uses this to share a single per-frame baseline across
+    every diagnostic — saving ``n_samples × num_diagnostics`` model
+    forward passes per frame on stochastic models.
+
+    Diagnostics whose ``run`` does NOT accept a ``baseline`` kwarg
+    (legacy / no-baseline diagnostics) are called without it; we
+    introspect each diagnostic's signature once at wrap time.
+    """
 
     def __init__(self, diagnostic: Diagnostic, progress: bool = True):
         self.diagnostic = diagnostic
         self.progress = progress
         self.name = f"trajectory.{diagnostic.name}"
         self.axis = diagnostic.axis
+        # Cache whether the wrapped diagnostic accepts a ``baseline``
+        # kwarg so we don't pay reflection cost per frame.
+        try:
+            sig = inspect.signature(diagnostic.run)
+            self._supports_baseline = "baseline" in sig.parameters
+        except (TypeError, ValueError):
+            self._supports_baseline = False
 
-    def run(self, model: VLAModel, trajectory: Trajectory) -> TrajectoryDiagnosticResult:
+    def run(
+        self, model: VLAModel, trajectory: Trajectory,
+        *, baselines: Optional[list[ActionResult]] = None,
+    ) -> TrajectoryDiagnosticResult:
+        if baselines is not None and len(baselines) != len(trajectory.frames):
+            raise ValueError(
+                f"TrajectoryDiagnostic.run: baselines length "
+                f"{len(baselines)} does not match trajectory frame count "
+                f"{len(trajectory.frames)}. Pass exactly one baseline per "
+                "frame in trajectory order, or pass None to let the "
+                "diagnostic recompute its own."
+            )
         # Probe direction from the first result (cheap; consistent across frames).
-        iterator = trajectory.frames
+        iterator = enumerate(trajectory.frames)
         if self.progress:
             iterator = tqdm(
-                trajectory.frames,
+                list(iterator),
                 desc=self.diagnostic.name,
                 unit="frame",
                 leave=False,
             )
         per_frame: list[DiagnosticResult] = []
         direction = "lower_is_worse"
-        for scene in iterator:
-            r = self.diagnostic.run(model, scene)
+        for i, scene in iterator:
+            if self._supports_baseline and baselines is not None:
+                r = self.diagnostic.run(model, scene, baseline=baselines[i])
+            else:
+                r = self.diagnostic.run(model, scene)
             per_frame.append(r)
             direction = r.direction
         return TrajectoryDiagnosticResult(

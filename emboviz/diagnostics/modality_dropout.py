@@ -45,15 +45,12 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration, averaged_predict
+from emboviz.calibration import ModelCalibration, averaged_predict, averaged_predict_batch
 from emboviz.core.observations import (
-    ActionHistory,
-    GripperState,
     Proprioception,
-    RGBImage,
 )
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Observations, Scene, resolve_cameras
+from emboviz.core.types import ActionResult, Scene
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 from emboviz.modality_pools import ModalityPool, _distance
@@ -113,13 +110,23 @@ class ModalityDropoutDiagnostic(Diagnostic):
         self.name = "modality_dropout"
         self.axis = "input.modality_dropout"
 
-    def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+    def run(
+        self, model: VLAModel, scene: Scene,
+        *, baseline: Optional[ActionResult] = None,
+    ) -> DiagnosticResult:
+        """Run marginal-distribution modality dropout for ``scene``.
+
+        ``baseline`` is an optional precomputed unperturbed prediction —
+        the runner shares it across diagnostics so we don't re-pay
+        ``n_samples`` forward passes for the same baseline in every one.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         rng = np.random.default_rng(self.seed)
         n_samples = self.calibration.n_samples
-        baseline = averaged_predict(model, scene, n_samples)
+        if baseline is None:
+            baseline = averaged_predict(model, scene, n_samples)
 
         reqs = model.required_inputs
         per_modality: dict[str, dict] = {}
@@ -450,26 +457,34 @@ class ModalityDropoutDiagnostic(Diagnostic):
                 "duplicates of current value."
             )
 
-        intervention_mags = []
-        response_norms    = []
-        response_raws     = []
+        # Build every substituted scene first — the K marginal substitutions
+        # are mutually independent, so we submit them as ONE batch instead of
+        # K sequential forwards. apply_fn failure skips the whole modality
+        # (it means the substitute is incompatible with this scene); a batch
+        # predict failure does too — identical outcome to the old per-sample
+        # early-return, just discovered once instead of on the first sample.
+        perturbed_scenes = []
         for sub in samples:
             try:
-                perturbed_scene = apply_fn(scene, sub)
+                perturbed_scenes.append(apply_fn(scene, sub))
             except Exception as e:
                 return self._skip(
                     f"apply_fn raised on {modality}: {type(e).__name__}: {e}"
                 )
-            try:
-                pred = averaged_predict(model, perturbed_scene, n_samples).action
-            except Exception as e:
-                return self._skip(
-                    f"model.predict raised on {modality} substitute: "
-                    f"{type(e).__name__}: {e}"
-                )
+        try:
+            preds = averaged_predict_batch(model, perturbed_scenes, n_samples)
+        except Exception as e:
+            return self._skip(
+                f"model.predict raised on {modality} substitute: "
+                f"{type(e).__name__}: {e}"
+            )
 
+        intervention_mags = []
+        response_norms    = []
+        response_raws     = []
+        for sub, pred in zip(samples, preds):
             d_in = _distance(modality, sub, current_value)
-            d_out_raw = float(np.linalg.norm(pred - baseline.action))
+            d_out_raw = float(np.linalg.norm(pred.action - baseline.action))
             d_out_norm = self.calibration.normalize(d_out_raw)
 
             intervention_mags.append(d_in)

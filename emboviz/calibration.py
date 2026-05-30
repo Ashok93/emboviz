@@ -54,7 +54,7 @@ from typing import Optional
 
 import numpy as np
 
-from emboviz.core.types import ActionResult, Scene, Trajectory
+from emboviz.core.types import ActionResult, Scene, Trajectory, average_action_results
 from emboviz.models.protocol import VLAModel
 
 
@@ -155,53 +155,32 @@ def averaged_predict(
     For stochastic models this reduces decoding noise by sqrt(n_samples).
     For deterministic models the average equals the single prediction.
 
-    We average ``action`` AND ``action_chunk`` (when present) so downstream
-    diagnostics (chunk_consistency in particular) see the averaged chunk.
+    The averaging itself (mean action + mean chunk, with the strict
+    inconsistent-chunk-shape check) lives in
+    ``emboviz_wire.average_action_results`` so the host and the in-worker
+    ``predict_batch`` n-sample path reduce noise identically.
     """
     if n_samples <= 1:
         return model.predict(scene)
+    return average_action_results([model.predict(scene) for _ in range(n_samples)])
 
-    actions: list[np.ndarray] = []
-    chunks: list[np.ndarray] = []
-    last: Optional[ActionResult] = None
-    for _ in range(n_samples):
-        ar = model.predict(scene)
-        actions.append(np.asarray(ar.action, dtype=np.float32))
-        if ar.action_chunk is not None:
-            chunks.append(np.asarray(ar.action_chunk, dtype=np.float32))
-        last = ar
 
-    mean_action = np.mean(np.stack(actions, axis=0), axis=0).astype(np.float32)
-    mean_chunk: Optional[np.ndarray] = None
-    if chunks:
-        # Strict shape check: every sampled chunk must have the same
-        # shape. A model that emits different chunk shapes across
-        # samples for the same scene has a real bug (flow-matching
-        # numerical edge cases, truncated decoding, etc.) and we want
-        # that surfaced loudly rather than papered over with silent
-        # truncation.
-        shapes = {c.shape for c in chunks}
-        if len(shapes) != 1:
-            raise ValueError(
-                f"averaged_predict: model emitted action chunks with "
-                f"inconsistent shapes across {len(chunks)} samples: "
-                f"{sorted(shapes)}. This indicates a model bug — same "
-                "input produces different-shaped chunks. Fix the model "
-                "adapter (likely truncated decoding under noise) before "
-                "trusting any chunk-based diagnostic on this model."
-            )
-        mean_chunk = np.mean(np.stack(chunks, axis=0), axis=0).astype(np.float32)
+def averaged_predict_batch(
+    model: VLAModel, scenes: list[Scene], n_samples: int = 1,
+) -> list[ActionResult]:
+    """Batched sibling of :func:`averaged_predict` — the diagnostics' parallel
+    hot path.
 
-    return ActionResult(
-        action=mean_action,
-        action_dim=last.action_dim if last else int(mean_action.size),
-        action_chunk=mean_chunk,
-        confidence=last.confidence if last else None,
-        metadata={
-            **(last.metadata if last else {}),
-            "n_samples_averaged": n_samples,
-        },
-    )
+    Hands the whole scene list to ``model.predict_batch`` in one call, so a
+    batch-capable adapter runs a single GPU forward (worker-chunked) instead
+    of one round-trip per scene. The per-scene ``n_samples`` averaging is
+    applied identically to :func:`averaged_predict` (same wire helper). For
+    adapters without a true batched override, ``predict_batch`` falls back to
+    the sequential loop — same numbers, just not parallel.
+    """
+    if not scenes:
+        return []
+    return model.predict_batch(scenes, n_samples)
 
 
 def calibrate_model(

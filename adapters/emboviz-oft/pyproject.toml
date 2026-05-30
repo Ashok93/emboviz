@@ -1,0 +1,29 @@
+[project]
+name = "emboviz-oft"
+version = "0.3.0"
+description = "OpenVLA-OFT adapter for emboviz — runs the LIBERO fine-tunes in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# Thin shim — heavy deps live in the spec's runtime_pip. OFT pulls
+# a FORK of transformers + the openvla-oft research repo from git
+# (neither is on PyPI), so this shim has nothing heavy to install
+# in the user's main venv.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+oft = "emboviz_oft.spec:SPEC"
+
+[project.scripts]
+emboviz-oft = "emboviz_oft.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true

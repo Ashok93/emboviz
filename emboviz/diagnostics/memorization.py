@@ -9,10 +9,13 @@ arXiv:2510.03827) and the BYOVLA visual-robustness probe inverted
 
 Implementation principles (LITERATURE.md §1):
 
-  1. **Phrase grounding, no taxonomy.** Target is located by passing
-     ``scene.instruction`` (or an explicit ``target_text`` override) to
-     GroundingDINO + SAM. We never extract a noun from a fixed
-     taxonomy — that silently skips any out-of-taxonomy task.
+  1. **Open-vocabulary target localization.** Default detector is SAM 3
+     (single model, text → mask, native concept-aware prompting). The
+     legacy GroundingDINO + SAM combo is kept as a maintained fallback
+     for environments where SAM 3 isn't available. Users with their own
+     tracker / motion-capture / hand-labelled bboxes plug in via the
+     ``CallableConnector`` / ``JSONAnnotationConnector`` /
+     ``CocoAnnotationConnector`` connectors.
 
   2. **Fill ensemble.** We mask with TWO independent fills (channel-mean
      and Gaussian blur) and require AGREEMENT across both fills before
@@ -29,33 +32,40 @@ Implementation principles (LITERATURE.md §1):
      refuse to emit a verdict.
 
   4. **Per-camera detection and masking.** Each camera in the scene is
-     queried independently. We mask EVERY camera that produced a
-     confident detection, simultaneously, in one perturbed scene.
+     queried independently via a probe scene that aliases the camera as
+     ``primary`` and sets ``scene.metadata['_emboviz_probe_camera']`` so
+     annotation connectors can resolve the right per-camera entry. We
+     mask EVERY camera that produced a confident detection,
+     simultaneously, in one perturbed scene.
 
   5. **N-sample averaging for stochastic policies.** π0, GR00T,
      diffusion policies need K samples per prediction averaged before
      comparison (handled via ``averaged_predict`` and the
-     ``ModelCalibration.n_samples`` derivation).
+     ``ModelCalibration.n_samples`` derivation). The runner can compute
+     the per-frame baseline ONCE and pass it via the ``baseline=``
+     kwarg so the diagnostic does not duplicate that work across the
+     other diagnostics.
 
-  6. **No SAM-fallback.** SAM is required (no bbox-only fallback) —
-     the GroundingDINOSAMDetector raises at load if SAM is unavailable.
-     A coarse bbox covers target + background and is too weak.
+  6. **Required masks (no bbox-only fallback).** The diagnostic needs a
+     pixel-accurate mask to make the intervention interpretable.
+     Detectors that return only a bbox raise rather than silently
+     degrading.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
 
-from emboviz.calibration import ModelCalibration, averaged_predict
+from emboviz.calibration import ModelCalibration, averaged_predict, averaged_predict_batch
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Scene
+from emboviz.core.types import ActionResult, Scene
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 from emboviz.perturb._target_detection import (
     BBoxDetector,
-    GroundingDINOSAMDetector,
     TargetDetector,
 )
 from emboviz.perturb.image._image_utils import to_array, to_pil
@@ -150,15 +160,22 @@ class MemorizationDiagnostic(Diagnostic):
     executes a coherent action.
 
     Args:
-        target_detector: how to locate the target. Default = GD+SAM with
-            scene.instruction as the query phrase. Pass a custom
-            ``GroundingDINOSAMDetector(target_text="the pipe")`` to
-            scope to a specific referent in multi-object instructions.
+        target_detector: how to locate the target. REQUIRED — there is NO
+            default: the constructor raises unless one of ``target_detector``,
+            ``bbox``, or a runner-supplied target_text is given (the
+            diagnostic refuses to guess what to mask). Pass e.g.
+            ``SAM3Detector(target_text="the pipe")`` to scope to a specific
+            referent in multi-object instructions.
         bbox: shortcut — fixed bbox in every camera (only valid when
             cameras share resolution/intrinsics).
-        fill_modes: which fills to ensemble. Default both — agreement
-            required for CRITICAL verdict. Pass ``["channel_mean"]`` to
-            skip the blur fill if scipy is unavailable.
+        fill_modes: which fills to ensemble. Default =
+            ``["channel_mean", "gaussian_blur"]`` (agreement across fills is
+            required for a CRITICAL verdict). LIMITATION: LITERATURE.md §1
+            prescribes a THIRD, on-manifold ``lama_inpaint`` fill; it is not
+            yet implemented, so the shipped ensemble is 2 of 3 and the
+            agreement gate runs over two non-on-manifold fills only. This is
+            surfaced in the result's raw output (``fill_ensemble``). Pass
+            ``["channel_mean"]`` to skip the blur fill if scipy is missing.
         min_mask_contrast: refuse to emit CRITICAL when ALL fills
             produce a normalized contrast below this on a frame. Default
             ``DEFAULT_MIN_MASK_CONTRAST`` (0.05).
@@ -191,7 +208,20 @@ class MemorizationDiagnostic(Diagnostic):
         elif target_detector is not None:
             self.detector = target_detector
         else:
-            self.detector = GroundingDINOSAMDetector()
+            # Default detector — text-required. The diagnostic is never
+            # constructed without either a bbox, a custom detector, or a
+            # target_text being passed through by the runner. We pick
+            # SAM 3 over the legacy GD+SAM combo (single model, faster,
+            # native concept prompting). Adapters that want the old
+            # pipeline pass it explicitly.
+            raise ValueError(
+                "MemorizationDiagnostic needs one of: ``bbox=(x0,y0,x1,y1)`` "
+                "for a fixed user-supplied box, or ``target_detector=...`` "
+                "for any TargetDetector (SAM3Detector / "
+                "GroundingDINOSAMDetector / JSONAnnotationConnector / "
+                "CocoAnnotationConnector / CallableConnector). The "
+                "diagnostic refuses to guess what to mask."
+            )
         self.fill_modes = list(fill_modes) if fill_modes else ["channel_mean", "gaussian_blur"]
         self.min_mask_contrast = float(min_mask_contrast)
         self.noise_floor_score = noise_floor_score
@@ -201,16 +231,32 @@ class MemorizationDiagnostic(Diagnostic):
         self.name = "memorization_test"
         self.axis = "vision.memorization"
 
-    def run(self, model: VLAModel, scene: Scene) -> DiagnosticResult:
+    def run(
+        self, model: VLAModel, scene: Scene,
+        *, baseline: Optional[ActionResult] = None,
+    ) -> DiagnosticResult:
+        """Evaluate memorization for one scene.
+
+        ``baseline`` is an optional precomputed unperturbed prediction.
+        The runner computes one baseline per frame and shares it across
+        every diagnostic; without that, each diagnostic would re-run
+        ``averaged_predict`` and we'd pay n_samples × num-diagnostics
+        worth of forward passes per frame.
+        """
         from emboviz.core.types import resolve_cameras
         if not self.applicable_to(model):
             return self._not_applicable(model, scene, "model lacks INFERENCE capability")
 
         cameras = resolve_cameras(scene, self.cameras)
         n_samples = self.calibration.n_samples if self.calibration else 1
-        baseline = averaged_predict(model, scene, n_samples)
+        if baseline is None:
+            baseline = averaged_predict(model, scene, n_samples)
 
-        # 1. Per-camera target detection.
+        # 1. Per-camera target detection. Each camera is probed via a
+        # scene whose primary alias points at that camera, with the
+        # ``_emboviz_probe_camera`` metadata key set so user-annotation
+        # connectors (JSON / COCO / Callable) can resolve the right
+        # per-camera entry.
         per_cam_detection: dict = {}
         per_cam_original: dict = {}
         for cam in cameras:
@@ -219,6 +265,11 @@ class MemorizationDiagnostic(Diagnostic):
                 probe_scene = scene.with_image(cam_image, camera="primary")
             else:
                 probe_scene = scene.with_image(cam_image, camera=cam)
+            # Tag the probe so connectors see which camera we're querying.
+            # ``Scene`` is frozen, so we re-create with augmented metadata.
+            tagged_meta = dict(probe_scene.metadata)
+            tagged_meta["_emboviz_probe_camera"] = cam
+            probe_scene = replace(probe_scene, metadata=tagged_meta)
             detection = self.detector(probe_scene)
             per_cam_detection[cam] = detection
             if detection is None:
@@ -233,7 +284,7 @@ class MemorizationDiagnostic(Diagnostic):
                     f"detection without a pixel-accurate mask (got "
                     f"mask={detection.mask!r}). Memorization requires a "
                     "pixel mask; bbox-only is too coarse. Use a detector "
-                    "that produces a mask (GroundingDINOSAMDetector default)."
+                    "that produces a mask (SAM3Detector / GroundingDINOSAMDetector)."
                 )
             per_cam_original[cam] = arr
 
@@ -243,7 +294,8 @@ class MemorizationDiagnostic(Diagnostic):
                 "could not confidently locate the manipulated target in ANY "
                 f"of the scene's cameras ({sorted(scene.observations.images)}). "
                 "Try providing an explicit ``target_text`` to "
-                "GroundingDINOSAMDetector, or a custom TargetDetector. We "
+                "SAM3Detector / GroundingDINOSAMDetector, or a custom "
+                "TargetDetector. We "
                 "never fabricate a centred rectangle.",
             )
 
@@ -255,6 +307,12 @@ class MemorizationDiagnostic(Diagnostic):
         # measure intervention magnitude (mask_contrast) and response
         # magnitude (Δaction vs baseline).
         per_fill_results: dict[str, dict] = {}
+        # Phase 1 — build one masked scene per fill mode and record its
+        # contrast. The fill modes are independent interventions on the same
+        # frame, so we predict them as ONE batch (Phase 2) instead of a
+        # forward per fill.
+        fill_scenes: list[Scene] = []
+        fill_meta: list[tuple[str, float, dict[str, float]]] = []
         for fill_mode in self.fill_modes:
             masked_arrays: dict[str, np.ndarray] = {}
             contrasts: dict[str, float] = {}
@@ -265,10 +323,17 @@ class MemorizationDiagnostic(Diagnostic):
                 masked_arrays[cam] = masked
                 contrasts[cam] = _mask_contrast(arr, masked, mask)
             mean_contrast = float(np.mean(list(contrasts.values())))
-
             masked_pils = {cam: to_pil(a) for cam, a in masked_arrays.items()}
-            masked_scene = scene.with_images(masked_pils)
-            action_masked = averaged_predict(model, masked_scene, n_samples)
+            fill_scenes.append(scene.with_images(masked_pils))
+            fill_meta.append((fill_mode, mean_contrast, contrasts))
+
+        # Phase 2 — one batched prediction across all fill modes.
+        fill_preds = averaged_predict_batch(model, fill_scenes, n_samples)
+
+        # Phase 3 — Δaction vs baseline per fill (numerics unchanged).
+        for (fill_mode, mean_contrast, contrasts), action_masked in zip(
+            fill_meta, fill_preds,
+        ):
             raw_delta = float(np.linalg.norm(action_masked.action - baseline.action))
             if self.calibration is not None:
                 norm_delta = self.calibration.normalize(raw_delta)
@@ -321,8 +386,21 @@ class MemorizationDiagnostic(Diagnostic):
         # For a stochastic model (e.g. flow-matching DiT), per-call jitter
         # can dwarf the response to target masking — calling that
         # "memorization" would conflate signal with noise.
+        # Noise gate: is the response distinguishable from the model's own
+        # per-call jitter? The statistic compared below is max(deltas) over
+        # the fills — a MAX, not a mean — and the fills are DIFFERENT
+        # interventions, not repeated draws of one input. So we must NOT
+        # shrink the floor by sqrt(num_fills): that was a max-vs-mean mismatch
+        # that made the threshold ~sqrt(2)x too small and leaked decoding
+        # jitter through as a "memorization" verdict. calibration.noise_floor
+        # is already the POST-averaging floor (the Δ between two
+        # n_samples-averaged predictions), and each fill's delta is exactly
+        # one such averaged-prediction Δ — so the correct floor for a single
+        # delta is k_samples=1. (A max-of-K Bonferroni bump would be
+        # marginally more conservative; k=1 is the single-comparison floor and
+        # removes the erroneous shrinkage.)
         signal_threshold = (
-            self.calibration.signal_threshold_normalized(k_samples=len(per_fill_results))
+            self.calibration.signal_threshold_normalized(k_samples=1)
             if self.calibration is not None
             else self.noise_floor_score
         )
@@ -340,6 +418,18 @@ class MemorizationDiagnostic(Diagnostic):
             "ignored_threshold":      self.noise_floor_score,
             "grounded_threshold":     self.grounded_threshold,
             "fills":                  list(per_fill_results),
+            "fill_ensemble": {
+                "fills_used":       list(per_fill_results),
+                "literature_fills": ["channel_mean", "gaussian_blur", "lama_inpaint"],
+                "note": (
+                    "LITERATURE.md §1 prescribes 3 fills including the "
+                    "on-manifold lama_inpaint; lama_inpaint is NOT yet "
+                    "implemented, so the agreement gate ran over the fills in "
+                    "'fills_used' only (2 of 3 with the default ensemble). "
+                    "Read a CRITICAL 'memorization' verdict as agreement "
+                    "across non-on-manifold fills until the 3rd fill ships."
+                ),
+            },
             "detected_cameras":       detected_cams,
             "detection_confidences":  confs,
         }

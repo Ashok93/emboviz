@@ -20,7 +20,7 @@ formatting layer, not an interpretive layer.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # Mapping severity → CSS badge class fragment used in the HTML templates.
 _BADGE_CLASS = {
@@ -79,7 +79,7 @@ def render_episode_markdown(summary: dict, *, rrd_path: Optional[str] = None) ->
     instruction     = summary.get("instruction", "")
 
     lines: list[str] = [
-        f"# Emboviz — episode report",
+        "# Emboviz — episode report",
         "",
         f"- **Model**: `{model_id}`",
         f"- **Trajectory**: `{traj_source}` ({n_frames} frame(s))",
@@ -167,7 +167,7 @@ def render_episode_html(
     tpl = env.get_template("episode.html.j2")
     findings = _sorted_findings(summary.get("per_axis") or {})
     return tpl.render(
-        episode_idx       = summary.get("frame_indices", [0])[0] if summary.get("frame_indices") else "?",
+        episode_idx       = summary.get("episode_index", "?"),
         model_id          = summary.get("model", "?"),
         trajectory_source = summary.get("trajectory_source", "?"),
         n_frames          = summary.get("n_frames", 0),

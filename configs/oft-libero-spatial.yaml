@@ -1,0 +1,47 @@
+# emboviz run config — OpenVLA-OFT on LIBERO-spatial.
+#
+#   emboviz analyze --config configs/oft-libero-spatial.yaml
+
+model:
+  adapter: oft
+  kwargs:
+    checkpoint: moojink/openvla-7b-oft-finetuned-libero-spatial   # <-- your fine-tune
+    unnorm_key: libero_spatial_no_noops
+    num_images: 2            # OFT consumes primary + wrist
+    use_proprio: true
+    use_l1_regression: true
+    center_crop: true
+
+dataset:
+  format: lerobot
+  path: lerobot/libero_spatial_image     # official LIBERO-Spatial suite, LeRobot v3.0
+
+  cameras:                   # OFT needs two views
+    primary: observation.images.image
+    wrist:   observation.images.wrist_image
+
+  state:
+    key: observation.state
+    convention: ee_pose      # [x, y, z, qx, qy, qz, qw, gripper]
+
+  action:
+    key: action
+
+  gripper:
+    source: 7
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"
+  frame_start: 20
+  n_frames: 4
+  mask_query: "the black bowl"     # matches ep0: "pick up the black bowl ... place it on the plate"
+  detector: sam3
+  diagnostics: all
+
+output: ./report/oft-libero-spatial

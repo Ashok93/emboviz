@@ -1,32 +1,14 @@
-"""Episode source — the protocol every dataset adapter implements."""
+"""Compatibility shim — moved to ``emboviz_wire.reader_protocol``.
 
-from __future__ import annotations
+The dataset-reader contract (:class:`EpisodeSource`) now lives in the
+standalone ``emboviz-wire`` package, alongside the model-side contract
+(:class:`emboviz_wire.model_protocol.VLAModel`) — so an isolated reader
+worker (which has the wire package but not emboviz core) implements the
+same interface the host consumes. Re-exported here so existing
+``emboviz.datasets.base`` imports keep working in the host venv. New
+code should import from ``emboviz_wire.reader_protocol`` directly.
+"""
 
-from abc import ABC, abstractmethod
-from typing import Iterable
+from emboviz_wire.reader_protocol import EpisodeSource  # noqa: F401
 
-from emboviz.core.types import Scene
-
-
-class EpisodeSource(ABC):
-    """A source of Scenes — wraps a HF dataset, a local rollout, etc."""
-
-    name: str
-
-    @abstractmethod
-    def list_episodes(self) -> list[str]:
-        """All episode IDs available from this source."""
-
-    @abstractmethod
-    def load_episode(self, episode_id: str) -> list[Scene]:
-        """Materialize one episode as a list of Scenes (one per frame)."""
-
-    def load_first_scene(self, episode_id: str) -> Scene:
-        scenes = self.load_episode(episode_id)
-        if not scenes:
-            raise ValueError(f"Episode {episode_id} is empty")
-        return scenes[0]
-
-    @abstractmethod
-    def all_instructions(self) -> list[str]:
-        """All unique instruction strings — for coverage analysis."""
+__all__ = ["EpisodeSource"]

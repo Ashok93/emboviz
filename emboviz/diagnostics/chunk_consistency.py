@@ -39,7 +39,7 @@ import numpy as np
 
 from emboviz.calibration import ModelCalibration, averaged_predict
 from emboviz.core.results import DiagnosticResult, Finding, Severity
-from emboviz.core.types import Scene, Trajectory
+from emboviz.core.types import ActionResult, Scene, Trajectory
 from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import Capability, VLAModel
 
@@ -87,7 +87,18 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             "run_trajectory(model, traj) instead",
         )
 
-    def run_trajectory(self, model: VLAModel, trajectory: Trajectory) -> DiagnosticResult:
+    def run_trajectory(
+        self, model: VLAModel, trajectory: Trajectory,
+        *, baselines: Optional[list[ActionResult]] = None,
+    ) -> DiagnosticResult:
+        """Compute chunk-consistency across the trajectory.
+
+        ``baselines`` is an optional list of pre-computed unperturbed
+        predictions, one per frame in trajectory order. When supplied,
+        the diagnostic uses their ``action_chunk`` directly instead of
+        re-running ``averaged_predict`` per frame — saving a full
+        ``n_samples`` model forwards per frame on stochastic models.
+        """
         if not self.applicable_to(model):
             return self._not_applicable(
                 model, trajectory.frames[0] if trajectory.frames else None,
@@ -98,12 +109,22 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 model, trajectory.frames[0] if trajectory.frames else None,
                 "need ≥2 frames for chunk consistency",
             )
+        if baselines is not None and len(baselines) != len(trajectory.frames):
+            raise ValueError(
+                f"chunk_consistency: baselines length {len(baselines)} "
+                f"does not match trajectory frame count "
+                f"{len(trajectory.frames)}."
+            )
 
-        # Collect chunks from every frame.
+        # Collect chunks from every frame (re-use precomputed baselines
+        # if the runner supplied them).
         chunks: list[np.ndarray] = []
-        for scene in trajectory.frames:
-            n_samples = self.calibration.n_samples if self.calibration else 1
-            ar = averaged_predict(model, scene, n_samples)
+        for i, scene in enumerate(trajectory.frames):
+            if baselines is not None:
+                ar = baselines[i]
+            else:
+                n_samples = self.calibration.n_samples if self.calibration else 1
+                ar = averaged_predict(model, scene, n_samples)
             if ar.action_chunk is None:
                 return self._not_applicable(
                     model, scene,
@@ -117,24 +138,58 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             chunks.append(np.asarray(ar.action_chunk, dtype=np.float32))
 
         chunk_lens = [c.shape[0] for c in chunks]
-        min_len = min(chunk_lens)
-        if min_len <= self.compare_lookahead:
+
+        # ``compare_lookahead`` (k) counts how many ANALYZED frames ahead
+        # to look. But the trajectory may be SUBSAMPLED (frame_stride > 1),
+        # so analyzed frame t and t+k are
+        # ``frame_indices[t+k] - frame_indices[t]`` DATASET frames apart —
+        # and the model's action chunk is indexed at the dataset's control
+        # frequency. Comparing ``chunk[t][k]`` (k control-steps ahead) to
+        # ``chunk[t+k][0]`` would compare DIFFERENT timesteps whenever the
+        # stride isn't 1. We therefore index the chunk by the true
+        # dataset-frame gap, not by k. (With stride 1, gap == k and this is
+        # identical to the naive version.)
+        k = self.compare_lookahead
+        frame_indices = list(trajectory.frame_indices)
+        raw_deltas: list[float] = []
+        frame_gaps: list[int] = []
+        # Dataset-frame index of frame t for each comparable pair — keyed to
+        # the chunk that MADE the prediction. Lets reporters plot
+        # disagreement against the frame where it originates.
+        comparable_frame_indices: list[int] = []
+        uncomparable: list[tuple[int, int]] = []   # (t, gap) pairs the chunk couldn't reach
+        for t in range(len(chunks) - k):
+            gap = int(frame_indices[t + k] - frame_indices[t])
+            if gap < 1:
+                # Non-increasing dataset indices — should not happen for a
+                # well-formed trajectory; skip rather than compare garbage.
+                uncomparable.append((t, gap))
+                continue
+            if gap >= chunk_lens[t]:
+                # The model's chunk at frame t doesn't extend far enough to
+                # cover the dataset-frame gap to the next analyzed frame, so
+                # there is no chunk[t][gap] to compare. Record and skip —
+                # never silently fold in a wrong-timestep comparison.
+                uncomparable.append((t, gap))
+                continue
+            pred_for_next = chunks[t][gap]
+            actual_at_next = chunks[t + k][0]
+            raw_deltas.append(
+                float(np.linalg.norm(pred_for_next - actual_at_next))
+            )
+            frame_gaps.append(gap)
+            comparable_frame_indices.append(int(frame_indices[t]))
+
+        if not raw_deltas:
             return self._not_applicable(
                 model, trajectory.frames[0],
-                f"all chunks have length {min_len} <= lookahead "
-                f"{self.compare_lookahead}; can't compare chunk[t][{self.compare_lookahead}] "
-                "to chunk[t+1][0]",
-            )
-
-        # For each adjacent pair, compare chunk[t][k] vs chunk[t+k][0]
-        # where k = self.compare_lookahead. Most informative with k=1.
-        k = self.compare_lookahead
-        raw_deltas: list[float] = []
-        for t in range(len(chunks) - k):
-            pred_for_t_plus_k = chunks[t][k]
-            actual_at_t_plus_k = chunks[t + k][0]
-            raw_deltas.append(
-                float(np.linalg.norm(pred_for_t_plus_k - actual_at_t_plus_k))
+                f"no comparable chunk pairs: with lookahead={k} analyzed "
+                f"frame(s) and the trajectory's dataset-frame gaps "
+                f"({sorted({g for _, g in uncomparable})}), the model's "
+                f"chunk (lengths {sorted(set(chunk_lens))}) never extends "
+                f"far enough to reach the next analyzed frame. Reduce "
+                f"frame_stride, use a model with a longer action chunk, or "
+                f"lower the analysis lookahead.",
             )
 
         raw_arr = np.asarray(raw_deltas, dtype=np.float32)
@@ -153,6 +208,8 @@ class ChunkConsistencyDiagnostic(Diagnostic):
 
         raw_numbers = {
             "lookahead_k":          k,
+            "chunk_frame_gaps":     sorted(set(frame_gaps)),
+            "n_uncomparable_pairs": len(uncomparable),
             "mean_disagreement_normalized": mean_score,
             "max_disagreement_normalized":  max_score,
             "mean_disagreement_raw":        raw_mean,
@@ -166,11 +223,11 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             sev = Severity.PASS
             finding = Finding(
                 observed=(
-                    f"For each frame t, we compared the action the model "
-                    f"predicted for step {k} of its action chunk (made "
-                    f"at frame t) against the action it actually emitted "
-                    f"at frame t+{k}. The two agree closely — "
-                    f"disagreement {mean_score:.3f} is below noise floor."
+                    f"For each analyzed frame t, we compared the action the "
+                    f"model's chunk (made at t) predicted for the next "
+                    f"analyzed frame against the action it actually emitted "
+                    f"there. The two agree closely — disagreement "
+                    f"{mean_score:.3f} is below noise floor."
                 ),
                 meaning=(
                     "The model's multi-step planning is internally "
@@ -184,8 +241,9 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 raw_numbers=raw_numbers,
             )
             verdict = (
-                f"Chunk lookahead is consistent: chunk[t][{k}] vs chunk[t+{k}][0] "
-                f"agree within noise floor ({self.noise_floor}). Normalized "
+                f"Chunk lookahead is consistent: the chunk's prediction for "
+                f"the next analyzed frame agrees with what the model emits "
+                f"there, within noise floor ({self.noise_floor}). Normalized "
                 f"mean disagreement = {mean_score:.3f}. Model has stable "
                 f"multi-step planning."
             )
@@ -193,11 +251,11 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             sev = Severity.MODERATE
             finding = Finding(
                 observed=(
-                    f"The model's chunk-step-{k} prediction made at "
-                    f"frame t disagrees with its actual action at frame "
-                    f"t+{k} by {mean_score:.3f} of typical action "
-                    f"magnitude on average — above noise but below the "
-                    f"strong-disagreement threshold "
+                    f"The model's chunk prediction (made at frame t) for "
+                    f"the next analyzed frame disagrees with the action it "
+                    f"actually emits there by {mean_score:.3f} of typical "
+                    f"action magnitude on average — above noise but below "
+                    f"the strong-disagreement threshold "
                     f"({self.grounded_threshold:.3f})."
                 ),
                 meaning=(
@@ -223,11 +281,11 @@ class ChunkConsistencyDiagnostic(Diagnostic):
             sev = Severity.CRITICAL
             finding = Finding(
                 observed=(
-                    f"The model's chunk-step-{k} prediction at frame t "
-                    f"disagrees with its actual emission at frame t+{k} "
-                    f"by {mean_score:.3f} of typical magnitude on average "
-                    f"(max {max_score:.3f}). That's above the "
-                    f"strong-disagreement threshold "
+                    f"The model's chunk prediction (made at frame t) for "
+                    f"the next analyzed frame disagrees with the action it "
+                    f"actually emits there by {mean_score:.3f} of typical "
+                    f"magnitude on average (max {max_score:.3f}). That's "
+                    f"above the strong-disagreement threshold "
                     f"({self.grounded_threshold:.3f})."
                 ),
                 meaning=(
@@ -248,9 +306,9 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 f"Chunk lookahead is INCONSISTENT: normalized mean "
                 f"disagreement {mean_score:.3f} ≥ grounded threshold "
                 f"({self.grounded_threshold}, max {max_score:.3f}). The "
-                f"model's chunk-position-{k} prediction made at frame t "
-                f"materially disagrees with its chunk-position-0 prediction "
-                f"made at frame t+{k}. Running this model's chunks beyond "
+                f"model's chunk prediction (made at frame t) for the next "
+                f"analyzed frame materially disagrees with the action it "
+                f"actually emits there. Running this model's chunks beyond "
                 f"the first step is not safe — replan every step."
             )
 
@@ -269,14 +327,15 @@ class ChunkConsistencyDiagnostic(Diagnostic):
                 for t, d in enumerate(normalized)
             },
             raw={
-                "compare_lookahead":     k,
-                "chunk_lengths":         chunk_lens,
-                "raw_deltas":            raw_arr.tolist(),
-                "normalized_deltas":     normalized.tolist(),
-                "raw_mean_delta":        raw_mean,
-                "raw_max_delta":         raw_max,
-                "noise_floor":           self.noise_floor,
-                "grounded_threshold":    self.grounded_threshold,
-                "calibration_used":      self.calibration.to_summary() if self.calibration else None,
+                "compare_lookahead":      k,
+                "chunk_lengths":          chunk_lens,
+                "raw_deltas":             raw_arr.tolist(),
+                "normalized_deltas":      normalized.tolist(),
+                "per_pair_frame_indices": comparable_frame_indices,
+                "raw_mean_delta":         raw_mean,
+                "raw_max_delta":          raw_max,
+                "noise_floor":            self.noise_floor,
+                "grounded_threshold":     self.grounded_threshold,
+                "calibration_used":       self.calibration.to_summary() if self.calibration else None,
             },
         )

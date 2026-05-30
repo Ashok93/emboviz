@@ -16,7 +16,6 @@ from emboviz.perturb.instruction._text_utils import (
     replace_word,
 )
 from emboviz.perturb.instruction.noun_swap import _pick_target_noun
-from emboviz.taxonomy.object_categories import OBJECT_CATEGORIES
 
 
 # Words from non-overlapping categories — unlikely to actually be present

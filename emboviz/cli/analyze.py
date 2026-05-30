@@ -1,23 +1,27 @@
 """`emboviz analyze` — the single user-facing analyze command.
 
-The user gives:
-  • Their model (an adapter alias or a full ``module:attr[:registry-key]`` spec)
-  • Their dataset (an alias or full spec)
-  • One or more episodes to analyze (``--episodes 0`` or ``"0,3,7"`` or ``"0-5"`` or ``"all"``)
-  • Where to write the report
-  • Optionally: the target object phrase for memorization
+One run is fully described by ONE config file (see :mod:`emboviz.config`
+and the shipped templates under ``configs/``). The config declares the
+model (adapter + the user's checkpoint kwargs), the dataset mapping
+(format + path + the camera / state-convention / gripper bindings the
+format can't encode), and the analysis parameters (episodes, memorization
+target, diagnostics, output). There is no CLI flag soup:
+
+    emboviz analyze --config configs/openvla-bridge.yaml
+    emboviz analyze --config openvla-bridge          # shipped template name
+    emboviz analyze --config my-run.yaml --dry-run   # cost estimate only
 
 We produce, per episode:
   • ``<out>/episode_<idx>/summary.json``  — per-axis Findings + raw numbers
-  • ``<out>/episode_<idx>/rollout.rrd``  — Rerun playback w/ overlays
+  • ``<out>/episode_<idx>/rollout.rrd``   — Rerun playback w/ overlays
+  • ``<out>/episode_<idx>/report.md``     — human-readable per-episode report
 
 And across all episodes:
-  • ``<out>/aggregate.json``  — cross-episode patterns
-  • ``<out>/aggregate.md``    — human-readable summary
+  • ``<out>/aggregate.json`` / ``aggregate.md`` / ``aggregate.html``
 
-Phase 5 scope: full-episode-by-default, multi-episode loops, cross-
-episode aggregation. The actual diagnostic orchestration is unchanged
-from Phase 4 (calls ``emboviz._internal.runner.run_story`` per episode).
+The diagnostic orchestration is unchanged — the config is resolved into
+the same per-episode ``emboviz._internal.runner.run_story`` call the
+runner has always used; only the inputs now come from one file.
 """
 
 from __future__ import annotations
@@ -27,260 +31,164 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional
 
 import click
 
 
-# Built-in model adapter shortcuts → ``module:attr:registry-key`` specs.
-_MODEL_ALIASES: dict[str, str] = {
-    "openvla":     "emboviz.models.registry:get_model:openvla",
-    "openvla-7b":  "emboviz.models.registry:get_model:openvla",
-    "oft":         "emboviz.models.registry:get_model:openvla-oft",
-    "openvla-oft": "emboviz.models.registry:get_model:openvla-oft",
-    "pi0":         "emboviz.models.registry:get_model:pi0",
-    "pi05":        "emboviz.models.registry:get_model:pi0",
-    "gr00t":       "emboviz.models.registry:get_model:gr00t",
-    "gr00t-n1":    "emboviz.models.registry:get_model:gr00t",
+# The dataset section of every config is read through the one uniform
+# manifest builder, regardless of format (lerobot / hdf5 / rlds). The
+# runner resolves this ``module:attr`` spec and calls
+# ``build_source(**dataset_section)``.
+_MANIFEST_BUILDER = "emboviz.datasets.manifest:build_source"
+
+
+# Legacy in-process adapter aliases, still accepted as a ``model.adapter``
+# value. The common path is the entry-point adapter registry — ``adapter:
+# openvla`` connects to (or spawns) the installed ``emboviz-openvla``
+# worker. ``mock`` is the in-process test adapter.
+_LEGACY_MODEL_ALIASES: dict[str, str] = {
+    "openvla-7b":  "adapter:openvla",
+    "openvla-oft": "adapter:oft",
+    "pi05":        "adapter:pi0",
+    "gr00t-n1":    "adapter:gr00t",
     "mock":        "emboviz.models.registry:get_model:mock",
 }
 
-_DATASET_ALIASES: dict[str, str] = {
-    "bridge":           "emboviz.datasets.lerobot_bridge:BridgeEpisodeSource",
-    "libero-spatial":   "emboviz.datasets.lerobot_libero:LiberoSpatialSource",
-    "libero-object":    "emboviz.datasets.lerobot_libero:LiberoObjectSource",
-    "libero-goal":      "emboviz.datasets.lerobot_libero:LiberoGoalSource",
-    "libero-10":        "emboviz.datasets.lerobot_libero:Libero10Source",
-    "pi-libero":        "emboviz.datasets.lerobot_libero:PhysicalIntelligenceLiberoSource",
-    "droid-100":        "emboviz.datasets.lerobot_droid:Droid100Source",
-    "droid-full":       "emboviz.datasets.lerobot_droid:DroidFullSource",
-    "droid-sample":     "emboviz.datasets.lerobot_droid:GR00TDroidSampleSource",
-    "aloha-transfer":   "emboviz.datasets.lerobot_aloha:AlohaSimTransferCubeSource",
-    "aloha-insertion":  "emboviz.datasets.lerobot_aloha:AlohaSimInsertionSource",
-}
 
+def _resolve_model_spec(adapter: str) -> str:
+    """Resolve ``model.adapter`` to a spec the runner understands.
 
-# Generic data-format shortcuts for users with their own dataset / recording
-# at a local path. Maps a short format name to (adapter_spec, path-kwarg-name).
-# Selected via ``--dataset-format <fmt> --dataset-path <path>``; any other
-# adapter-specific kwargs (camera_keys, topic_map, builder_name, ...) go in
-# ``--dataset-kwargs '<JSON>'``.
-#
-# These are the formats whose ALL required adapter kwargs are JSON-friendly
-# (dicts of strings, paths). LeRobot v2/v3 and generic HuggingFace datasets
-# are intentionally NOT in this dict because their adapters need a
-# ``RobotProfile`` instance (and, for HF, a ``row_to_scene`` callable) that
-# can't be expressed in JSON. For those, use one of the pre-shipped
-# ``--dataset <alias>`` (bridge / libero-* / droid-* / aloha-*) which bakes
-# in the right profile, or subclass ``LeRobotEpisodeSource`` for your own
-# robot and pass it via ``--dataset emboviz.your_module:YourSource``.
-_DATASET_FORMATS: dict[str, tuple[str, str]] = {
-    # name             (adapter spec,                                  path-kwarg)
-    "hdf5":           ("emboviz.datasets:HDF5EpisodeSource",          "path"),
-    "rlds":           ("emboviz.datasets:RLDSEpisodeSource",          "data_dir"),
-    "mcap":           ("emboviz.recordings:MCAPRecording",            "path"),
-    "rerun-rrd":      ("emboviz.recordings:RerunRecording",           "path"),
-}
+    Lookup order:
 
-
-def _resolve_model_spec(model: str) -> str:
-    if model in _MODEL_ALIASES:
-        return _MODEL_ALIASES[model]
-    if ":" in model:
-        return model
-    if "/" in model:
-        raise click.UsageError(
-            f"HuggingFace repo id '{model}' resolution is not implemented "
-            "yet. Use an adapter alias from this list: "
-            + ", ".join(sorted(_MODEL_ALIASES))
-        )
-    raise click.UsageError(
-        f"Unknown model '{model}'. Choose one of: "
-        + ", ".join(sorted(_MODEL_ALIASES))
-    )
-
-
-def _resolve_dataset_spec(dataset: str) -> str:
-    if dataset in _DATASET_ALIASES:
-        return _DATASET_ALIASES[dataset]
-    if ":" in dataset:
-        return dataset
-    raise click.UsageError(
-        f"Unknown dataset '{dataset}'. Choose one of: "
-        + ", ".join(sorted(_DATASET_ALIASES))
-        + ". For generic local data, use --dataset-format + --dataset-path."
-    )
-
-
-def _resolve_dataset_from_args(
-    dataset: Optional[str],
-    dataset_format: Optional[str],
-    dataset_path: Optional[str],
-    dataset_kwargs_json: str,
-) -> tuple[str, str]:
-    """Combine the three dataset-selection flags into a (spec, kwargs_json) pair.
-
-    Three valid combinations:
-      1. ``--dataset <alias-or-spec>`` only — pre-shipped dataset; kwargs
-         come solely from ``--dataset-kwargs``.
-      2. ``--dataset-format <fmt> --dataset-path <p>`` — generic adapter
-         pointed at a local file/dir/repo; extra kwargs in ``--dataset-kwargs``
-         get merged on top.
-      3. ``--dataset emboviz.module:Class --dataset-kwargs '{...}'`` —
-         power-user explicit module path.
-
-    Mutually exclusive: cannot pass both ``--dataset`` and
-    ``--dataset-format``.
+      1. Verbatim ``adapter:<name>`` (or any ``module:Class`` form) →
+         passed through; the runner handles each.
+      2. Match against the installed adapter entry-point registry. If a
+         package called ``emboviz-<adapter>`` is installed, route as
+         ``adapter:<adapter>`` (the common path).
+      3. Match against the legacy alias table (``mock`` + back-compat
+         aliases).
+      4. Otherwise: raise listing what IS installed and the aliases, so
+         the user knows their next move.
     """
-    import json
+    if ":" in adapter:
+        return adapter
 
-    if dataset and dataset_format:
-        raise click.UsageError(
-            "Pass EITHER --dataset (alias / module:class) OR "
-            "--dataset-format (generic format shortcut), not both."
-        )
-    if not dataset and not dataset_format:
-        raise click.UsageError(
-            "Specify a dataset via either:\n"
-            "  --dataset <alias>            (e.g. bridge, libero-spatial, droid-sample)\n"
-            "  --dataset-format <fmt>       (e.g. lerobot, hdf5, mcap, rlds, hf)\n"
-            "       --dataset-path <path>   (required when --dataset-format is set)"
-        )
+    from emboviz.adapters import list_adapters
+    installed = list_adapters()
+    if adapter in installed:
+        return f"adapter:{adapter}"
 
-    if dataset_format:
-        if dataset_format not in _DATASET_FORMATS:
-            raise click.UsageError(
-                f"Unknown --dataset-format '{dataset_format}'. Available: "
-                + ", ".join(sorted(_DATASET_FORMATS))
-            )
-        if not dataset_path:
-            raise click.UsageError(
-                f"--dataset-format {dataset_format} requires --dataset-path."
-            )
-        spec, path_kwarg = _DATASET_FORMATS[dataset_format]
-        extra = {}
-        if dataset_kwargs_json:
-            try:
-                extra = json.loads(dataset_kwargs_json)
-                if not isinstance(extra, dict):
-                    raise ValueError("must be a JSON object")
-            except (ValueError, json.JSONDecodeError) as e:
-                raise click.UsageError(f"--dataset-kwargs is not valid JSON: {e}")
-        if path_kwarg in extra and extra[path_kwarg] != dataset_path:
-            raise click.UsageError(
-                f"--dataset-path={dataset_path!r} conflicts with "
-                f"--dataset-kwargs key {path_kwarg}={extra[path_kwarg]!r}. "
-                f"Use one or the other."
-            )
-        extra[path_kwarg] = dataset_path
-        return spec, json.dumps(extra)
+    if adapter in _LEGACY_MODEL_ALIASES:
+        return _LEGACY_MODEL_ALIASES[adapter]
 
-    return _resolve_dataset_spec(dataset), dataset_kwargs_json
+    raise click.UsageError(
+        f"Unknown model.adapter '{adapter}'.\n"
+        f"  Installed adapters (entry-point): {sorted(installed) or '(none)'}\n"
+        f"  Legacy aliases:                   {sorted(_LEGACY_MODEL_ALIASES)}\n"
+        f"  Power-user form:                  '<module>:<Class>'\n"
+        f"  To add '{adapter}' as a ZMQ-worker adapter, run:\n"
+        f"      uv pip install emboviz-{adapter}\n"
+        f"      emboviz install-{adapter}\n"
+        f"      emboviz-{adapter} serve &"
+    )
+
+
+# ────────── Diagnostic selection ─────────────────────────────────────
+#
+# The diagnostic suite exposes the following axes (canonical short names
+# + full axis names). Both work in ``analysis.diagnostics``.
+
+DIAGNOSTIC_SHORT_NAMES: dict[str, str] = {
+    "memorization":    "vision.memorization",
+    "modality":        "input.modality_dropout",
+    "modality_dropout":"input.modality_dropout",
+    "sensitivity":     "vision.scene_sensitivity",
+    "scene_sensitivity":"vision.scene_sensitivity",
+    "chunk":           "internal.chunk_consistency",
+    "chunk_consistency":"internal.chunk_consistency",
+    "attention":       "internal.attention_drift",
+    "attention_drift": "internal.attention_drift",
+}
+
+ALL_DIAGNOSTICS: frozenset[str] = frozenset({
+    "vision.memorization",
+    "input.modality_dropout",
+    "vision.scene_sensitivity",
+    "internal.chunk_consistency",
+    "internal.attention_drift",
+})
+
+
+def _canon_diagnostic(token: str) -> str:
+    """Map a config diagnostic name to its canonical axis name.
+
+    Accepts both the short name (``"memorization"``) and the full axis
+    name (``"vision.memorization"``). Raises with the known list if the
+    user typed something we don't recognise.
+    """
+    t = token.strip().lower()
+    if not t:
+        raise click.UsageError("empty diagnostic name in analysis.diagnostics")
+    if t in ALL_DIAGNOSTICS:
+        return t
+    if t in DIAGNOSTIC_SHORT_NAMES:
+        return DIAGNOSTIC_SHORT_NAMES[t]
+    known = sorted(ALL_DIAGNOSTICS | set(DIAGNOSTIC_SHORT_NAMES))
+    raise click.UsageError(
+        f"Unknown diagnostic '{token}'. We only support these names: {known}"
+    )
+
+
+def _resolve_diagnostics(diagnostics_spec: str) -> frozenset[str]:
+    """Resolve ``analysis.diagnostics`` (normalized to a comma string by
+    :meth:`RunConfig.diagnostics_str`) into the enabled axis set.
+
+    Accepts:
+      • ``"all"``        — every diagnostic
+      • ``"X,Y,Z"``      — an explicit include list
+      • ``"all,-X"``     — all minus X
+      • ``"X,Y,-Z"``     — include X and Y, then drop Z
+
+    Unknown names raise.
+    """
+    enabled: set[str] = set()
+    for raw in (diagnostics_spec or "all").split(","):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token == "all":
+            enabled |= set(ALL_DIAGNOSTICS)
+        elif token.startswith("-"):
+            enabled.discard(_canon_diagnostic(token[1:]))
+        else:
+            enabled.add(_canon_diagnostic(token))
+    return frozenset(enabled)
 
 
 @click.command("analyze")
-@click.option("--model", required=True,
-              help="Model adapter alias (e.g. 'openvla', 'oft', 'pi0', 'gr00t').")
-@click.option("--model-kwargs", "model_kwargs_json", default="",
-              help="JSON dict of kwargs passed to the model adapter constructor.")
-@click.option("--dataset", default=None,
-              help="Pre-shipped dataset alias (e.g. 'bridge', 'libero-spatial', "
-                   "'droid-sample') OR a full 'module.path:Class' spec. "
-                   "Mutually exclusive with --dataset-format.")
-@click.option("--dataset-format", "dataset_format", default=None,
-              type=click.Choice(sorted(_DATASET_FORMATS), case_sensitive=False),
-              help="Generic dataset / recording format for users with their "
-                   "own local data. Choose from: "
-                   + ", ".join(sorted(_DATASET_FORMATS))
-                   + ". Use together with --dataset-path. Adapter-specific "
-                     "options (camera_keys, builder_name, topic_map, ...) go "
-                     "in --dataset-kwargs.")
-@click.option("--dataset-path", "dataset_path", default=None,
-              type=click.Path(),
-              help="Path to the local dataset file / directory / HF repo id. "
-                   "Required when --dataset-format is given; ignored otherwise.")
-@click.option("--dataset-kwargs", "dataset_kwargs_json", default="",
-              help="JSON dict of kwargs passed to the dataset adapter constructor.")
-@click.option("--episodes", "episodes_spec", default="0",
-              help="Episode(s) to analyze. Forms: '7' / '0,3,7' / '0-5' / 'all'. "
-                   "Default: '0'.")
-@click.option("--frame-start", type=int, default=0,
-              help="First frame index in the analysis window (default 0).")
-@click.option("--n-frames", type=int, default=-1,
-              help="Number of frames in the window. Default -1 = ALL "
-                   "frames from --frame-start to the end of each episode.")
-@click.option("--frame-stride", type=int, default=1,
-              help="Stride between sampled frames in the window. "
-                   "Default 1 = every frame. Set to 5 or 10 to "
-                   "subsample long episodes.")
-@click.option("--target", "target_text", default="",
-              help="Target object phrase (e.g. 'the red cup') passed to "
-                   "GroundingDINO for the memorization diagnostic. "
-                   "If empty, memorization is skipped.")
-@click.option("--output", "out_dir", type=click.Path(), required=True,
-              help="Output directory. Per-episode subdirs + aggregate "
-                   "report are written here.")
-@click.option("--sensitivity-grid-side", type=int, default=4,
-              help="Side length of the occlusion grid for scene-sensitivity (default 4).")
-@click.option("--modality-pool-size", type=int, default=20,
-              help="Episodes sampled to build the SHAP-marginal pool (default 20).")
-@click.option("--modality-k-samples", type=int, default=10,
-              help="Substitution samples per modality per frame (default 10).")
-@click.option("--modality-pool-seed", type=int, default=0,
-              help="RNG seed for the modality pool sampler.")
-@click.option("--modality-pool-cache-dir", type=click.Path(), default=None,
-              help="Optional directory where the modality pool is cached on disk.")
-@click.option("--show-imitation", is_flag=True, default=False,
-              help="Compute and show imitation L2 vs recorded expert action.")
-def analyze_cmd(
-    model: str, model_kwargs_json: str,
-    dataset: Optional[str],
-    dataset_format: Optional[str], dataset_path: Optional[str],
-    dataset_kwargs_json: str,
-    episodes_spec: str, frame_start: int, n_frames: int, frame_stride: int,
-    target_text: str, out_dir: str,
-    sensitivity_grid_side: int,
-    modality_pool_size: int, modality_k_samples: int,
-    modality_pool_seed: int, modality_pool_cache_dir: Optional[str],
-    show_imitation: bool,
-) -> None:
-    """Analyze a model on one or more episodes and write diagnostics.
-
-    Examples:
+@click.option("--config", "config_ref", required=True,
+              help="Path to a run config YAML, or the name of a shipped "
+                   "template under configs/ (e.g. 'openvla-bridge', "
+                   "'pi0-libero'). The config declares the model, dataset "
+                   "mapping, and analysis parameters — everything for the run.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False,
+              help="Print the per-frame and per-episode forward-pass estimate "
+                   "without running the diagnostic suite. Use this BEFORE "
+                   "committing GPU hours on a long episode.")
+def analyze_cmd(config_ref: str, dry_run: bool) -> None:
+    """Analyze a model on one or more episodes from a single config file.
 
     \b
-        # Pre-shipped dataset (LeRobot / Bridge), all frames of episode 0
-        emboviz analyze --model openvla --dataset bridge --episodes 0 \\
-            --target "the spoon" --output ./report
+        # Shipped template (copy + edit it for your own checkpoint/data):
+        emboviz analyze --config configs/openvla-bridge.yaml
 
     \b
-        # Local HDF5 file (Robomimic / ALOHA / Isaac Lab Mimic). The
-        # camera_keys / state_key / instruction tell the adapter where
-        # in the HDF5 hierarchy to pull each modality from.
-        emboviz analyze --model pi0 \\
-            --dataset-format hdf5 --dataset-path /data/demos.hdf5 \\
-            --dataset-kwargs '{"camera_keys": {"primary": "agentview_rgb"}, "instruction": "pick up the mug"}' \\
-            --episodes 0 --target "the white mug" --output ./report
+        # By template name:
+        emboviz analyze --config pi0-libero
 
     \b
-        # RLDS / TFDS (needs `uv pip install 'emboviz[rlds]'`)
-        emboviz analyze --model gr00t \\
-            --dataset-format rlds --dataset-path /tfds \\
-            --dataset-kwargs '{"builder_name": "bridge_orig", "camera_keys": {"primary": "image_0"}}' \\
-            --episodes 0,1 --target "the green block" --output ./report
-
-    \b
-        # MCAP deployment recording (ROS 2 / Isaac SIM)
-        emboviz analyze --model gr00t \\
-            --dataset-format mcap --dataset-path /logs/rollout.mcap \\
-            --dataset-kwargs '{"topic_map": {"primary": "/camera/color/image_raw", "state": "/joint_states", "action": "/cmd_joint"}}' \\
-            --episodes 0 --target "the green block" --output ./report
-
-    \b
-        # All episodes (use with caution on big datasets)
-        emboviz analyze --model pi0 --dataset pi-libero \\
-            --episodes all --frame-stride 10 \\
-            --target "the white mug" --output ./report
+        # Size the GPU budget before a long run:
+        emboviz analyze --config my-run.yaml --dry-run
     """
     from emboviz._internal.multi_episode import (
         EpisodeReport,
@@ -290,39 +198,52 @@ def analyze_cmd(
         write_aggregate_markdown,
     )
     from emboviz._internal.report import write_episode_reports
+    from emboviz.config import load_run_config
 
-    model_spec = _resolve_model_spec(model)
-    dataset_spec, dataset_kwargs_json = _resolve_dataset_from_args(
-        dataset=dataset,
-        dataset_format=dataset_format.lower() if dataset_format else None,
-        dataset_path=dataset_path,
-        dataset_kwargs_json=dataset_kwargs_json,
-    )
-    out = Path(out_dir)
+    cfg = load_run_config(config_ref)
+
+    model_spec = _resolve_model_spec(cfg.model.adapter)
+    model_kwargs_json = json.dumps(cfg.model.kwargs)
+    dataset_spec = _MANIFEST_BUILDER
+    dataset_kwargs_json = json.dumps(cfg.dataset_build_kwargs())
+
+    out = Path(cfg.output)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Resolve --episodes. For "all" we need the dataset's episode count.
-    n_available: Optional[int] = None
-    if episodes_spec.strip() == "all":
-        # Defer to dataset to enumerate. Heavy import, hence inline.
+    enabled_diagnostics = _resolve_diagnostics(cfg.diagnostics_str())
+    if not enabled_diagnostics:
+        raise click.UsageError(
+            "analysis.diagnostics resolved to an empty set; nothing to run."
+        )
+    click.echo(f"[analyze] config: {config_ref}")
+    click.echo(f"[analyze] model:  {model_spec}  kwargs={cfg.model.kwargs}")
+    click.echo(f"[analyze] dataset: format={cfg.dataset.format} path={cfg.dataset.path}")
+    click.echo(f"[analyze] diagnostics enabled: {sorted(enabled_diagnostics)}")
+
+    # Resolve --episodes. For "all" we need the dataset's episode count,
+    # which means building the source (cheap — reads the schema) and asking
+    # it to enumerate.
+    n_available = None
+    episodes_spec = cfg.analysis.episodes.strip()
+    if episodes_spec == "all":
         from emboviz._internal.runner import _resolve as resolve_builder
-        click.echo("[analyze] resolving dataset to count episodes for --episodes all ...")
+        click.echo("[analyze] resolving dataset to count episodes for episodes='all' ...")
         ds = resolve_builder(dataset_spec, dataset_kwargs_json)
         try:
             n_available = len(ds.list_episodes())
         except Exception as e:
             raise click.UsageError(
-                f"--episodes all requires dataset.list_episodes() to work: {e}"
+                f"episodes='all' requires dataset.list_episodes() to work: {e}"
             )
     episode_indices = parse_episode_spec(episodes_spec, n_available)
     if not episode_indices:
-        raise click.UsageError("--episodes resolved to an empty list")
+        raise click.UsageError("analysis.episodes resolved to an empty list")
     click.echo(f"[analyze] analyzing {len(episode_indices)} episode(s): "
                f"{episode_indices[:10]}{' ...' if len(episode_indices) > 10 else ''}")
 
-    # Per-episode loop. We re-load the model + dataset between episodes
-    # because run_story does so internally. (Phase 6+ will hoist model
-    # load above the loop for amortization.)
+    # Per-episode loop. run_story re-loads model + dataset internally per
+    # call (the dataset source caches its handle, the model worker stays
+    # warm across calls in the same session).
     episode_reports: list[EpisodeReport] = []
     for ep_idx in episode_indices:
         ep_dir = out / f"episode_{ep_idx:05d}"
@@ -330,23 +251,27 @@ def analyze_cmd(
         click.echo(f"\n[analyze] ===== episode {ep_idx} =====")
 
         args = argparse.Namespace(
-            story_id=f"{model}:{dataset}:ep{ep_idx}",
+            story_id=f"{cfg.model.adapter}:{cfg.dataset.format}:ep{ep_idx}",
             model_builder=model_spec,
             model_kwargs_json=model_kwargs_json,
             dataset_builder=dataset_spec,
             dataset_kwargs_json=dataset_kwargs_json,
             episode_idx=ep_idx,
-            frame_start=frame_start,
-            n_frames=n_frames,
-            frame_stride=frame_stride,
-            sensitivity_grid_side=sensitivity_grid_side,
+            frame_start=cfg.analysis.frame_start,
+            n_frames=cfg.analysis.n_frames,
+            frame_stride=cfg.analysis.frame_stride,
+            sensitivity_grid_side=cfg.analysis.sensitivity_grid_side,
             out_dir=str(ep_dir),
-            modality_pool_size=modality_pool_size,
-            modality_k_samples=modality_k_samples,
-            modality_pool_seed=modality_pool_seed,
-            modality_pool_cache_dir=modality_pool_cache_dir,
-            target_text=target_text,
-            show_imitation=show_imitation,
+            modality_pool_size=cfg.analysis.modality_pool_size,
+            modality_k_samples=cfg.analysis.modality_k_samples,
+            modality_pool_seed=cfg.analysis.modality_pool_seed,
+            modality_pool_cache_dir=cfg.analysis.modality_pool_cache_dir,
+            target_text=cfg.analysis.mask_query,
+            target_annotations=cfg.analysis.target_annotations or "",
+            detector=cfg.analysis.detector,
+            enabled_diagnostics=enabled_diagnostics,
+            show_imitation=cfg.analysis.show_imitation,
+            dry_run=dry_run,
         )
 
         from emboviz._internal.runner import run_story
@@ -362,13 +287,12 @@ def analyze_cmd(
         summary_path = ep_dir / "summary.json"
         rrd_path = ep_dir / "rollout.rrd"
         if summary_path.exists():
-            ep_report = EpisodeReport(
+            episode_reports.append(EpisodeReport(
                 episode_idx=ep_idx,
                 out_dir=ep_dir,
                 summary_path=summary_path,
                 rollout_rrd_path=rrd_path if rrd_path.exists() else None,
-            )
-            episode_reports.append(ep_report)
+            ))
 
             # Per-episode human-readable reports (md + html). HTML only
             # when the `viz` extra is installed; markdown always.
@@ -384,6 +308,13 @@ def analyze_cmd(
                 click.echo(f"[analyze] episode {ep_idx} report rendering FAILED: "
                            f"{type(e).__name__}: {e}", err=True)
 
+    # A --dry-run produces no summary.json (run_story returns early); that's
+    # expected, not a failure.
+    if dry_run:
+        click.echo("\n[analyze] --dry-run: cost estimate(s) printed above; "
+                   "no diagnostics run, nothing aggregated.")
+        return
+
     # Aggregate cross-episode patterns.
     if not episode_reports:
         click.echo("\n[analyze] no episodes produced summary.json — nothing to aggregate.", err=True)
@@ -391,9 +322,9 @@ def analyze_cmd(
     click.echo(f"\n[analyze] aggregating across {len(episode_reports)} episode(s) ...")
     aggregate = aggregate_episodes(episode_reports)
     (out / "aggregate.json").write_text(json.dumps(aggregate, indent=2, default=str))
-    md = write_aggregate_markdown(aggregate, model_id=model, out_path=out / "aggregate.md")
+    md = write_aggregate_markdown(aggregate, model_id=cfg.model.adapter, out_path=out / "aggregate.md")
     html = write_aggregate_html(
-        aggregate, model_id=model, episodes=episode_reports,
+        aggregate, model_id=cfg.model.adapter, episodes=episode_reports,
         out_path=out / "aggregate.html",
     )
     click.echo(f"[analyze] wrote {out / 'aggregate.json'}")

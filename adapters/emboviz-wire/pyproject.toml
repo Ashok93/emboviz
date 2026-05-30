@@ -1,0 +1,31 @@
+[project]
+name = "emboviz-wire"
+version = "0.3.0"
+description = "Minimal ZeroMQ connector + shared wire contracts for emboviz. The ONLY emboviz package a model worker venv installs."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+
+# The dependency FLOOR — and nothing else. A model worker venv installs
+# emboviz-wire (for the ZMQ connector + the Scene/ActionResult contracts)
+# and NEVER the full emboviz (no rerun / datasets / viz / scipy). These
+# are pinned loosely on purpose: two separate venvs (worker + host) talk
+# only through standardized bytes (msgpack over ZMQ), so their numpy /
+# pyzmq / msgpack / pydantic versions may differ freely — the model's
+# own pins win in the worker, and we never fight them.
+dependencies = [
+    "numpy",            # no upper pin — bend to whatever the model ships
+    "pydantic>=2",      # validates the Scene / ActionResult contracts
+    "pyzmq>=26",        # ZMQ binding; ZMTP wire is version-stable
+    "msgpack>=1.0",     # standardized serialization format
+    "msgpack-numpy>=0.4.8",  # ndarray ext-type (stable encoding)
+    "Pillow>=10.0",     # RGBImage carries PIL images
+    "click>=8.1",       # the `serve` worker CLI (emboviz_wire.server)
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["emboviz_wire"]

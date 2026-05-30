@@ -23,8 +23,7 @@ instances + scenes. Falls back gracefully if libs aren't installed.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 import numpy as np
 from PIL import Image
@@ -32,10 +31,8 @@ from PIL import Image
 from emboviz.core.types import PerturbedScene, Scene, resolve_cameras
 from emboviz.perturb.base import Perturber
 from emboviz.perturb.image._image_utils import (
-    make_perturbed_image_scene,
     make_perturbed_multi_camera_scene,
     to_array,
-    to_pil,
 )
 
 

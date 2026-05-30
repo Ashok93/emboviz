@@ -1,7 +1,17 @@
-"""Adapter registry — string name to adapter factory.
+"""Legacy in-process adapter registry — `mock` and `lerobot` only.
 
-CLI does `get_model("openvla-7b")(**kwargs)` to instantiate any adapter
-without importing it directly. Adapters self-register at import time.
+The four production VLA families (OpenVLA, OFT, π0, GR00T) have moved
+to standalone packages under ``adapters/`` and are reached via the new
+ZeroMQ-actor path (``--model openvla`` → ``adapter:openvla``). This
+registry only retains the lightweight in-process adapters that still
+make sense to run inside the user's main venv:
+
+  • ``mock``   — deterministic test fixture, no GPU
+  • ``lerobot``— delegates to a stock LeRobotDataset policy (CPU OK)
+
+Both of those import cheaply (no torch at module level) so the
+``--model mock`` and ``--model lerobot:<repo>`` codepaths continue to
+work the way they did before the refactor.
 """
 
 from __future__ import annotations
@@ -28,28 +38,28 @@ def register_model(name: str):
 
 def get_model(name: str) -> Callable[..., VLAModel]:
     """Look up an adapter factory. Imports the adapter module lazily."""
-    # Eagerly try registering known built-ins on demand. This keeps the
-    # `emboviz` import cheap (no torch at top level) while still letting
-    # `get_model("openvla-7b")` work from anywhere.
     if name not in REGISTRY:
         _try_lazy_register(name)
     if name not in REGISTRY:
-        raise KeyError(f"No adapter registered for '{name}'. Available: {list(REGISTRY)}")
+        raise KeyError(
+            f"No in-process adapter registered for '{name}'. "
+            f"Available: {sorted(REGISTRY)}. "
+            "(VLA adapters live in separate packages now — "
+            "use `--model openvla|oft|pi0|gr00t|sam3` to drive them "
+            "via their ZMQ workers.)"
+        )
     return REGISTRY[name]
 
 
 def _try_lazy_register(name: str) -> None:
-    """Trigger the adapter module's side-effect import for known names."""
+    """Trigger the in-process adapter module's side-effect import.
+
+    ``mock`` is the only in-process adapter (a GPU-free deterministic
+    policy for testing the diagnostic side). Every real model resolves
+    through :mod:`emboviz.adapters.registry` as an isolated ZMQ worker.
+    """
     builtin = {
-        "openvla-7b": "emboviz.models.openvla",
-        "openvla": "emboviz.models.openvla",
         "mock": "emboviz.models.mock",
-        "lerobot": "emboviz.models.lerobot_policy",
-        "gr00t": "emboviz.models.gr00t",
-        "gr00t-n1": "emboviz.models.gr00t",
-        "openvla-oft": "emboviz.models.openvla_oft",
-        "pi0": "emboviz.models.pi0",
-        "pi05": "emboviz.models.pi0",
     }
     module = builtin.get(name)
     if module:
