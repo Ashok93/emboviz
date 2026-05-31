@@ -329,21 +329,35 @@ class AttentionMaps:
     query_position: int
     n_keys: int
     image_token_ranges: dict[str, list[tuple[int, int]]]              # camera_id → list of tile (start, end) pairs (exclusive end)
-    image_grid_sides: dict[str, int]                                  # camera_id → grid side PER TILE (tile tokens = side*side)
+    # Per-tile grid shape. Two equivalent ways to declare it; each camera
+    # in image_token_ranges must be covered by exactly one:
+    #   • image_grid_sides[cam] = side  → square grid, tile tokens = side*side
+    #   • image_grid_shapes[cam] = (h, w) → rectangular grid (e.g. a CNN
+    #     feature map on a non-square image), tile tokens = h*w
+    image_grid_sides: dict[str, int] = field(default_factory=dict)
+    image_grid_shapes: dict[str, tuple[int, int]] = field(default_factory=dict)
     layer_indices: Optional[list[int]] = None                         # which layers (None = all)
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        cams_a, cams_b = set(self.image_token_ranges), set(self.image_grid_sides)
-        if cams_a != cams_b:
+        cams = set(self.image_token_ranges)
+        covered = set(self.image_grid_sides) | set(self.image_grid_shapes)
+        if cams != covered:
             raise ValueError(
-                "AttentionMaps: image_token_ranges and image_grid_sides "
-                f"must cover the same cameras; got ranges={sorted(cams_a)} "
-                f"vs grids={sorted(cams_b)}."
+                "AttentionMaps: every camera in image_token_ranges must have "
+                "a grid in image_grid_sides or image_grid_shapes; got "
+                f"ranges={sorted(cams)} vs grids={sorted(covered)}."
             )
-        for cam in cams_a:
+        dup = set(self.image_grid_sides) & set(self.image_grid_shapes)
+        if dup:
+            raise ValueError(
+                "AttentionMaps: cameras must declare their grid in exactly "
+                f"one of image_grid_sides / image_grid_shapes; both given for "
+                f"{sorted(dup)}."
+            )
+        for cam in cams:
             ranges = self.image_token_ranges[cam]
-            side = self.image_grid_sides[cam]
+            h, w = self.grid_shape(cam)
             if not isinstance(ranges, list) or not ranges:
                 raise ValueError(
                     f"AttentionMaps camera '{cam}': image_token_ranges["
@@ -351,12 +365,20 @@ class AttentionMaps:
                     f"tile pairs; got {ranges!r}."
                 )
             for s, e in ranges:
-                if (e - s) != side * side:
+                if (e - s) != h * w:
                     raise ValueError(
                         f"AttentionMaps camera '{cam}': tile range {(s, e)} "
-                        f"yields {e - s} tokens but grid_side={side} requires "
-                        f"{side * side}. Adapter has the wrong range or grid."
+                        f"yields {e - s} tokens but grid {(h, w)} requires "
+                        f"{h * w}. Adapter has the wrong range or grid."
                     )
+
+    def grid_shape(self, camera: str) -> tuple[int, int]:
+        """Per-tile (height, width) for a camera's image grid."""
+        if camera in self.image_grid_shapes:
+            h, w = self.image_grid_shapes[camera]
+            return int(h), int(w)
+        side = int(self.image_grid_sides[camera])
+        return side, side
 
     @property
     def cameras(self) -> list[str]:
@@ -395,11 +417,11 @@ class AttentionMaps:
                 f"Available cameras: {sorted(self.image_token_ranges)}."
             )
         ranges = self.image_token_ranges[camera]
-        side = self.image_grid_sides[camera]
+        h, w = self.grid_shape(camera)
         tile_maps = []
         for s, e in ranges:
             img = self.weights[..., s:e]
-            tile_maps.append(img.reshape(*img.shape[:-1], side, side))
+            tile_maps.append(img.reshape(*img.shape[:-1], h, w))
         if len(tile_maps) == 1:
             return tile_maps[0]
         return np.sum(tile_maps, axis=0)
@@ -458,8 +480,8 @@ class AttentionMaps:
                 refusing to fabricate a layer range that isn't grounded
                 in this model's literature.
         """
-        raw = self.image_weights(camera)   # (L, H, side, side)
-        L, H, side, _ = raw.shape
+        raw = self.image_weights(camera)   # (L, H, gh, gw)
+        L, H, gh, gw = raw.shape
 
         # Source per-model defaults from adapter's literature.
         profile = self.metadata.get("attention_profile", {})
@@ -492,38 +514,70 @@ class AttentionMaps:
         end = min(end, L)
         start = max(0, min(start, L - 1))
 
-        # ── Layer-adaptive "last-token attention" map ──
-        # The last text token's attention to the image, mean over heads, at the
-        # ONE layer where visual grounding is clearest. Per the layer-adaptive
-        # localization literature (arXiv:2602.04304; "How Multimodal LLMs Solve
-        # Image Tasks" arXiv:2508.20279) the grounding signal lives in a single
-        # mid-stack layer, while attention sinks (special / border tokens)
-        # dominate the other layers. So within the candidate layer range we
-        # SELECT the layer whose attention is most concentrated on the image
+        # ── Interior-concentration selection ──
+        # The grounding signal lives in ONE unit; attention sinks (special /
+        # border tokens) dominate the rest. Within the candidate layer range we
+        # SELECT the unit whose attention is most concentrated on the image
         # INTERIOR (where objects are) rather than the border ring (where the
-        # positional/RoPE sink sits), then average over heads. One layer chosen
-        # from the data — no magic layer index, no per-cell sink removal, no
-        # head selection, no calibration.
-        per_layer = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, side, side)
-        border = np.zeros((side, side), dtype=bool)
+        # positional / RoPE sink sits) — no magic index, no per-cell masking, no
+        # calibration. ``head_reduction`` (from the adapter's attention_profile)
+        # sets the selection granularity:
+        #   • "mean" — average heads per layer, then pick the LAYER. For deep
+        #     multi-layer VLMs where heads are redundant and the sink is
+        #     layer-localized (arXiv:2602.04304; "How Multimodal LLMs Solve
+        #     Image Tasks" arXiv:2508.20279).
+        #   • "select_interior" — pick the single (layer, head) by interior
+        #     concentration. For shallow DETR-style decoders (Carion et al.
+        #     2020) where heads SPECIALISE — one head grounds while others are
+        #     spatial sinks, so averaging blends the sink in.
+        border = np.zeros((gh, gw), dtype=bool)
         border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
         interior = ~border
-        interior_frac = np.array([
-            float(m[interior].sum() / s) if (s := float(m.sum())) > 1e-12 else 0.0
-            for m in per_layer
-        ])
-        best = int(np.argmax(interior_frac))
-        clean = per_layer[best]
+
+        def _interior_frac(m: np.ndarray) -> float:
+            s = float(m.sum())
+            return float(m[interior].sum() / s) if s > 1e-12 else 0.0
+
+        head_reduction = profile.get("head_reduction", "mean")
+        if head_reduction == "mean":
+            candidates = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, gh, gw)
+            def _unit(b: int) -> tuple[int, Optional[int]]:
+                return int(start + b), None
+        elif head_reduction == "select_interior":
+            candidates = (
+                raw[start:end].reshape((end - start) * H, gh, gw).astype(np.float64)
+            )
+            def _unit(b: int) -> tuple[int, Optional[int]]:
+                return int(start + b // H), int(b % H)
+        else:
+            raise ValueError(
+                f"image_weights_clean: unknown head_reduction {head_reduction!r} "
+                "in attention_profile; expected 'mean' or 'select_interior'."
+            )
+
+        fracs = np.array([_interior_frac(m) for m in candidates])
+        best = int(np.argmax(fracs))
+        clean = candidates[best]
+        sel_layer, sel_head = _unit(best)
         debug = {
-            "selected_layer":       int(start + best),
+            "selected_layer":        sel_layer,
+            "selected_head":         sel_head,   # None when heads were averaged
+            "head_reduction":        head_reduction,
             "candidate_layer_range": (int(start), int(end)),
-            "layer_range_fraction": (float(frac_start), float(frac_end)),
-            "interior_fraction":    float(interior_frac[best]),
-            "n_layers_total":       int(L),
-            "n_heads":              int(H),
-            "method":               "layer-adaptive last-token attention (arXiv:2602.04304): "
-                                    "pick the layer with max interior concentration, mean over heads",
-            "profile_source":       profile.get("literature_citation", "unspecified"),
+            "layer_range_fraction":  (float(frac_start), float(frac_end)),
+            "interior_fraction":     float(fracs[best]),
+            "n_layers_total":        int(L),
+            "n_heads":               int(H),
+            "method": (
+                "layer-adaptive last-token attention (arXiv:2602.04304): pick the "
+                "layer with max interior concentration, mean over heads"
+                if head_reduction == "mean" else
+                "head-adaptive cross-attention (DETR, Carion et al. 2020): pick the "
+                "(layer, head) with max interior concentration — heads specialise in "
+                "a shallow decoder, so the grounding head is selected rather than "
+                "averaging the spatial-sink heads in"
+            ),
+            "profile_source":        profile.get("literature_citation", "unspecified"),
         }
         return clean, debug
 

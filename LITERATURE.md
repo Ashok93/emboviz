@@ -109,6 +109,18 @@ Inputs:
   on-manifold/OOD axis; when not, the run is honest about it — every
   result's `fill_ensemble.on_manifold_fill_present` flag and `note`
   state which fills the agreement gate actually ran over.
+- **Removal-mask dilation** — a pixel-tight detection silhouette excludes
+  the object's anti-aliased boundary and any thin contact shadow. LaMa
+  reconstructs that 1–2 px rim straight back into the hole (a faint ghost
+  of the "removed" object); the OOD fills leave it at its original colour.
+  The LaMa object-removal recipe [Suvorov et al. 2022] and the erase
+  pipelines built on it (IOPaint / lama-cleaner) dilate the erase mask by
+  a small margin before inpainting for exactly this reason. We grow the
+  detected mask ONCE per camera — radius `max(2, round(0.03·min(H,W)))`,
+  resolution-independent — and feed the SAME dilated mask to every fill
+  and to the contrast gate, so the OOD↔on-manifold agreement is still
+  measured over one identical region. The applied radius is surfaced in
+  each result's `raw_numbers.mask_dilation_px`.
 - **K-sample averaging for stochastic policies** — π0 (flow-matching),
   Diffusion Policy, GR00T's flow-matching head all have non-trivial
   sample-to-sample variance. BYOVLA [Hancock et al. 2024] samples K
@@ -966,6 +978,58 @@ is normalized against two model-specific anchors:
   the dataset pool (not zeros, not last-frame). Zero state crashes
   the 6D-rotation decoder.
 
+### ACT (lerobot ACTPolicy)
+- **Output**: action chunk (default `chunk_size = 100`) from a
+  DETR-style CVAE decoder. DETERMINISTIC at inference (the CVAE latent
+  is the zero prior; the reparameterization sampling is training-only).
+- **Inputs**: per-camera images + a proprioceptive-state token. NO
+  language — `required_inputs.instruction = False`, so instruction
+  perturbations auto-skip.
+- **Capabilities**: INFERENCE + ATTENTION.
+- **Calibration**: `n_samples = 1` (deterministic).
+- **Chunk consistency**: applies (native chunk).
+- **Attention drift**: the decoder cross-attention from the first
+  action query to the encoder's image tokens (DETR-style; Carion et al.
+  2020). The image tokens are a flattened ResNet feature grid
+  (`H/stride × W/stride`, generally non-square — reported with an
+  explicit `(h, w)` grid shape). This is the action pathway's
+  attention, not a language-anchored object localizer. ACT has a SINGLE
+  decoder layer (the original's 7 are a documented no-op bug; lerobot
+  sets `n_decoder_layers = 1`) with 8 heads that **specialise** — verified
+  per-head on the reference checkpoint, grounding heads concentrate on the
+  end-effectors / contact point (interior-fraction ~0.85–1.0) while others
+  are spatial sinks on the frame border (~0.42). So the clean map selects
+  the single most interior-concentrated HEAD (`head_reduction =
+  "select_interior"`) rather than averaging heads, which would blend the
+  sink in. The image-attention fraction is ~1.0 across heads (the decoder
+  query attends to image tokens, not the proprio/latent tokens).
+- **Normalization**: lerobot has two checkpoint layouts. v0.5+ ships a
+  saved processor pipeline (`policy_preprocessor.json`); pre-v0.5 bakes the
+  normalization stats into `model.safetensors` buffers, which the current
+  policy class discards as unexpected keys. The adapter handles both: it
+  loads the saved pipeline when present, else reconstructs `dataset_stats`
+  from the baked buffers and builds the pipeline from those — and RAISES if
+  a feature that needs normalization has neither, rather than running
+  un-normalized (lerobot's normalizer skips un-statted features silently).
+
+### SmolVLA (lerobot SmolVLAPolicy)
+- **Output**: action chunk (default `chunk_size = 50`) from a
+  flow-matching action expert. STOCHASTIC — every `predict()` call
+  samples noise and denoises; `n_samples` averaging applies (same
+  treatment as π0 / GR00T).
+- **Inputs**: per-camera images + language instruction + state.
+- **Capabilities**: INFERENCE + ATTENTION.
+- **Attention drift**: the SmolVLM2 prefix self-attention — the last
+  instruction token's attention over the image patches, read from the
+  KV-cache-fill forward that precedes denoising (the same
+  visual-grounding signal as OpenVLA / π0, localization-head literature
+  arXiv:2503.06287). The action expert's suffix→prefix attention is the
+  action pathway and is not used for this map. Mid-stack fractional band
+  0.25–0.85, mean over heads, query-averaged sink removal.
+- **Normalization / tokenization**: the checkpoint's own pre/post-
+  processor pipeline tokenizes the instruction and applies the model's
+  stats; nothing is reconstructed by the adapter.
+
 ---
 
 ## 8. Master citation list (sorted by topic, then year)
@@ -1015,6 +1079,9 @@ is normalized against two model-specific anchors:
   Explanation** (arXiv:1908.04626).
 - Abnar, S. & Zuidema, W. 2020. **Quantifying Attention Flow in
   Transformers** (arXiv:2005.00928).
+- Carion, N. et al. 2020. **DETR — End-to-End Object Detection with
+  Transformers**, ECCV (arXiv:2005.12872). Decoder-query cross-attention
+  visualization — the basis for the ACT attention map.
 
 ### Detection / segmentation for phrase grounding
 - Liu, S. et al. 2024. **GroundingDINO**, ECCV (arXiv:2303.05499).
@@ -1040,6 +1107,8 @@ is normalized against two model-specific anchors:
   Improvements in BC** (arXiv:2507.09061).
 
 ### VLA-specific interpretability & robustness
+- Shukor, M. et al. 2025. **SmolVLA — A Vision-Language-Action Model for
+  Affordable and Efficient Robotics** (arXiv:2506.01844).
 - Hancock, A. et al. 2024. **BYOVLA** (arXiv:2410.01971).
 - "Mechanistic Interpretability for Steering VLA Models"
   (arXiv:2509.00328).

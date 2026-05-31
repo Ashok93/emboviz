@@ -17,7 +17,7 @@ flowchart TB
     core["emboviz core<br/>(runs the diagnostics, writes the report)"]
 
     subgraph workers["plug-in workers — each in its own venv"]
-        models["model adapters<br/>OpenVLA · OFT · π0 · GR00T"]
+        models["model adapters<br/>OpenVLA · OFT · π0 · GR00T · ACT · SmolVLA"]
         readers["dataset readers<br/>LeRobot · GR00T format"]
     end
 
@@ -130,6 +130,7 @@ emboviz/                 emboviz core — the lean engine (no torch, no lerobot)
 adapters/                plug-in workers — one venv each
   emboviz-wire     shared interfaces + types + wire plumbing
   emboviz-openvla · emboviz-oft · emboviz-pi0 · emboviz-gr00t   model workers
+  emboviz-act · emboviz-smolvla   lerobot-policy model workers
   emboviz-sam3     text→mask detector worker
   emboviz-lama     LaMa inpainting fill worker (on-manifold memorization fill)
   emboviz-lerobot · emboviz-reader-gr00t   dataset readers

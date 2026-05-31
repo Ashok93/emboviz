@@ -46,6 +46,14 @@ sudo apt install ffmpeg     # Linux
 brew install ffmpeg         # macOS
 ```
 
+The `act` and `smolvla` adapters build LeRobot, which compiles a C-extension
+dependency (`evdev`, via `pynput`). On Linux that needs the Python development
+headers and a compiler:
+
+```bash
+sudo apt install python3-dev build-essential   # Linux only
+```
+
 ### Core + dataset reader
 
 The core package has no model or dataset dependencies. Install it together with
@@ -75,6 +83,8 @@ uv pip install emboviz-openvla         # OpenVLA-7B
 uv pip install emboviz-oft             # OpenVLA-OFT
 uv pip install emboviz-pi0             # π0 / π0.5
 uv pip install emboviz-gr00t           # GR00T-N1 / N1.7
+uv pip install emboviz-act             # ACT (Action Chunking Transformer)
+uv pip install emboviz-smolvla         # SmolVLA
 uv pip install emboviz-sam3            # SAM 3 detector (for the memorization mask)
 uv pip install emboviz-lama            # LaMa inpainting (on-manifold memorization fill, optional)
 ```
@@ -96,6 +106,8 @@ These environments are created automatically on first use.
 | **OpenVLA-OFT** | ✅ | ✅ | Multi-stream (primary + wrist). |
 | **π0 / π0.5** | ✅ | ✅ | Attention needs `emboviz convert-pi0`. |
 | **GR00T-N1 / N1.7** | ✅ | ⚠️ | Attention is the DiT motor pathway — dispersed, not a tight object localizer (see below). |
+| **ACT** | ✅ | ✅ | lerobot ACTPolicy. Vision + state, no language. Attention is the DETR decoder cross-attention (action pathway). |
+| **SmolVLA** | ✅ | ✅ | lerobot SmolVLAPolicy. Vision + language + state; stochastic (flow-matching). Attention from the SmolVLM2 prefix (instruction → image). |
 
 > **GR00T attention — read with care.** OpenVLA, OFT and π0 are single-stack:
 > the action is produced *through* the VLM's attention, so "where the last token
@@ -217,6 +229,7 @@ The models accessible through the shipped adapters are:
 | `openvla`, `oft` | [OpenVLA](https://github.com/openvla/openvla) | MIT (code and checkpoints); weights inherit the Llama 2 Community License from the base model |
 | `pi0` | [Physical Intelligence openpi](https://github.com/Physical-Intelligence/openpi) | Apache 2.0 |
 | `gr00t` | [NVIDIA Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T) | Code Apache 2.0; model weights under the NVIDIA License |
+| `act`, `smolvla` | [LeRobot](https://github.com/huggingface/lerobot) | Code Apache 2.0; checkpoint weights carry the license of the specific model you load |
 | `sam3` | [Meta Segment Anything 3](https://huggingface.co/facebook/sam3) | SAM License — source-available, permits commercial use with restrictions; not OSI open-source. The `--detector gd-sam` alternative uses GroundingDINO and SAM 2, both Apache 2.0 |
 | `lama` | [LaMa / big-lama](https://github.com/advimman/lama) | Apache 2.0 (code and checkpoints). The default TorchScript export is fetched from [`okaris/big-lama`](https://huggingface.co/okaris/big-lama), pinned to a commit |
 

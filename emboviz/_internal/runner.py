@@ -723,7 +723,7 @@ def run_story(args) -> None:
             }
 
     if cached_detector is not None and "vision.memorization" in per_axis:
-        from emboviz.diagnostics.memorization import apply_fill
+        from emboviz.diagnostics.memorization import apply_fill, _dilate_mask
         from emboviz.perturb.image._image_utils import to_array
         # Re-use the fill modes the memorization diagnostic actually
         # ran (read from raw) so the overlay matches the analysed image.
@@ -740,6 +740,14 @@ def run_story(args) -> None:
             fill_modes_list = list((raw.get("per_fill") or {}).keys()) or list(
                 memo_fills
             )
+            # Rerun shows the on-manifold removal only (original vs LaMa
+            # inpaint). The OOD fills still drive the VERDICT, but the
+            # overlay renders just LaMa — the clean "object removed" image.
+            display_fills = (
+                [LAMA_INPAINT_FILL] if LAMA_INPAINT_FILL in fill_modes_list
+                else fill_modes_list
+            )
+            dilation_px = raw.get("mask_dilation_px") or {}
             cam_masks: dict[str, np.ndarray] = {}
             cam_detection: dict[str, dict] = {}
             cam_masked_per_fill: dict[str, dict[str, np.ndarray]] = {}
@@ -747,7 +755,12 @@ def run_story(args) -> None:
                 det = cached_detector.lookup(scene.scene_id, cam)
                 if det is None or det.mask is None:
                     continue
-                cam_masks[cam] = det.mask
+                # Same dilated removal mask the diagnostic used (radius read
+                # from its raw output). The LaMa cache hit ignores the mask
+                # arg, but passing it keeps a cache MISS correct too, and the
+                # shown mask overlay matches the region actually removed.
+                removal_mask = _dilate_mask(det.mask, int(dilation_px.get(cam, 0)))
+                cam_masks[cam] = removal_mask
                 cam_detection[cam] = {
                     "label":      det.label,
                     "bbox":       list(det.bbox),
@@ -759,11 +772,11 @@ def run_story(args) -> None:
                 arr = to_array(scene.observations.images[cam].data)
                 cam_masked_per_fill[cam] = {
                     fm: apply_fill(
-                        arr, det.mask, fm,
+                        arr, removal_mask, fm,
                         inpainter=cached_inpainter,
                         cache_key=(scene.scene_id, cam),
                     )
-                    for fm in fill_modes_list
+                    for fm in display_fills
                 }
             if cam_masks:
                 target_mask_per_frame[trajectory.frame_indices[i]] = cam_masks
