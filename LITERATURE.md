@@ -98,13 +98,17 @@ Inputs:
   Inpaint-Anything) stays on the data manifold but is *less aggressive*,
   while channel-mean is more aggressive but OOD. Reporting BOTH and
   requiring agreement neutralizes both failure modes.
-  *Shipped-status caveat (2-of-3 fills):* the implemented ensemble is
-  channel-mean + Gaussian-blur only. The on-manifold `lama_inpaint`
-  fill — the literature-prescribed THIRD, less-aggressive fill — is
-  NOT yet implemented, so the agreement gate currently runs over two
-  OOD-leaning fills rather than spanning the on-manifold/OOD axis.
-  This is surfaced (not hidden) in `memorization.py`'s
-  `literature_fills` metadata.
+  *Shipped status (3 fills available):* the default ensemble is
+  channel-mean + Gaussian-blur (both OOD-leaning, pure-numpy, no worker).
+  The on-manifold `lama_inpaint` fill — the literature-prescribed THIRD,
+  less-aggressive fill — is implemented via LaMa [Suvorov et al. 2022]
+  and enabled per-run by adding `lama_inpaint` to `analysis.fills` (it
+  runs in the isolated `emboviz-lama` ZMQ worker; deterministic and
+  feed-forward, so the fill is reproducible and does not hallucinate new
+  content into the hole). When enabled, the agreement gate spans the
+  on-manifold/OOD axis; when not, the run is honest about it — every
+  result's `fill_ensemble.on_manifold_fill_present` flag and `note`
+  state which fills the agreement gate actually ran over.
 - **K-sample averaging for stochastic policies** — π0 (flow-matching),
   Diffusion Policy, GR00T's flow-matching head all have non-trivial
   sample-to-sample variance. BYOVLA [Hancock et al. 2024] samples K
@@ -155,6 +159,9 @@ Inputs:
 - Xiao et al. **Florence-2**, CVPR 2024
 - Ravi et al. **SAM 2**, 2024; Meta **SAM 3 / Segment Anything with
   Concepts**, 2025
+- Suvorov et al. **LaMa — Resolution-robust Large Mask Inpainting with
+  Fourier Convolutions**, WACV 2022 (arXiv:2109.07161) — the on-manifold
+  `lama_inpaint` fill (Apache-2.0)
 - Hancock et al. **BYOVLA — Run-time Observation Interventions Make
   VLAs More Visually Robust**, 2024 (arXiv:2410.01971)
 - Geng et al. **LIBERO-PRO**, 2025 (arXiv:2510.03827)
@@ -994,6 +1001,8 @@ is normalized against two model-specific anchors:
 - Sturmfels, P., Lundberg, S. & Lee, S.-I. 2020. **Visualizing the
   Impact of Feature Attribution Baselines**, Distill.
 - Rong, Y. et al. 2022. **ROAD** (arXiv:2202.00449).
+- Suvorov, R. et al. 2022. **LaMa — Resolution-robust Large Mask
+  Inpainting with Fourier Convolutions**, WACV (arXiv:2109.07161).
 - Hurley, N. & Rickard, S. 2009. **Comparing Measures of Sparsity**,
   IEEE TIT.
 - Cooper et al. 2022. **Metrics for saliency map evaluation**

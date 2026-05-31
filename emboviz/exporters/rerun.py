@@ -1046,6 +1046,9 @@ def _memorization_tab(
                 contents=[
                     "+ $origin/masked_channel_mean",
                     "+ $origin/masked_gaussian_blur",
+                    # on-manifold fill; only present when the run enabled
+                    # the lama_inpaint fill (ignored by rerun if absent).
+                    "+ $origin/masked_lama_inpaint",
                 ],
                 name=f"{cam} — what the model saw (masked)",
             ))

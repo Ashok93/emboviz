@@ -68,7 +68,12 @@ from emboviz.core.results import Severity
 from emboviz.core.types import ActionResult, TokenSelector
 from emboviz.diagnostics.attention_drift import AttentionDriftDiagnostic
 from emboviz.diagnostics.chunk_consistency import ChunkConsistencyDiagnostic
-from emboviz.diagnostics.memorization import MemorizationDiagnostic
+from emboviz.diagnostics.memorization import (
+    DEFAULT_FILL_MODES,
+    KNOWN_FILL_MODES,
+    LAMA_INPAINT_FILL,
+    MemorizationDiagnostic,
+)
 from emboviz.diagnostics.modality_dropout import ModalityDropoutDiagnostic
 from emboviz.diagnostics.sensitivity_map import SensitivityMapDiagnostic
 from emboviz.diagnostics.trajectory import TrajectoryDiagnostic
@@ -82,6 +87,7 @@ from emboviz.perturb._target_detection import (
     TargetDetector,
     load_annotation_connector,
 )
+from emboviz.perturb.image._inpaint import CachingInpainter, LamaInpainter
 from emboviz.perturb.instruction import PromptParaphrasePerturber
 
 
@@ -219,6 +225,50 @@ def _build_target_detector(args) -> tuple[Optional[CachingTargetDetector], Optio
     return CachingTargetDetector(base), None
 
 
+def _resolve_fills(args) -> list[str]:
+    """Normalise ``args.fills`` (a list, or a comma string from the CLI)
+    into a deduped, lowercased, validated fill-mode list.
+
+    Defaults to the two pure fills (``channel_mean``, ``gaussian_blur``)
+    when unset. ``lama_inpaint`` is accepted but pulls in the emboviz-lama
+    worker (wired by :func:`_build_inpainter`)."""
+    raw = getattr(args, "fills", None)
+    if raw is None:
+        return list(DEFAULT_FILL_MODES)
+    if isinstance(raw, str):
+        raw = [tok for tok in raw.split(",")]
+    fills: list[str] = []
+    for tok in raw:
+        f = str(tok).strip().lower()
+        if not f or f in fills:
+            continue
+        if f not in KNOWN_FILL_MODES:
+            raise ValueError(
+                f"unknown fill mode {f!r} in analysis.fills; supported: "
+                f"{sorted(KNOWN_FILL_MODES)}."
+            )
+        fills.append(f)
+    return fills or list(DEFAULT_FILL_MODES)
+
+
+def _build_inpainter(fills: list[str]) -> Optional[CachingInpainter]:
+    """Build the (cached) LaMa inpainter iff the on-manifold fill is
+    requested, bringing up the ``emboviz-lama`` worker the SAME way the
+    runner brings up SAM 3 (connect → auto-install the runtime venv if
+    missing → auto-spawn → wait for ping). Returns ``None`` when
+    ``lama_inpaint`` isn't in the fills (the pure fills need no worker)."""
+    if LAMA_INPAINT_FILL not in fills:
+        return None
+    from emboviz.adapters import connect
+    connect("lama", auto_spawn=True, auto_install=True)
+    print(
+        f"      memorization on-manifold fill = LaMa inpainting "
+        f"(fills={fills})",
+        flush=True,
+    )
+    return CachingInpainter(LamaInpainter())
+
+
 def _maybe_collect(i: int) -> None:
     """Periodic GC + CUDA cache release.
 
@@ -261,13 +311,17 @@ def _estimate_cost(args, model, trajectory) -> dict:
     )
     # Per frame, distinct model forward passes (NOT counting calibration):
     #   1 shared baseline (averaged over n_samples)
-    #   memorization: N_FILLS = 2 perturbed predictions (only if target given)
+    #   memorization: N_FILLS perturbed predictions (only if target given);
+    #                 N_FILLS = len(analysis.fills) (the LaMa inpaint that
+    #                 builds a fill is a separate cheap worker call, not a
+    #                 VLA forward, so it isn't counted here)
     #   modality_dropout: (n_mods_non_image + n_cam) * k_md perturbed preds
     #   sensitivity:     n_cam * grid² perturbed preds
     #   chunk_consistency: shares baseline → 0 extra
     #   attention_drift:  1 extract_attention call (shared with overlay)
+    n_fills = len(_resolve_fills(args))
     per_frame_baseline = n_s
-    per_frame_memo = 2 * n_s if has_target else 0
+    per_frame_memo = n_fills * n_s if has_target else 0
     per_frame_modality = (n_mods_non_image + n_cam) * k_md * n_s
     per_frame_sensitivity = n_cam * grid * grid * n_s
     per_frame_attention = 1
@@ -382,6 +436,16 @@ def run_story(args) -> None:
     if memorization_skip_reason is not None:
         not_applicable["vision.memorization"] = memorization_skip_reason
         print(f"      memorization SKIPPED — {memorization_skip_reason}", flush=True)
+
+    # Memorization fill ensemble. lama_inpaint (the on-manifold fill) needs
+    # the emboviz-lama worker; only bring it up when memorization will
+    # actually run (a target is present) AND it was requested.
+    memo_fills = _resolve_fills(args)
+    cached_inpainter = (
+        _build_inpainter(memo_fills)
+        if cached_detector is not None and "vision.memorization" in enabled
+        else None
+    )
 
     # --- 4. Per-frame SHARED baseline + attention pre-extraction ---------
     # We pre-compute, once per frame:
@@ -519,6 +583,7 @@ def run_story(args) -> None:
         memo = TrajectoryDiagnostic(
             MemorizationDiagnostic(
                 target_detector=cached_detector, calibration=calibration,
+                fill_modes=memo_fills, inpainter=cached_inpainter,
             ),
             progress=True,
         )
@@ -632,8 +697,9 @@ def run_story(args) -> None:
     #   • attention_per_frame_clean — from step 4.
     #   • cached_detector — holds every per-(scene,camera) detection
     #     populated during memorization. We reconstruct the masked image
-    #     here via the same _apply_fill helper the diagnostic used — pure
-    #     CPU, no model forward.
+    #     here via the same apply_fill() the diagnostic used — pure CPU for
+    #     channel_mean / gaussian_blur; a cache hit on cached_inpainter for
+    #     lama_inpaint (no second LaMa forward).
     print("[8/8] collect per-camera Rerun overlays from caches ...", flush=True)
     attention_per_frame_out: dict[int, dict[str, np.ndarray]] = {}
     sensitivity_per_frame: dict[int, dict[str, np.ndarray]] = {}
@@ -657,10 +723,13 @@ def run_story(args) -> None:
             }
 
     if cached_detector is not None and "vision.memorization" in per_axis:
-        from emboviz.diagnostics.memorization import _apply_fill
+        from emboviz.diagnostics.memorization import apply_fill
         from emboviz.perturb.image._image_utils import to_array
         # Re-use the fill modes the memorization diagnostic actually
         # ran (read from raw) so the overlay matches the analysed image.
+        # The on-manifold fill is reconstructed via the SAME cached
+        # inpainter the diagnostic used, so each (frame, camera) is a
+        # cache hit — no second LaMa forward pass.
         memo_results = per_axis["vision.memorization"].per_frame
         for i, r in enumerate(memo_results):
             raw = r.raw or {}
@@ -668,9 +737,9 @@ def run_story(args) -> None:
             if not detected:
                 continue
             scene = trajectory.frames[i]
-            fill_modes_list = list((raw.get("per_fill") or {}).keys()) or [
-                "channel_mean", "gaussian_blur",
-            ]
+            fill_modes_list = list((raw.get("per_fill") or {}).keys()) or list(
+                memo_fills
+            )
             cam_masks: dict[str, np.ndarray] = {}
             cam_detection: dict[str, dict] = {}
             cam_masked_per_fill: dict[str, dict[str, np.ndarray]] = {}
@@ -689,7 +758,12 @@ def run_story(args) -> None:
                 }
                 arr = to_array(scene.observations.images[cam].data)
                 cam_masked_per_fill[cam] = {
-                    fm: _apply_fill(arr, det.mask, fm) for fm in fill_modes_list
+                    fm: apply_fill(
+                        arr, det.mask, fm,
+                        inpainter=cached_inpainter,
+                        cache_key=(scene.scene_id, cam),
+                    )
+                    for fm in fill_modes_list
                 }
             if cam_masks:
                 target_mask_per_frame[trajectory.frame_indices[i]] = cam_masks
@@ -872,6 +946,8 @@ def run_story(args) -> None:
     # Final cleanup so a multi-episode loop doesn't carry tensors over.
     if cached_detector is not None:
         cached_detector.clear()
+    if cached_inpainter is not None:
+        cached_inpainter.clear()
     gc.collect()
     try:
         import torch
@@ -950,6 +1026,14 @@ def main():
              "prompting). 'gd-sam' is the legacy GroundingDINO + SAM combo "
              "kept as a maintained fallback. Ignored when "
              "--target-annotations is set.",
+    )
+    p.add_argument(
+        "--fills", default=None,
+        help="Comma-separated memorization mask-fill ensemble. Default "
+             "'channel_mean,gaussian_blur' (both OOD-leaning, no worker). "
+             "Add 'lama_inpaint' for the on-manifold fill (needs the "
+             "emboviz-lama worker) so the agreement gate spans the "
+             "OOD/on-manifold axis.",
     )
     p.add_argument(
         "--show-imitation", action="store_true",

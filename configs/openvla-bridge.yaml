@@ -44,6 +44,8 @@ analysis:
   frame_stride: 1
   mask_query: "the spoon"                # ep0 instruction: "put small spoon from basket to tray"
   detector: sam3                         # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]   # memorization mask fills; add lama_inpaint for the
+                                         # on-manifold fill (needs emboviz-lama; runner auto-starts it)
   diagnostics: all                       # or a list: [memorization, modality, sensitivity, chunk, attention]
 
 output: ./report/openvla-bridge

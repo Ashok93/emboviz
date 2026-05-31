@@ -76,6 +76,7 @@ uv pip install emboviz-oft             # OpenVLA-OFT
 uv pip install emboviz-pi0             # π0 / π0.5
 uv pip install emboviz-gr00t           # GR00T-N1 / N1.7
 uv pip install emboviz-sam3            # SAM 3 detector (for the memorization mask)
+uv pip install emboviz-lama            # LaMa inpainting (on-manifold memorization fill, optional)
 ```
 
 Adapters do not share dependencies. Each runs in its own virtual environment and
@@ -143,6 +144,7 @@ analysis:
   episodes: "537"                   # "7" / "0,3,7" / "0-5" / "all"
   mask_query: "the cloth"           # object the memorization diagnostic masks
   detector: sam3                    # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
   diagnostics: all                  # or [memorization, attention]
 
 output: ./report/my-run
@@ -216,6 +218,7 @@ The models accessible through the shipped adapters are:
 | `pi0` | [Physical Intelligence openpi](https://github.com/Physical-Intelligence/openpi) | Apache 2.0 |
 | `gr00t` | [NVIDIA Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T) | Code Apache 2.0; model weights under the NVIDIA License |
 | `sam3` | [Meta Segment Anything 3](https://huggingface.co/facebook/sam3) | SAM License — source-available, permits commercial use with restrictions; not OSI open-source. The `--detector gd-sam` alternative uses GroundingDINO and SAM 2, both Apache 2.0 |
+| `lama` | [LaMa / big-lama](https://github.com/advimman/lama) | Apache 2.0 (code and checkpoints). The default TorchScript export is fetched from [`okaris/big-lama`](https://huggingface.co/okaris/big-lama), pinned to a commit |
 
 Datasets read through the LeRobot and GR00T-format readers (e.g. Open
 X-Embodiment, LIBERO, DROID, BridgeData) each carry their own license and terms;

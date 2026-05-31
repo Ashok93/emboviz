@@ -42,6 +42,28 @@ optional TFDS `data_dir` / `split` under `dataset.extra`, and use
 (Rerun `.rrd` and MCAP/rosbag2 are *recording / debugging-viz* formats, not
 dataset inputs — they are intentionally not accepted here.)
 
+## Memorization mask-fill ensemble (`analysis.fills`)
+
+The memorization diagnostic masks the target and checks whether the action
+still moves. To avoid measuring the model's reaction to the *masking
+artifact* instead of the *absence of the object*, it masks with an
+**ensemble of fills** and requires agreement across them:
+
+```yaml
+analysis:
+  fills: [channel_mean, gaussian_blur]      # default (no extra worker)
+  # fills: [channel_mean, gaussian_blur, lama_inpaint]   # full ensemble
+```
+
+- `channel_mean`, `gaussian_blur` — pure-numpy, both OOD-leaning. Default.
+- `lama_inpaint` — the **on-manifold** fill (plausible background via LaMa).
+  Adding it makes the agreement gate span the on-manifold/OOD axis the
+  literature prescribes (`LITERATURE.md` §1). It runs in the isolated
+  `emboviz-lama` worker (install once: `uv pip install emboviz-lama` then
+  `emboviz install-lama`); the analyze runner auto-starts it. Without it,
+  every memorization result honestly flags
+  `fill_ensemble.on_manifold_fill_present = false`.
+
 ## Fields the format can never encode (you always provide them)
 
 - `dataset.state.convention` — joint-angles vs ee-pose. We refuse to guess
