@@ -119,13 +119,7 @@ class LeRobotEpisodeSource(EpisodeSource):
         so lerobot skips its hub lookup.
         """
         indices = sorted(set(int(i) for i in episode_indices))
-        cache_key = tuple(indices)
-        dataset = self._dataset_cache.get(cache_key)
-        if dataset is None:
-            dataset = self._open(indices)
-            self._dataset_cache[cache_key] = dataset
-            if len(self._dataset_cache) > self._dataset_cache_max:
-                self._dataset_cache.pop(next(iter(self._dataset_cache)))
+        dataset = self._open_cached(indices)
 
         out: dict[int, list[Scene]] = {i: [] for i in indices}
         for i in range(dataset.num_frames):
@@ -137,6 +131,62 @@ class LeRobotEpisodeSource(EpisodeSource):
             scene = self._build_scene(sample, instruction, ep_i, len(out[ep_i]), dataset.fps)
             out[ep_i].append(scene)
         return out
+
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        """Per-episode frame counts read from the parquet ``episode_index``
+        column — no video frame is decoded."""
+        indices = sorted(set(int(i) for i in episode_indices))
+        dataset = self._open_cached(indices)
+        counts: dict[int, int] = {}
+        for e in dataset.hf_dataset["episode_index"]:
+            counts[int(e)] = counts.get(int(e), 0) + 1
+        return {int(i): counts.get(int(i), 0) for i in episode_indices}
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, Scene]:
+        """Decode ONLY the requested ``{episode_idx: frame_offset}`` frames.
+
+        Each (episode, offset) is located in the batched dataset via the
+        parquet ``episode_index`` / ``frame_index`` columns (no decode), then
+        that single global index is decoded. The whole episode is never
+        materialized — one frame per episode, which is what the modality pool
+        needs. An offset with no matching frame is omitted.
+        """
+        indices = sorted(set(int(e) for e in episode_offsets))
+        dataset = self._open_cached(indices)
+        want = {(int(e), int(o)) for e, o in episode_offsets.items()}
+        hf = dataset.hf_dataset
+        eps, fis = hf["episode_index"], hf["frame_index"]
+        global_index: dict[tuple[int, int], int] = {}
+        for g, (e, f) in enumerate(zip(eps, fis)):
+            key = (int(e), int(f))
+            if key in want:
+                global_index[key] = g
+        fps = float(dataset.fps)
+        out: dict[int, Scene] = {}
+        for ep_idx, offset in episode_offsets.items():
+            g = global_index.get((int(ep_idx), int(offset)))
+            if g is None:
+                continue
+            sample = dataset[g]
+            instruction = self._resolve_instruction(sample)
+            out[int(ep_idx)] = self._build_scene(
+                sample, instruction, int(ep_idx), int(offset), fps,
+            )
+        return out
+
+    def _open_cached(self, indices: list[int]):
+        """Open and memoize a ``LeRobotDataset`` for ``indices``. One handle
+        per unique episode set — repeated opens are a cache hit, keeping the
+        hub tree-listing / etag cost to one call per set (avoids 429s)."""
+        indices = sorted(set(int(i) for i in indices))
+        cache_key = tuple(indices)
+        dataset = self._dataset_cache.get(cache_key)
+        if dataset is None:
+            dataset = self._open(indices)
+            self._dataset_cache[cache_key] = dataset
+            if len(self._dataset_cache) > self._dataset_cache_max:
+                self._dataset_cache.pop(next(iter(self._dataset_cache)))
+        return dataset
 
     def load_trajectory(self, episode_idx: int) -> Trajectory:
         scenes = self.load_episode(str(episode_idx))

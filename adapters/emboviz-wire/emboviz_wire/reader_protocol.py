@@ -61,6 +61,31 @@ class EpisodeSource(ABC):
         """
         return {int(i): self.load_episode(str(int(i))) for i in episode_indices}
 
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        """Frame count for each episode, keyed by index.
+
+        Default materializes each episode via :meth:`load_episode`; readers
+        whose metadata records episode lengths override this to answer
+        without decoding any frame.
+        """
+        return {int(i): len(self.load_episode(str(int(i)))) for i in episode_indices}
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, "Scene"]:
+        """Materialize one frame per episode — ``{episode_idx: frame_offset}``
+        → ``{episode_idx: Scene}``.
+
+        Default loads each episode and indexes the requested offset; readers
+        with random per-frame access override this to decode ONLY the
+        requested frames (the modality pool needs one frame per episode, not
+        the whole episode). An out-of-range offset is omitted from the result.
+        """
+        out: dict[int, "Scene"] = {}
+        for ep_idx, offset in episode_offsets.items():
+            scenes = self.load_episode(str(int(ep_idx)))
+            if 0 <= int(offset) < len(scenes):
+                out[int(ep_idx)] = scenes[int(offset)]
+        return out
+
     def load_trajectory(self, episode_idx: int) -> Trajectory:
         """Load one episode as a typed :class:`Trajectory`.
 
