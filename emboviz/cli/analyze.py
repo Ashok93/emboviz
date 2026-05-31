@@ -269,6 +269,7 @@ def analyze_cmd(config_ref: str, dry_run: bool) -> None:
             target_text=cfg.analysis.mask_query,
             target_annotations=cfg.analysis.target_annotations or "",
             detector=cfg.analysis.detector,
+            fills=cfg.analysis.fills,
             enabled_diagnostics=enabled_diagnostics,
             show_imitation=cfg.analysis.show_imitation,
             dry_run=dry_run,

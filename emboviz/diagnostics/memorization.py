@@ -69,6 +69,7 @@ from emboviz.perturb._target_detection import (
     TargetDetector,
 )
 from emboviz.perturb.image._image_utils import to_array, to_pil
+from emboviz.perturb.image._inpaint import Inpainter
 
 
 # Minimum normalized contrast (in [0,1]) between fill colour and the
@@ -77,6 +78,28 @@ from emboviz.perturb.image._image_utils import to_array, to_pil
 # Δaction is uninterpretable. Default 0.05 (≈5% of pixel range) is a
 # conservative threshold — for a 256-grey image, 13 steps of difference.
 DEFAULT_MIN_MASK_CONTRAST = 0.05
+
+
+# ── Fill modes (LITERATURE.md §1) ─────────────────────────────────────
+#
+# The mask-fill ensemble. Single-fill baselines suffer "baseline
+# blindness" and create OOD inputs that bias the verdict (Sturmfels et al.
+# 2020; ROAR/ROAD). We require AGREEMENT across fills spanning the
+# OOD/on-manifold axis before calling memorization.
+CHANNEL_MEAN_FILL = "channel_mean"     # aggressive, OOD (Zeiler-Fergus 2014)
+GAUSSIAN_BLUR_FILL = "gaussian_blur"   # OOD-leaning, on-image colour
+LAMA_INPAINT_FILL = "lama_inpaint"     # on-manifold (LaMa, Suvorov et al. 2022)
+
+# The two pure-numpy fills, shippable with core (no worker). Default
+# ensemble: lama_inpaint is opt-in because it needs the emboviz-lama
+# worker (torch). Adding it lifts the "2-of-3" honesty caveat below.
+DEFAULT_FILL_MODES = [CHANNEL_MEAN_FILL, GAUSSIAN_BLUR_FILL]
+# The full ensemble the literature prescribes (OOD ∪ on-manifold).
+LITERATURE_FILL_MODES = [CHANNEL_MEAN_FILL, GAUSSIAN_BLUR_FILL, LAMA_INPAINT_FILL]
+# Fills that keep the filled hole on the data manifold (plausible
+# background rather than an alien colour / blur).
+ON_MANIFOLD_FILLS = frozenset({LAMA_INPAINT_FILL})
+KNOWN_FILL_MODES = frozenset(LITERATURE_FILL_MODES)
 
 
 def _apply_fill(arr: np.ndarray, mask: np.ndarray, fill_mode: str) -> np.ndarray:
@@ -126,10 +149,53 @@ def _apply_fill(arr: np.ndarray, mask: np.ndarray, fill_mode: str) -> np.ndarray
         ], axis=-1).astype(np.uint8)
         out[mask] = blurred[mask]
         return out
+    if fill_mode == LAMA_INPAINT_FILL:
+        # lama_inpaint is model-backed (the emboviz-lama worker), not a
+        # pure function of (arr, mask). It must be routed through
+        # ``apply_fill`` with an inpainter; reaching the pure helper means
+        # a caller bypassed that dispatch.
+        raise ValueError(
+            "fill_mode 'lama_inpaint' is model-backed and cannot be applied "
+            "by the pure _apply_fill helper. Route it through apply_fill() "
+            "with an inpainter."
+        )
     raise ValueError(
-        f"Unknown fill_mode={fill_mode!r}. Supported: 'channel_mean', "
-        "'gaussian_blur'."
+        f"Unknown fill_mode={fill_mode!r}. Supported: {sorted(KNOWN_FILL_MODES)}."
     )
+
+
+def apply_fill(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    fill_mode: str,
+    *,
+    inpainter: Optional[Inpainter] = None,
+    cache_key: Optional[tuple] = None,
+) -> np.ndarray:
+    """Apply any fill mode, dispatching the model-backed one to ``inpainter``.
+
+    The single fill entry-point shared by the diagnostic and the runner's
+    Rerun-overlay reconstruction, so both produce byte-identical masked
+    images. Pure fills (``channel_mean``, ``gaussian_blur``) are handled
+    by :func:`_apply_fill`; ``lama_inpaint`` is delegated to ``inpainter``
+    (the LaMa worker), keyed by ``cache_key`` so the two call sites share
+    one forward pass per (frame, camera).
+
+    Raises if ``lama_inpaint`` is requested without an ``inpainter`` — no
+    silent fallback to a pure fill (that would mislabel which fills the
+    agreement gate ran over).
+    """
+    if fill_mode == LAMA_INPAINT_FILL:
+        if inpainter is None:
+            raise ValueError(
+                "fill mode 'lama_inpaint' requires the LaMa inpainter "
+                "worker, but no inpainter was provided. Install + start it "
+                "(uv pip install emboviz-lama; emboviz install-lama) and "
+                "request it via analysis.fills, or drop 'lama_inpaint' from "
+                "analysis.fills."
+            )
+        return inpainter.inpaint(arr, mask, key=cache_key)
+    return _apply_fill(arr, mask, fill_mode)
 
 
 def _mask_contrast(
@@ -202,6 +268,7 @@ class MemorizationDiagnostic(Diagnostic):
         grounded_threshold: float = 0.30,
         cameras: Optional[list[str]] = None,
         calibration: Optional["ModelCalibration"] = None,
+        inpainter: Optional[Inpainter] = None,
     ):
         if bbox is not None:
             self.detector: TargetDetector = BBoxDetector(bbox)
@@ -222,7 +289,24 @@ class MemorizationDiagnostic(Diagnostic):
                 "CocoAnnotationConnector / CallableConnector). The "
                 "diagnostic refuses to guess what to mask."
             )
-        self.fill_modes = list(fill_modes) if fill_modes else ["channel_mean", "gaussian_blur"]
+        self.fill_modes = list(fill_modes) if fill_modes else list(DEFAULT_FILL_MODES)
+        unknown = [f for f in self.fill_modes if f not in KNOWN_FILL_MODES]
+        if unknown:
+            raise ValueError(
+                f"unknown fill mode(s) {unknown}; supported: "
+                f"{sorted(KNOWN_FILL_MODES)}."
+            )
+        if LAMA_INPAINT_FILL in self.fill_modes and inpainter is None:
+            # No silent fallback to the pure fills: a CRITICAL verdict's
+            # honesty metadata names which fills the agreement gate ran
+            # over, so we must not quietly drop the on-manifold fill.
+            raise ValueError(
+                "fill_modes includes 'lama_inpaint' but no ``inpainter`` was "
+                "given. The on-manifold fill needs the emboviz-lama worker. "
+                "Pass inpainter=LamaInpainter() (the runner wires this up "
+                "automatically), or remove 'lama_inpaint' from the fills."
+            )
+        self.inpainter = inpainter
         self.min_mask_contrast = float(min_mask_contrast)
         self.noise_floor_score = noise_floor_score
         self.grounded_threshold = grounded_threshold
@@ -319,7 +403,11 @@ class MemorizationDiagnostic(Diagnostic):
             for cam in detected_cams:
                 arr = per_cam_original[cam]
                 mask = per_cam_detection[cam].mask
-                masked = _apply_fill(arr, mask, fill_mode)
+                masked = apply_fill(
+                    arr, mask, fill_mode,
+                    inpainter=self.inpainter,
+                    cache_key=(scene.scene_id, cam),
+                )
                 masked_arrays[cam] = masked
                 contrasts[cam] = _mask_contrast(arr, masked, mask)
             mean_contrast = float(np.mean(list(contrasts.values())))
@@ -375,6 +463,13 @@ class MemorizationDiagnostic(Diagnostic):
         max_delta = float(max(deltas))
         mean_delta = float(np.mean(deltas))
 
+        # Did the ensemble include the on-manifold fill? Drives the
+        # honesty caveat below — a CRITICAL verdict means something
+        # stronger when the agreement spans the OOD/on-manifold axis.
+        _on_manifold_present = any(
+            f in ON_MANIFOLD_FILLS for f in per_fill_results
+        )
+
         # The principle (LITERATURE.md §1 step 6):
         #   MEMORIZATION_SIGNATURE iff max(δ) < threshold  (all fills agree → small)
         #   VISUALLY_GROUNDED iff min(δ) > threshold        (all fills agree → large)
@@ -420,14 +515,23 @@ class MemorizationDiagnostic(Diagnostic):
             "fills":                  list(per_fill_results),
             "fill_ensemble": {
                 "fills_used":       list(per_fill_results),
-                "literature_fills": ["channel_mean", "gaussian_blur", "lama_inpaint"],
+                "literature_fills": list(LITERATURE_FILL_MODES),
+                "on_manifold_fill_present": _on_manifold_present,
                 "note": (
+                    "Full literature ensemble: the agreement gate spans both "
+                    "the OOD-leaning fills (channel_mean, gaussian_blur) and "
+                    "the on-manifold lama_inpaint fill, so a CRITICAL "
+                    "'memorization' verdict means every fill — across the "
+                    "OOD/on-manifold axis — agrees the action barely moved."
+                    if _on_manifold_present else
                     "LITERATURE.md §1 prescribes 3 fills including the "
-                    "on-manifold lama_inpaint; lama_inpaint is NOT yet "
-                    "implemented, so the agreement gate ran over the fills in "
-                    "'fills_used' only (2 of 3 with the default ensemble). "
-                    "Read a CRITICAL 'memorization' verdict as agreement "
-                    "across non-on-manifold fills until the 3rd fill ships."
+                    "on-manifold lama_inpaint; it was NOT enabled for this "
+                    "run, so the agreement gate ran over OOD-leaning fills "
+                    "only (in 'fills_used'). Add 'lama_inpaint' to "
+                    "analysis.fills (needs the emboviz-lama worker) to span "
+                    "the on-manifold/OOD axis. Until then, read a CRITICAL "
+                    "'memorization' verdict as agreement across non-on-"
+                    "manifold fills."
                 ),
             },
             "detected_cameras":       detected_cams,

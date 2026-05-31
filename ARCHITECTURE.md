@@ -131,5 +131,6 @@ adapters/                plug-in workers — one venv each
   emboviz-wire     shared interfaces + types + wire plumbing
   emboviz-openvla · emboviz-oft · emboviz-pi0 · emboviz-gr00t   model workers
   emboviz-sam3     text→mask detector worker
+  emboviz-lama     LaMa inpainting fill worker (on-manifold memorization fill)
   emboviz-lerobot · emboviz-reader-gr00t   dataset readers
 ```

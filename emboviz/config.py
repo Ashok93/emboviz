@@ -37,6 +37,11 @@ _STATE_CONVENTIONS = {
 _GRIPPER_KINDS = {"parallel_jaw", "suction", "binary", "magnetic", "multi_finger"}
 _GRIPPER_UNITS = {"unit", "m", "mm", "rad", "binary"}
 _DATASET_FORMATS = {"lerobot", "gr00t", "hdf5", "rlds"}
+# Memorization mask-fill ensemble (mirrors emboviz.diagnostics.memorization's
+# fill-mode names; re-declared here so the host can validate a config
+# without importing the diagnostic). 'lama_inpaint' is the on-manifold fill
+# and pulls in the emboviz-lama worker.
+_FILL_MODES = {"channel_mean", "gaussian_blur", "lama_inpaint"}
 
 
 class _Strict(BaseModel):
@@ -139,6 +144,11 @@ class AnalysisCfg(_Strict):
     mask_query: str = ""                          # memorization target phrase (single — one episode, one mask)
     target_annotations: Optional[str] = None      # per-frame bbox/mask file — replaces text detection when set
     detector: str = "sam3"                        # sam3 | gd-sam
+    # memorization mask-fill ensemble. Default = the two OOD-leaning pure
+    # fills (no worker). Add 'lama_inpaint' for the on-manifold fill (needs
+    # the emboviz-lama worker) so the agreement gate spans the on-manifold/
+    # OOD axis the literature prescribes (LITERATURE.md §1).
+    fills: list[str] = Field(default_factory=lambda: ["channel_mean", "gaussian_blur"])
     diagnostics: Union[str, list[str]] = "all"
     sensitivity_grid_side: int = 4
     modality_pool_size: int = 20
@@ -153,6 +163,22 @@ class AnalysisCfg(_Strict):
         if v not in {"sam3", "gd-sam"}:
             raise ValueError(
                 f"analysis.detector={v!r} not in {{'sam3', 'gd-sam'}}"
+            )
+        return v
+
+    @field_validator("fills")
+    @classmethod
+    def _check_fills(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError(
+                "analysis.fills must list at least one fill mode "
+                f"(from {sorted(_FILL_MODES)})."
+            )
+        bad = [f for f in v if f not in _FILL_MODES]
+        if bad:
+            raise ValueError(
+                f"analysis.fills has unknown mode(s) {bad}; "
+                f"supported: {sorted(_FILL_MODES)}."
             )
         return v
 

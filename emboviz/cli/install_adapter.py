@@ -119,6 +119,7 @@ INSTALLABLE_ADAPTERS = {
     "pi0":      "Physical Intelligence π0 / π0.5",
     "gr00t":    "NVIDIA GR00T N1.5 / N1.7",
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
+    "lama":     "LaMa big-lama inpainting (on-manifold memorization fill)",
     # Dataset readers register under the ``emboviz.readers`` group but
     # install into a runtime venv identically — same command, same flow.
     "lerobot":      "LeRobot dataset reader (isolated; reads LeRobot v3.0 datasets)",
