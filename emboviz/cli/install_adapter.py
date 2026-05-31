@@ -118,6 +118,8 @@ INSTALLABLE_ADAPTERS = {
     "oft":      "OpenVLA-OFT (LIBERO fine-tunes)",
     "pi0":      "Physical Intelligence π0 / π0.5",
     "gr00t":    "NVIDIA GR00T N1.5 / N1.7",
+    "act":      "ACT — Action Chunking Transformer (lerobot)",
+    "smolvla":  "SmolVLA (lerobot)",
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
     "lama":     "LaMa big-lama inpainting (on-manifold memorization fill)",
     # Dataset readers register under the ``emboviz.readers`` group but

@@ -1,0 +1,25 @@
+[project]
+name = "emboviz-smolvla"
+version = "0.3.0"
+description = "SmolVLA adapter for emboviz — runs lerobot's SmolVLAPolicy in its own isolated venv as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# Thin shim for the user's main venv: advertises the AdapterSpec via the
+# entry point and ships nothing heavy. The lerobot[smolvla] runtime
+# installs into the isolated venv via ``emboviz install-smolvla``.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+smolvla = "emboviz_smolvla.spec:SPEC"
+
+[project.scripts]
+emboviz-smolvla = "emboviz_smolvla.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

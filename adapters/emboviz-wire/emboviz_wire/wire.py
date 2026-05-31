@@ -424,6 +424,8 @@ def encode_attention_maps(am) -> dict:
         "image_token_ranges": {cam: [list(r) for r in ranges]
                                for cam, ranges in am.image_token_ranges.items()},
         "image_grid_sides": {cam: int(side) for cam, side in am.image_grid_sides.items()},
+        "image_grid_shapes": {cam: [int(h), int(w)]
+                              for cam, (h, w) in am.image_grid_shapes.items()},
         "layer_indices": list(am.layer_indices) if am.layer_indices is not None else None,
         "metadata": dict(am.metadata) if am.metadata else {},
     }
@@ -437,7 +439,9 @@ def decode_attention_maps(d: dict):
         n_keys=int(d["n_keys"]),
         image_token_ranges={cam: [tuple(r) for r in ranges]
                             for cam, ranges in d["image_token_ranges"].items()},
-        image_grid_sides={cam: int(side) for cam, side in d["image_grid_sides"].items()},
+        image_grid_sides={cam: int(side) for cam, side in d.get("image_grid_sides", {}).items()},
+        image_grid_shapes={cam: (int(h), int(w))
+                           for cam, (h, w) in d.get("image_grid_shapes", {}).items()},
         layer_indices=d.get("layer_indices"),
         metadata=d.get("metadata") or {},
     )

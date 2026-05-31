@@ -329,21 +329,35 @@ class AttentionMaps:
     query_position: int
     n_keys: int
     image_token_ranges: dict[str, list[tuple[int, int]]]              # camera_id → list of tile (start, end) pairs (exclusive end)
-    image_grid_sides: dict[str, int]                                  # camera_id → grid side PER TILE (tile tokens = side*side)
+    # Per-tile grid shape. Two equivalent ways to declare it; each camera
+    # in image_token_ranges must be covered by exactly one:
+    #   • image_grid_sides[cam] = side  → square grid, tile tokens = side*side
+    #   • image_grid_shapes[cam] = (h, w) → rectangular grid (e.g. a CNN
+    #     feature map on a non-square image), tile tokens = h*w
+    image_grid_sides: dict[str, int] = field(default_factory=dict)
+    image_grid_shapes: dict[str, tuple[int, int]] = field(default_factory=dict)
     layer_indices: Optional[list[int]] = None                         # which layers (None = all)
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        cams_a, cams_b = set(self.image_token_ranges), set(self.image_grid_sides)
-        if cams_a != cams_b:
+        cams = set(self.image_token_ranges)
+        covered = set(self.image_grid_sides) | set(self.image_grid_shapes)
+        if cams != covered:
             raise ValueError(
-                "AttentionMaps: image_token_ranges and image_grid_sides "
-                f"must cover the same cameras; got ranges={sorted(cams_a)} "
-                f"vs grids={sorted(cams_b)}."
+                "AttentionMaps: every camera in image_token_ranges must have "
+                "a grid in image_grid_sides or image_grid_shapes; got "
+                f"ranges={sorted(cams)} vs grids={sorted(covered)}."
             )
-        for cam in cams_a:
+        dup = set(self.image_grid_sides) & set(self.image_grid_shapes)
+        if dup:
+            raise ValueError(
+                "AttentionMaps: cameras must declare their grid in exactly "
+                f"one of image_grid_sides / image_grid_shapes; both given for "
+                f"{sorted(dup)}."
+            )
+        for cam in cams:
             ranges = self.image_token_ranges[cam]
-            side = self.image_grid_sides[cam]
+            h, w = self.grid_shape(cam)
             if not isinstance(ranges, list) or not ranges:
                 raise ValueError(
                     f"AttentionMaps camera '{cam}': image_token_ranges["
@@ -351,12 +365,20 @@ class AttentionMaps:
                     f"tile pairs; got {ranges!r}."
                 )
             for s, e in ranges:
-                if (e - s) != side * side:
+                if (e - s) != h * w:
                     raise ValueError(
                         f"AttentionMaps camera '{cam}': tile range {(s, e)} "
-                        f"yields {e - s} tokens but grid_side={side} requires "
-                        f"{side * side}. Adapter has the wrong range or grid."
+                        f"yields {e - s} tokens but grid {(h, w)} requires "
+                        f"{h * w}. Adapter has the wrong range or grid."
                     )
+
+    def grid_shape(self, camera: str) -> tuple[int, int]:
+        """Per-tile (height, width) for a camera's image grid."""
+        if camera in self.image_grid_shapes:
+            h, w = self.image_grid_shapes[camera]
+            return int(h), int(w)
+        side = int(self.image_grid_sides[camera])
+        return side, side
 
     @property
     def cameras(self) -> list[str]:
@@ -395,11 +417,11 @@ class AttentionMaps:
                 f"Available cameras: {sorted(self.image_token_ranges)}."
             )
         ranges = self.image_token_ranges[camera]
-        side = self.image_grid_sides[camera]
+        h, w = self.grid_shape(camera)
         tile_maps = []
         for s, e in ranges:
             img = self.weights[..., s:e]
-            tile_maps.append(img.reshape(*img.shape[:-1], side, side))
+            tile_maps.append(img.reshape(*img.shape[:-1], h, w))
         if len(tile_maps) == 1:
             return tile_maps[0]
         return np.sum(tile_maps, axis=0)
@@ -458,8 +480,8 @@ class AttentionMaps:
                 refusing to fabricate a layer range that isn't grounded
                 in this model's literature.
         """
-        raw = self.image_weights(camera)   # (L, H, side, side)
-        L, H, side, _ = raw.shape
+        raw = self.image_weights(camera)   # (L, H, gh, gw)
+        L, H, gh, gw = raw.shape
 
         # Source per-model defaults from adapter's literature.
         profile = self.metadata.get("attention_profile", {})
@@ -504,8 +526,8 @@ class AttentionMaps:
         # positional/RoPE sink sits), then average over heads. One layer chosen
         # from the data — no magic layer index, no per-cell sink removal, no
         # head selection, no calibration.
-        per_layer = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, side, side)
-        border = np.zeros((side, side), dtype=bool)
+        per_layer = raw[start:end].mean(axis=1).astype(np.float64)   # (Lc, gh, gw)
+        border = np.zeros((gh, gw), dtype=bool)
         border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
         interior = ~border
         interior_frac = np.array([

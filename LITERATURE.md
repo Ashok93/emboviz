@@ -966,6 +966,44 @@ is normalized against two model-specific anchors:
   the dataset pool (not zeros, not last-frame). Zero state crashes
   the 6D-rotation decoder.
 
+### ACT (lerobot ACTPolicy)
+- **Output**: action chunk (default `chunk_size = 100`) from a
+  DETR-style CVAE decoder. DETERMINISTIC at inference (the CVAE latent
+  is the zero prior; the reparameterization sampling is training-only).
+- **Inputs**: per-camera images + a proprioceptive-state token. NO
+  language — `required_inputs.instruction = False`, so instruction
+  perturbations auto-skip.
+- **Capabilities**: INFERENCE + ATTENTION.
+- **Calibration**: `n_samples = 1` (deterministic).
+- **Chunk consistency**: applies (native chunk).
+- **Attention drift**: the decoder cross-attention from the first
+  action query to the encoder's image tokens (DETR-style; Carion et al.
+  2020). The image tokens are a flattened ResNet feature grid
+  (`H/stride × W/stride`, generally non-square — reported with an
+  explicit `(h, w)` grid shape). This is the action pathway's
+  attention, not a language-anchored object localizer.
+- **Normalization**: the checkpoint's own pre/post-processor pipeline
+  (`make_pre_post_processors(..., pretrained_path=checkpoint)`); stats
+  are never reconstructed by the adapter.
+
+### SmolVLA (lerobot SmolVLAPolicy)
+- **Output**: action chunk (default `chunk_size = 50`) from a
+  flow-matching action expert. STOCHASTIC — every `predict()` call
+  samples noise and denoises; `n_samples` averaging applies (same
+  treatment as π0 / GR00T).
+- **Inputs**: per-camera images + language instruction + state.
+- **Capabilities**: INFERENCE + ATTENTION.
+- **Attention drift**: the SmolVLM2 prefix self-attention — the last
+  instruction token's attention over the image patches, read from the
+  KV-cache-fill forward that precedes denoising (the same
+  visual-grounding signal as OpenVLA / π0, localization-head literature
+  arXiv:2503.06287). The action expert's suffix→prefix attention is the
+  action pathway and is not used for this map. Mid-stack fractional band
+  0.25–0.85, mean over heads, query-averaged sink removal.
+- **Normalization / tokenization**: the checkpoint's own pre/post-
+  processor pipeline tokenizes the instruction and applies the model's
+  stats; nothing is reconstructed by the adapter.
+
 ---
 
 ## 8. Master citation list (sorted by topic, then year)
@@ -1015,6 +1053,9 @@ is normalized against two model-specific anchors:
   Explanation** (arXiv:1908.04626).
 - Abnar, S. & Zuidema, W. 2020. **Quantifying Attention Flow in
   Transformers** (arXiv:2005.00928).
+- Carion, N. et al. 2020. **DETR — End-to-End Object Detection with
+  Transformers**, ECCV (arXiv:2005.12872). Decoder-query cross-attention
+  visualization — the basis for the ACT attention map.
 
 ### Detection / segmentation for phrase grounding
 - Liu, S. et al. 2024. **GroundingDINO**, ECCV (arXiv:2303.05499).
@@ -1040,6 +1081,8 @@ is normalized against two model-specific anchors:
   Improvements in BC** (arXiv:2507.09061).
 
 ### VLA-specific interpretability & robustness
+- Shukor, M. et al. 2025. **SmolVLA — A Vision-Language-Action Model for
+  Affordable and Efficient Robotics** (arXiv:2506.01844).
 - Hancock, A. et al. 2024. **BYOVLA** (arXiv:2410.01971).
 - "Mechanistic Interpretability for Steering VLA Models"
   (arXiv:2509.00328).
