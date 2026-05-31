@@ -331,6 +331,7 @@ def export_rerun(
     cams_with_sensitivity: set[str] = set()
     cams_with_mask: set[str] = set()
     cams_with_masked_image: set[str] = set()
+    fill_modes_seen: set[str] = set()
 
     def _frame_data(store: PerFrameByCamera, frame_idx: int, i: int) -> dict[str, np.ndarray]:
         if frame_idx in store:
@@ -453,6 +454,7 @@ def export_rerun(
                     recording=rec,
                 )
                 cams_with_masked_image.add(cam)
+                fill_modes_seen.add(fill_mode)
 
         # Per-modality response time-series — one line per modality on
         # the Modality tab's chart.
@@ -646,6 +648,7 @@ def export_rerun(
         cams_with_sensitivity=cams_with_sensitivity,
         cams_with_mask=cams_with_mask,
         cams_with_masked_image=sorted(cams_with_masked_image),
+        fill_modes=sorted(fill_modes_seen),
     )
     # send_blueprint(make_active=True) overrides any cached viewer layout
     # tied to the application_id. Without this, a schema change leaves
@@ -966,6 +969,7 @@ def _build_blueprint(
     cams_with_sensitivity: set[str],
     cams_with_mask: set[str],
     cams_with_masked_image: list[str],
+    fill_modes: list[str],
 ):
     """Construct the tabbed layout.
 
@@ -979,7 +983,7 @@ def _build_blueprint(
 
     # ── Memorization tab ─────────────────────────────────────────────────
     if "vision.memorization" in per_axis_results:
-        tabs.append(_memorization_tab(rrb, cams_all, cams_with_mask, cams_with_masked_image))
+        tabs.append(_memorization_tab(rrb, cams_all, cams_with_mask, cams_with_masked_image, fill_modes))
 
     # ── Modality tab ─────────────────────────────────────────────────────
     if "input.modality_dropout" in per_axis_results:
@@ -1012,7 +1016,7 @@ def _build_blueprint(
 
 def _memorization_tab(
     rrb, cams_all: list[str], cams_with_mask: set[str],
-    cams_with_masked_image: list[str],
+    cams_with_masked_image: list[str], fill_modes: list[str],
 ):
     """Description → verdict ribbon → per-camera (original | masked)
     grid → Δaction time-series → current-frame card."""
@@ -1024,10 +1028,12 @@ def _memorization_tab(
         name="Per-frame verdict (green = OK, yellow = MIXED, red = WORTH A LOOK)",
     )
 
-    # Per-camera triptychs. For each camera: original, masked
-    # (per fill mode), bbox/mask overlay. We use Spatial2DView per camera
-    # and stack them into a Grid. Always include every live camera —
-    # cameras with no detection just show the raw frame.
+    # Per-camera before/after. For each camera: the original frame with the
+    # removal mask outlined, then the LaMa-inpaint result (target removed) —
+    # the clean on-manifold removal the user reads the verdict against. The
+    # OOD fills (channel_mean / gaussian_blur) still drive the verdict but
+    # are not rendered. Always include every live camera — cameras with no
+    # detection just show the raw frame.
     cam_views = []
     for cam in cams_all:
         cam_views.append(rrb.Spatial2DView(
@@ -1037,21 +1043,22 @@ def _memorization_tab(
                 "+ $origin/mask",
                 "+ $origin/boxes",
             ],
-            name=f"{cam} — original + mask overlay",
+            name=f"{cam} — original (mask outlined)",
         ))
-        # If we have masked-fill images for this camera, show them too.
+        # The removal result. ``fill_modes`` here is the displayed fill set
+        # (LaMa only when present — the runner logs just that one), so this
+        # is a single "target removed" panel next to the original.
         if cam in cams_with_masked_image:
-            cam_views.append(rrb.Spatial2DView(
-                origin=f"memorization/{cam}",
-                contents=[
-                    "+ $origin/masked_channel_mean",
-                    "+ $origin/masked_gaussian_blur",
-                    # on-manifold fill; only present when the run enabled
-                    # the lama_inpaint fill (ignored by rerun if absent).
-                    "+ $origin/masked_lama_inpaint",
-                ],
-                name=f"{cam} — what the model saw (masked)",
-            ))
+            for fm in fill_modes:
+                label = (
+                    "target removed (LaMa inpaint)"
+                    if fm == "lama_inpaint" else f"masked: {fm}"
+                )
+                cam_views.append(rrb.Spatial2DView(
+                    origin=f"memorization/{cam}",
+                    contents=[f"+ $origin/masked_{fm}"],
+                    name=f"{cam} — {label}",
+                ))
     cameras_block = rrb.Grid(*cam_views) if cam_views else rrb.TextDocumentView(
         origin="docs/memorization", name="(no live cameras)",
     )

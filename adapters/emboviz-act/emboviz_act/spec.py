@@ -2,7 +2,7 @@
 
 Provider-driven: the runtime installs ``lerobot`` and lets its metadata
 pull the dependency closure (torch, torchvision, the ACT policy code).
-ACT ships in base lerobot, so no extra is needed. lerobot 0.5.2 requires
+ACT ships in base lerobot, so no extra is needed. lerobot 0.5.1 requires
 Python >= 3.12 and torch >= 2.7.
 """
 
@@ -15,7 +15,7 @@ SPEC = AdapterSpec(
     name="act",
     server_module="emboviz_act.server",
     runtime_pip=(
-        "lerobot==0.5.2",
+        "lerobot==0.5.1",
         "emboviz-wire",
         "emboviz-act",
     ),

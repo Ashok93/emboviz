@@ -2,7 +2,7 @@
 
 Provider-driven: the runtime installs ``lerobot[smolvla]`` (the extra adds
 transformers, num2words, accelerate) and lets its metadata pull the
-dependency closure. lerobot 0.5.2 requires Python >= 3.12 and torch >= 2.7.
+dependency closure. lerobot 0.5.1 requires Python >= 3.12 and torch >= 2.7.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ SPEC = AdapterSpec(
     name="smolvla",
     server_module="emboviz_smolvla.server",
     runtime_pip=(
-        "lerobot[smolvla]==0.5.2",
+        "lerobot[smolvla]==0.5.1",
         "emboviz-wire",
         "emboviz-smolvla",
     ),

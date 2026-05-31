@@ -46,6 +46,14 @@ sudo apt install ffmpeg     # Linux
 brew install ffmpeg         # macOS
 ```
 
+The `act` and `smolvla` adapters build LeRobot, which compiles a C-extension
+dependency (`evdev`, via `pynput`). On Linux that needs the Python development
+headers and a compiler:
+
+```bash
+sudo apt install python3-dev build-essential   # Linux only
+```
+
 ### Core + dataset reader
 
 The core package has no model or dataset dependencies. Install it together with

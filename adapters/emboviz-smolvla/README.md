@@ -41,10 +41,13 @@ model:
 ```
 
 `camera_mapping` must cover exactly the checkpoint's `image_features`.
-The instruction is tokenized and the normalization stats are applied by
-the checkpoint's own pre/post-processor pipeline
-(`make_pre_post_processors(..., pretrained_path=checkpoint)`); none are
-reconstructed here.
+The instruction is tokenized by the checkpoint's pre-processor. Normalization
+stats come from the checkpoint itself, across both lerobot layouts: a saved
+processor pipeline (`policy_preprocessor.json`, lerobot ≥ 0.5) is loaded
+directly; an older checkpoint that bakes the stats into `model.safetensors`
+has them read back into `dataset_stats` and the pipeline rebuilt from those.
+If a feature needs normalization but the checkpoint carries neither, the
+adapter raises rather than running it un-normalized.
 
 ## Diagnostics
 

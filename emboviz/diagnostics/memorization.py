@@ -80,6 +80,41 @@ from emboviz.perturb.image._inpaint import Inpainter
 DEFAULT_MIN_MASK_CONTRAST = 0.05
 
 
+# Removal-mask dilation. A pixel-tight detection silhouette excludes the
+# object's anti-aliased boundary (and any thin contact shadow): the OOD
+# fills then leave that 1–2 px rim at its original colour, and LaMa
+# reconstructs it straight back into the hole — a faint ghost of the
+# removed object. Growing the mask by a small margin before the fill
+# ensemble runs makes every fill cover the whole object incl. its edge.
+# This is the standard erase-mask preprocessing (Suvorov et al. 2022, the
+# LaMa object-removal recipe; iopaint / lama-cleaner dilate erase masks
+# for the same reason — LITERATURE.md §1). The same dilated mask feeds
+# ALL fills and the contrast gate, so the OOD↔on-manifold agreement is
+# still measured over one identical region. Scaled to the frame's shorter
+# side so it is resolution-independent.
+DEFAULT_MASK_DILATION_FRAC = 0.03
+
+
+def _dilation_radius(image_hw: tuple[int, int], frac: float) -> int:
+    """Removal-mask dilation radius in pixels for a frame of shape
+    ``image_hw`` (H, W). ``max(2, round(min(H, W) * frac))`` — at least
+    2 px so even a tiny frame covers the anti-aliased rim."""
+    return max(2, int(round(min(image_hw) * float(frac))))
+
+
+def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Dilate boolean ``mask`` by ``radius`` px (≈ square structuring
+    element, chebyshev growth). Grows a tight detection silhouette into a
+    clean removal mask before the fill ensemble runs. ``radius <= 0`` is a
+    no-op (returns the mask as bool)."""
+    m = np.asarray(mask, dtype=bool)
+    if radius <= 0:
+        return m
+    from scipy.ndimage import binary_dilation, generate_binary_structure
+    selem = generate_binary_structure(2, 2)   # 3×3 full → grow in all dirs
+    return binary_dilation(m, structure=selem, iterations=int(radius))
+
+
 # ── Fill modes (LITERATURE.md §1) ─────────────────────────────────────
 #
 # The mask-fill ensemble. Single-fill baselines suffer "baseline
@@ -236,12 +271,18 @@ class MemorizationDiagnostic(Diagnostic):
             cameras share resolution/intrinsics).
         fill_modes: which fills to ensemble. Default =
             ``["channel_mean", "gaussian_blur"]`` (agreement across fills is
-            required for a CRITICAL verdict). LIMITATION: LITERATURE.md §1
-            prescribes a THIRD, on-manifold ``lama_inpaint`` fill; it is not
-            yet implemented, so the shipped ensemble is 2 of 3 and the
-            agreement gate runs over two non-on-manifold fills only. This is
-            surfaced in the result's raw output (``fill_ensemble``). Pass
-            ``["channel_mean"]`` to skip the blur fill if scipy is missing.
+            required for a CRITICAL verdict). The on-manifold ``lama_inpaint``
+            fill prescribed by LITERATURE.md §1 is available: add it (it needs
+            the emboviz-lama worker + an ``inpainter``) to span the full
+            OOD↔on-manifold axis. Which fills the agreement gate actually ran
+            over is surfaced in the result's raw output (``fill_ensemble``).
+            Pass ``["channel_mean"]`` to skip the blur fill if scipy is missing.
+        mask_dilation_frac: grow each detected mask by
+            ``round(min(H, W) * frac)`` px before filling, so the fills cover
+            the object's anti-aliased boundary instead of leaving a rim (which
+            LaMa reconstructs back into the hole). The same dilated mask feeds
+            ALL fills and the contrast gate. Default
+            ``DEFAULT_MASK_DILATION_FRAC`` (0.03).
         min_mask_contrast: refuse to emit CRITICAL when ALL fills
             produce a normalized contrast below this on a frame. Default
             ``DEFAULT_MIN_MASK_CONTRAST`` (0.05).
@@ -269,6 +310,7 @@ class MemorizationDiagnostic(Diagnostic):
         cameras: Optional[list[str]] = None,
         calibration: Optional["ModelCalibration"] = None,
         inpainter: Optional[Inpainter] = None,
+        mask_dilation_frac: float = DEFAULT_MASK_DILATION_FRAC,
     ):
         if bbox is not None:
             self.detector: TargetDetector = BBoxDetector(bbox)
@@ -308,6 +350,7 @@ class MemorizationDiagnostic(Diagnostic):
             )
         self.inpainter = inpainter
         self.min_mask_contrast = float(min_mask_contrast)
+        self.mask_dilation_frac = float(mask_dilation_frac)
         self.noise_floor_score = noise_floor_score
         self.grounded_threshold = grounded_threshold
         self.cameras = cameras
@@ -343,6 +386,8 @@ class MemorizationDiagnostic(Diagnostic):
         # per-camera entry.
         per_cam_detection: dict = {}
         per_cam_original: dict = {}
+        per_cam_mask: dict = {}        # dilated removal mask (shared by all fills)
+        per_cam_dilation: dict = {}    # px radius applied, for transparency
         for cam in cameras:
             cam_image = scene.observations.images[cam].data
             if "primary" in scene.observations.images:
@@ -371,6 +416,11 @@ class MemorizationDiagnostic(Diagnostic):
                     "that produces a mask (SAM3Detector / GroundingDINOSAMDetector)."
                 )
             per_cam_original[cam] = arr
+            # Grow the tight detection silhouette into a clean removal mask
+            # ONCE per camera (shared by every fill + the contrast gate).
+            radius = _dilation_radius(arr.shape[:2], self.mask_dilation_frac)
+            per_cam_mask[cam] = _dilate_mask(detection.mask, radius)
+            per_cam_dilation[cam] = radius
 
         if not per_cam_original:
             return self._not_applicable(
@@ -402,7 +452,7 @@ class MemorizationDiagnostic(Diagnostic):
             contrasts: dict[str, float] = {}
             for cam in detected_cams:
                 arr = per_cam_original[cam]
-                mask = per_cam_detection[cam].mask
+                mask = per_cam_mask[cam]   # dilated removal mask (shared)
                 masked = apply_fill(
                     arr, mask, fill_mode,
                     inpainter=self.inpainter,
@@ -536,6 +586,7 @@ class MemorizationDiagnostic(Diagnostic):
             },
             "detected_cameras":       detected_cams,
             "detection_confidences":  confs,
+            "mask_dilation_px":       {c: per_cam_dilation[c] for c in detected_cams},
         }
 
         if max_delta < signal_threshold:

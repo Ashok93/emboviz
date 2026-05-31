@@ -25,11 +25,12 @@ SPEC = AdapterSpec(
     name="lama",
     server_module="emboviz_lama.server",
     runtime_pip=(
-        # The default PyPI torch wheel is CUDA-enabled on a CUDA host and
-        # CPU-only otherwise — both work for LaMa, so we keep an unpinned
-        # floor and let the platform's default wheel resolve (per the
-        # "the default PyPI wheel works for everyone" rule).
-        "torch>=2.1",
+        # Cap the torch upper bound: the latest torch (2.12) ships a CUDA-13
+        # wheel that needs a newer NVIDIA driver than common CUDA hosts have,
+        # so it silently falls back to CPU. The <2.11 window (torch 2.10,
+        # CUDA 12.8) matches what lerobot pins and works on current drivers.
+        # LaMa runs on CPU too, but we want the GPU when one is present.
+        "torch>=2.2,<2.11",
         # We fetch the pinned TorchScript checkpoint from the HF Hub.
         "huggingface-hub>=0.24",
         # Pillow + numpy for the vendored preprocessing. Compatible with

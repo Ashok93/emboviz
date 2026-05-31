@@ -109,6 +109,18 @@ Inputs:
   on-manifold/OOD axis; when not, the run is honest about it — every
   result's `fill_ensemble.on_manifold_fill_present` flag and `note`
   state which fills the agreement gate actually ran over.
+- **Removal-mask dilation** — a pixel-tight detection silhouette excludes
+  the object's anti-aliased boundary and any thin contact shadow. LaMa
+  reconstructs that 1–2 px rim straight back into the hole (a faint ghost
+  of the "removed" object); the OOD fills leave it at its original colour.
+  The LaMa object-removal recipe [Suvorov et al. 2022] and the erase
+  pipelines built on it (IOPaint / lama-cleaner) dilate the erase mask by
+  a small margin before inpainting for exactly this reason. We grow the
+  detected mask ONCE per camera — radius `max(2, round(0.03·min(H,W)))`,
+  resolution-independent — and feed the SAME dilated mask to every fill
+  and to the contrast gate, so the OOD↔on-manifold agreement is still
+  measured over one identical region. The applied radius is surfaced in
+  each result's `raw_numbers.mask_dilation_px`.
 - **K-sample averaging for stochastic policies** — π0 (flow-matching),
   Diffusion Policy, GR00T's flow-matching head all have non-trivial
   sample-to-sample variance. BYOVLA [Hancock et al. 2024] samples K
@@ -981,10 +993,24 @@ is normalized against two model-specific anchors:
   2020). The image tokens are a flattened ResNet feature grid
   (`H/stride × W/stride`, generally non-square — reported with an
   explicit `(h, w)` grid shape). This is the action pathway's
-  attention, not a language-anchored object localizer.
-- **Normalization**: the checkpoint's own pre/post-processor pipeline
-  (`make_pre_post_processors(..., pretrained_path=checkpoint)`); stats
-  are never reconstructed by the adapter.
+  attention, not a language-anchored object localizer. ACT has a SINGLE
+  decoder layer (the original's 7 are a documented no-op bug; lerobot
+  sets `n_decoder_layers = 1`) with 8 heads that **specialise** — verified
+  per-head on the reference checkpoint, grounding heads concentrate on the
+  end-effectors / contact point (interior-fraction ~0.85–1.0) while others
+  are spatial sinks on the frame border (~0.42). So the clean map selects
+  the single most interior-concentrated HEAD (`head_reduction =
+  "select_interior"`) rather than averaging heads, which would blend the
+  sink in. The image-attention fraction is ~1.0 across heads (the decoder
+  query attends to image tokens, not the proprio/latent tokens).
+- **Normalization**: lerobot has two checkpoint layouts. v0.5+ ships a
+  saved processor pipeline (`policy_preprocessor.json`); pre-v0.5 bakes the
+  normalization stats into `model.safetensors` buffers, which the current
+  policy class discards as unexpected keys. The adapter handles both: it
+  loads the saved pipeline when present, else reconstructs `dataset_stats`
+  from the baked buffers and builds the pipeline from those — and RAISES if
+  a feature that needs normalization has neither, rather than running
+  un-normalized (lerobot's normalizer skips un-statted features silently).
 
 ### SmolVLA (lerobot SmolVLAPolicy)
 - **Output**: action chunk (default `chunk_size = 50`) from a

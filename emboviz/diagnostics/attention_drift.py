@@ -122,7 +122,7 @@ class AttentionDriftDiagnostic(Diagnostic):
                         model, scene, f"attention extraction failed: {e}",
                     )
                 img_attn, _debug = attn.image_weights_clean(self.camera)
-            side = img_attn.shape[0]
+            gh, gw = img_attn.shape[:2]
             total = img_attn.sum()
             if total <= 0:
                 raise RuntimeError(
@@ -135,9 +135,13 @@ class AttentionDriftDiagnostic(Diagnostic):
                     "fabricate a (0.5, 0.5) centroid — fix the adapter."
                 )
             img_norm = img_attn / total
-            yy, xx = np.meshgrid(np.arange(side), np.arange(side), indexing="ij")
-            cy = float((img_norm * yy).sum()) / max(side - 1, 1)
-            cx = float((img_norm * xx).sum()) / max(side - 1, 1)
+            # The attention grid may be non-square (e.g. ACT's ResNet feature
+            # map over a 480x640 camera is 15x20). Take the centroid over the
+            # actual (rows, cols) and normalize each axis by its own extent so
+            # (cy, cx) are both in [0, 1].
+            yy, xx = np.meshgrid(np.arange(gh), np.arange(gw), indexing="ij")
+            cy = float((img_norm * yy).sum()) / max(gh - 1, 1)
+            cx = float((img_norm * xx).sum()) / max(gw - 1, 1)
             indexed_centroids.append((i, cy, cx))
 
         if len(indexed_centroids) < 2:

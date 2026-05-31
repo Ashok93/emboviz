@@ -29,6 +29,16 @@ from emboviz_wire import (
 )
 
 
+def _read_rename_map(preprocessor) -> dict[str, str]:
+    """Observation rename map (dataset key -> model feature key) from the
+    checkpoint's preprocessor pipeline. Empty when the pipeline has no rename
+    step (the model consumes the dataset keys directly)."""
+    for step in getattr(preprocessor, "steps", []):
+        if type(step).__name__ == "RenameObservationsProcessorStep":
+            return dict(getattr(step, "rename_map", {}) or {})
+    return {}
+
+
 class ACTAdapter(VLAModel):
     """lerobot ACTPolicy behind the emboviz VLAModel interface.
 
@@ -36,10 +46,10 @@ class ACTAdapter(VLAModel):
         checkpoint: HF repo id or local directory of a trained ACT
             checkpoint (loaded with ``ACTPolicy.from_pretrained``).
         camera_mapping: maps each emboviz logical camera role to the
-            policy's image-feature key, e.g.
-            ``{"primary": "observation.images.top",
-               "wrist": "observation.images.wrist"}``. Must cover exactly
-            the checkpoint's ``image_features``.
+            dataset key the checkpoint's preprocessor expects as input (the
+            preprocessor renames + normalizes it), e.g.
+            ``{"primary": "observation.images.top"}``. Must cover every
+            image feature ACT consumes.
         device: ``"auto"`` (cuda if available, else cpu), or an explicit
             torch device string.
     """
@@ -51,13 +61,22 @@ class ACTAdapter(VLAModel):
     # decoder-query cross-attention maps.
     ATTENTION_PROFILE = {
         "recommended_layer_range_fraction": (0.0, 1.0),
+        # ACT has a single decoder layer with 8 heads that SPECIALISE (DETR,
+        # Carion et al. 2020): some heads ground on the end-effectors/contact
+        # while others are spatial sinks on the frame border. Averaging heads
+        # blends the sink in, so we select the single most interior-concentrated
+        # head rather than the head-mean (verified per-head on the reference
+        # checkpoint: grounding heads sit at interior-fraction ~0.85-1.0, sink
+        # heads at ~0.42).
+        "head_reduction": "select_interior",
         "literature_citation": (
             "DETR decoder cross-attention visualization (Carion et al. "
             "2020, arXiv:2005.12872) on ACT (Zhao et al. 2023, "
-            "arXiv:2304.13705): query = first action token; mean over "
-            "heads; pick the decoder layer most concentrated on the image "
-            "interior. Action-pathway attention, not a language-anchored "
-            "map."
+            "arXiv:2304.13705): query = first action token; pick the (layer, "
+            "head) most concentrated on the image interior — heads specialise "
+            "in ACT's single shallow decoder layer, so the grounding head is "
+            "selected instead of averaging the spatial-sink heads in. "
+            "Action-pathway attention, not a language-anchored map."
         ),
     }
 
@@ -97,8 +116,10 @@ class ACTAdapter(VLAModel):
         return str(self._device_pref)
 
     def _load(self) -> None:
-        from lerobot.policies import make_pre_post_processors
         from lerobot.policies.act.modeling_act import ACTPolicy
+        from lerobot.policies.factory import make_pre_post_processors
+
+        from emboviz_act._checkpoint import load_processors
 
         device = self._resolve_device()
         policy = ACTPolicy.from_pretrained(self.checkpoint)
@@ -118,24 +139,46 @@ class ACTAdapter(VLAModel):
                 "expects a vision-based ACT policy."
             )
 
-        expected = set(cfg.image_features)
-        mapped = set(self.camera_mapping.values())
-        if mapped != expected:
-            raise ValueError(
-                "ACTAdapter: camera_mapping values must match the "
-                f"checkpoint's image features exactly. Expected {sorted(expected)}, "
-                f"got {sorted(mapped)}."
-            )
-
         self._policy = policy
         self._device = device
-        self._pre, self._post = make_pre_post_processors(
-            cfg, pretrained_path=self.checkpoint,
+        self._pre, self._post = load_processors(
+            cfg, self.checkpoint, make_pre_post_processors,
         )
 
+        # camera_mapping maps each emboviz logical role to the dataset key the
+        # checkpoint's preprocessor expects; the preprocessor renames +
+        # normalizes. ACT's predict_action_chunk indexes EVERY image feature,
+        # so the mapping must cover all of them (after the rename).
+        rename = _read_rename_map(self._pre)        # input key -> model camera
+        modelcam_to_role: dict[str, str] = {}
+        for role, input_key in self.camera_mapping.items():
+            model_cam = rename.get(input_key, input_key)
+            if model_cam not in cfg.image_features:
+                raise ValueError(
+                    f"ACTAdapter: camera_mapping role '{role}' -> input key "
+                    f"'{input_key}' resolves (after the checkpoint's rename) to "
+                    f"'{model_cam}', which is not one of the model's image "
+                    f"features {list(cfg.image_features)}."
+                )
+            if model_cam in modelcam_to_role:
+                raise ValueError(
+                    f"ACTAdapter: two camera_mapping entries resolve to the "
+                    f"same model camera '{model_cam}'."
+                )
+            modelcam_to_role[model_cam] = role
+        if set(modelcam_to_role) != set(cfg.image_features):
+            missing = set(cfg.image_features) - set(modelcam_to_role)
+            raise ValueError(
+                "ACTAdapter: ACT consumes every image feature; camera_mapping "
+                f"is missing {sorted(missing)} (after the checkpoint's rename)."
+            )
+
         # Encoder token layout: [latent, (robot_state), image tokens...].
-        self._image_feature_order = list(cfg.image_features)
-        self._key_to_role = {v: k for k, v in self.camera_mapping.items()}
+        # ACT processes all image features, in config order.
+        self._present_model_cameras = [
+            c for c in cfg.image_features if c in modelcam_to_role
+        ]
+        self._modelcam_to_role = modelcam_to_role
         self._uses_state = cfg.robot_state_feature is not None
         self._n_non_image_tokens = 1 + (1 if self._uses_state else 0)
         self._n_decoder_layers = int(cfg.n_decoder_layers)
@@ -199,8 +242,7 @@ class ACTAdapter(VLAModel):
         from lerobot.utils.constants import OBS_STATE
 
         frame: dict[str, Any] = {}
-        for policy_key in self._image_feature_order:
-            role = self._key_to_role[policy_key]
+        for role, input_key in self.camera_mapping.items():
             img = scene.observations.images[role].data
             arr = np.asarray(img, dtype=np.uint8)
             if arr.ndim != 3 or arr.shape[-1] != 3:
@@ -209,7 +251,7 @@ class ACTAdapter(VLAModel):
                     f"got shape {arr.shape}."
                 )
             t = torch.from_numpy(arr).to(torch.float32).div_(255.0)
-            frame[policy_key] = t.permute(2, 0, 1).contiguous()
+            frame[input_key] = t.permute(2, 0, 1).contiguous()
 
         if self._uses_state:
             state = scene.observations.state
@@ -333,7 +375,7 @@ class ACTAdapter(VLAModel):
 
         h, w = feat_hw["hw"]
         tokens_per_cam = h * w
-        n_cams = len(self._image_feature_order)
+        n_cams = len(self._present_model_cameras)
         encoder_len = int(captured[0].shape[-1])
         expected = self._n_non_image_tokens + n_cams * tokens_per_cam
         if encoder_len != expected:
@@ -361,8 +403,8 @@ class ACTAdapter(VLAModel):
         image_token_ranges: dict[str, list[tuple[int, int]]] = {}
         image_grid_shapes: dict[str, tuple[int, int]] = {}
         cursor = self._n_non_image_tokens
-        for policy_key in self._image_feature_order:
-            role = self._key_to_role[policy_key]
+        for model_cam in self._present_model_cameras:
+            role = self._modelcam_to_role[model_cam]
             image_token_ranges[role] = [(cursor, cursor + tokens_per_cam)]
             image_grid_shapes[role] = (h, w)
             cursor += tokens_per_cam

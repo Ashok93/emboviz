@@ -32,6 +32,16 @@ from emboviz_wire import (
 )
 
 
+def _read_rename_map(preprocessor) -> dict[str, str]:
+    """Observation rename map (dataset key -> model feature key) from the
+    checkpoint's preprocessor pipeline. Empty when the pipeline has no rename
+    step (the model consumes the dataset keys directly)."""
+    for step in getattr(preprocessor, "steps", []):
+        if type(step).__name__ == "RenameObservationsProcessorStep":
+            return dict(getattr(step, "rename_map", {}) or {})
+    return {}
+
+
 class SmolVLAAdapter(VLAModel):
     """lerobot SmolVLAPolicy behind the emboviz VLAModel interface.
 
@@ -39,9 +49,10 @@ class SmolVLAAdapter(VLAModel):
         checkpoint: HF repo id or local directory of a SmolVLA checkpoint
             (default: the public ``lerobot/smolvla_base``).
         camera_mapping: maps each emboviz logical camera role to the
-            policy's image-feature key, e.g.
-            ``{"primary": "observation.images.top"}``. Must cover exactly
-            the checkpoint's ``image_features``.
+            dataset key the checkpoint's preprocessor expects as input (the
+            key it renames to the model's internal slot), e.g.
+            ``{"primary": "observation.images.image",
+               "wrist": "observation.images.image2"}``.
         device: ``"auto"`` (cuda if available, else cpu), or an explicit
             torch device string.
     """
@@ -97,8 +108,10 @@ class SmolVLAAdapter(VLAModel):
         return str(self._device_pref)
 
     def _load(self) -> None:
-        from lerobot.policies import make_pre_post_processors
+        from lerobot.policies.factory import make_pre_post_processors
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+        from emboviz_smolvla._checkpoint import load_processors
 
         device = self._resolve_device()
         policy = SmolVLAPolicy.from_pretrained(self.checkpoint)
@@ -110,22 +123,44 @@ class SmolVLAAdapter(VLAModel):
             raise ValueError(
                 "SmolVLAAdapter: checkpoint declares no image features."
             )
-        expected = set(cfg.image_features)
-        mapped = set(self.camera_mapping.values())
-        if mapped != expected:
-            raise ValueError(
-                "SmolVLAAdapter: camera_mapping values must match the "
-                f"checkpoint's image features exactly. Expected {sorted(expected)}, "
-                f"got {sorted(mapped)}."
-            )
 
         self._policy = policy
         self._device = device
-        self._pre, self._post = make_pre_post_processors(
-            cfg, pretrained_path=self.checkpoint,
+        self._pre, self._post = load_processors(
+            cfg, self.checkpoint, make_pre_post_processors,
         )
-        self._image_feature_order = list(cfg.image_features)
-        self._key_to_role = {v: k for k, v in self.camera_mapping.items()}
+
+        # The checkpoint's preprocessor renames the training dataset's keys to
+        # the model's internal feature slots (e.g. observation.images.image ->
+        # observation.images.camera1) and normalizes with the model's own
+        # stats. camera_mapping therefore maps each emboviz logical role to the
+        # key the preprocessor EXPECTS as input; the preprocessor handles the
+        # rename + normalization.
+        rename = _read_rename_map(self._pre)        # input key -> model camera
+        modelcam_to_role: dict[str, str] = {}
+        for role, input_key in self.camera_mapping.items():
+            model_cam = rename.get(input_key, input_key)
+            if model_cam not in cfg.image_features:
+                raise ValueError(
+                    f"SmolVLAAdapter: camera_mapping role '{role}' -> input key "
+                    f"'{input_key}' resolves (after the checkpoint's rename) to "
+                    f"'{model_cam}', which is not one of the model's image "
+                    f"features {list(cfg.image_features)}."
+                )
+            if model_cam in modelcam_to_role:
+                raise ValueError(
+                    f"SmolVLAAdapter: two camera_mapping entries resolve to the "
+                    f"same model camera '{model_cam}'."
+                )
+            modelcam_to_role[model_cam] = role
+
+        # Cameras the model actually processes, in config order (SmolVLA uses
+        # the present cameras; padded/unused slots are simply not fed).
+        self._present_model_cameras = [
+            c for c in cfg.image_features if c in modelcam_to_role
+        ]
+        self._modelcam_to_role = modelcam_to_role
+        self._uses_state = cfg.robot_state_feature is not None
         self._action_dim = int(cfg.action_feature.shape[-1])
         mwe = policy.model.vlm_with_expert
         self._num_vlm_layers = int(mwe.num_vlm_layers)
@@ -159,7 +194,7 @@ class SmolVLAAdapter(VLAModel):
         return RequiredInputs(
             cameras=frozenset(self.camera_mapping),
             instruction=True,
-            state=True,
+            state=self._uses_state,
         )
 
     @property
@@ -181,16 +216,16 @@ class SmolVLAAdapter(VLAModel):
     # ----- inference ------------------------------------------------------
 
     def _build_frame(self, scene: Scene) -> dict:
-        """Build the un-batched lerobot frame: image tensors (C,H,W float
-        in [0,1]) keyed by the policy's image-feature names, the state
-        vector, and the instruction string. The pre-processor batches,
-        tokenizes the instruction, and moves to device."""
+        """Build the un-batched frame the checkpoint's preprocessor expects:
+        image tensors (C,H,W float in [0,1]) keyed by the dataset keys the
+        preprocessor renames, the state vector, and the instruction string.
+        The preprocessor renames + normalizes, batches, tokenizes, and moves
+        to device."""
         import torch
         from lerobot.utils.constants import OBS_STATE
 
         frame: dict[str, Any] = {}
-        for policy_key in self._image_feature_order:
-            role = self._key_to_role[policy_key]
+        for role, input_key in self.camera_mapping.items():
             img = scene.observations.images[role].data
             arr = np.asarray(img, dtype=np.uint8)
             if arr.ndim != 3 or arr.shape[-1] != 3:
@@ -199,15 +234,16 @@ class SmolVLAAdapter(VLAModel):
                     f"got shape {arr.shape}."
                 )
             t = torch.from_numpy(arr).to(torch.float32).div_(255.0)
-            frame[policy_key] = t.permute(2, 0, 1).contiguous()
+            frame[input_key] = t.permute(2, 0, 1).contiguous()
 
-        state = scene.observations.state
-        if state is None:
-            raise ValueError(
-                "SmolVLAAdapter: scene.observations.state is None."
-            )
-        vec = np.asarray(state.values, dtype=np.float32).reshape(-1)
-        frame[OBS_STATE] = torch.from_numpy(vec)
+        if self._uses_state:
+            state = scene.observations.state
+            if state is None:
+                raise ValueError(
+                    "SmolVLAAdapter: scene.observations.state is None."
+                )
+            vec = np.asarray(state.values, dtype=np.float32).reshape(-1)
+            frame[OBS_STATE] = torch.from_numpy(vec)
         frame["task"] = scene.instruction or ""
         return frame
 
@@ -296,7 +332,7 @@ class SmolVLAAdapter(VLAModel):
         def capturing_eager(attention_mask, batch_size, head_dim,
                             query_states, key_states, value_states):
             # Verbatim SmolVLMWithExpertModel.eager_attention_forward
-            # (lerobot 0.5.2), capturing the softmax probs as a side effect
+            # (lerobot 0.5.1), capturing the softmax probs as a side effect
             # so the captured weights are exactly the ones used downstream.
             seq_len = key_states.shape[1]
             k = key_states[:, :, :, None, :].expand(
@@ -368,8 +404,8 @@ class SmolVLAAdapter(VLAModel):
         image_token_ranges: dict[str, list[tuple[int, int]]] = {}
         image_grid_sides: dict[str, int] = {}
         cursor = 0
-        for policy_key in self._image_feature_order:
-            role = self._key_to_role[policy_key]
+        for model_cam in self._present_model_cameras:
+            role = self._modelcam_to_role[model_cam]
             if add_special:
                 cursor += 1
             image_token_ranges[role] = [(cursor, cursor + num_img)]
