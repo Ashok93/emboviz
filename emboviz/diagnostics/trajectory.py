@@ -115,6 +115,28 @@ class TrajectoryDiagnosticResult:
         hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
         return (lo, hi)
 
+    def trajectory_severity(self) -> Severity:
+        """Axis-level verdict for the whole trajectory: the most concerning
+        ACTIONABLE per-frame severity (critical → moderate → info → pass).
+
+        UNKNOWN ('couldn't test') is a coverage gap, not a verdict, so it is the
+        headline ONLY when no frame produced an actionable verdict. This is
+        deliberately NOT ``max(severities, key=sort_key)``: ``Severity.sort_key``
+        ranks UNKNOWN above PASS/INFO for worst-FIRST list *ordering*, which
+        would headline a mostly-passing axis as 'couldn't test' just because a
+        few frames were inconclusive. :meth:`trajectory_finding` takes its
+        representative frame from this same severity, so label and text agree.
+        """
+        counts = {s: 0 for s in Severity}
+        for r in self.per_frame:
+            counts[r.severity] += 1
+        return next(
+            (s for s in (Severity.CRITICAL, Severity.MODERATE,
+                         Severity.INFO, Severity.PASS, Severity.UNKNOWN)
+             if counts[s] > 0),
+            Severity.UNKNOWN,
+        )
+
     def trajectory_finding(self) -> Finding:
         """Aggregate per-frame Findings into a single trajectory-level Finding.
 
@@ -152,12 +174,12 @@ class TrajectoryDiagnosticResult:
         n_crit = counts[Severity.CRITICAL]
         n_unk  = counts[Severity.UNKNOWN]
 
-        # Pick a representative per-frame Finding for the dominant
-        # severity. Users get its language carried up; counts give scale.
-        rep_severity = max(
-            (Severity.CRITICAL, Severity.MODERATE, Severity.INFO, Severity.PASS, Severity.UNKNOWN),
-            key=lambda s: counts[s],
-        )
+        # Representative Finding comes from the axis-level verdict severity
+        # (worst actionable; see trajectory_severity), so the headline label and
+        # the quoted per-frame text always agree — and a real critical finding
+        # is never buried under a pile of "couldn't test" frames. The
+        # distribution string below keeps the scale honest.
+        rep_severity = self.trajectory_severity()
         rep_finding: Optional[Finding] = None
         for r in self.per_frame:
             if r.severity == rep_severity and r.finding is not None:
@@ -234,6 +256,7 @@ class TrajectoryDiagnosticResult:
             "direction":         self.direction,
             "frame_indices":     self.frame_indices,
             "scores":            self.scores.tolist(),
+            "severity":          self.trajectory_severity().value,
             "severities":        [s.value for s in self.severities],
             "finding":           finding.to_dict(),
             "per_frame_findings": [

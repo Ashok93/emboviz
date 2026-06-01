@@ -341,10 +341,18 @@ def export_rerun(
         return {}
 
     # ── 1. Per-frame camera streams + overlays ────────────────────────────
+    # Conditional overlays (attention, sensitivity, mask, detection boxes,
+    # masked images) are logged ONLY on frames that produce them. Rerun keeps
+    # the latest logged value, so a frame WITHOUT an overlay would otherwise
+    # display the previous frame's — e.g. a stale broccoli mask lingering on an
+    # occluded frame. We record what we log each frame and explicitly Clear any
+    # overlay that vanished, so absence reads as absence.
+    prev_overlay_paths: set[str] = set()
     for i, scene in enumerate(trajectory.frames):
         frame_idx = trajectory.frame_indices[i]
         _set_time("frame_time", duration=i / fps)
         _set_time("frame_index", sequence=frame_idx)
+        frame_overlay_paths: set[str] = set()
 
         scene_cameras = set(scene.observations.images.keys())
         cam_hw: dict[str, tuple[int, int]] = {}
@@ -388,6 +396,7 @@ def export_rerun(
                     recording=rec,
                 )
                 cams_with_attention.add(cam)
+                frame_overlay_paths.add(f"world/camera/{cam}/attention")
 
         # Sensitivity overlay.
         for cam, sens in _frame_data(sensitivity_per_frame, frame_idx, i).items():
@@ -407,6 +416,7 @@ def export_rerun(
                     recording=rec,
                 )
                 cams_with_sensitivity.add(cam)
+                frame_overlay_paths.add(f"world/camera/{cam}/sensitivity")
 
         # Target mask overlay (red, semi-transparent) on the Memorization
         # tab's per-camera RGB. Plus per-instance bounding boxes for
@@ -422,6 +432,7 @@ def export_rerun(
                     recording=rec,
                 )
                 cams_with_mask.add(cam)
+                frame_overlay_paths.add(f"memorization/{cam}/mask")
         for cam, det in _frame_data(target_detection_per_frame, frame_idx, i).items():
             if cam not in cam_hw:
                 continue
@@ -440,6 +451,7 @@ def export_rerun(
                     recording=rec,
                 )
                 cams_with_mask.add(cam)
+                frame_overlay_paths.add(f"memorization/{cam}/boxes")
             except Exception:
                 pass
 
@@ -455,6 +467,7 @@ def export_rerun(
                 )
                 cams_with_masked_image.add(cam)
                 fill_modes_seen.add(fill_mode)
+                frame_overlay_paths.add(f"memorization/{cam}/masked_{fill_mode}")
 
         # Per-modality response time-series — one line per modality on
         # the Modality tab's chart.
@@ -466,6 +479,14 @@ def export_rerun(
         for modality, value in mod_resp.items():
             safe = modality.replace(":", "_").replace("/", "_")
             rr.log(f"plots/modality/{safe}", Scalars(float(value)), recording=rec)
+
+        # Clear overlays shown on an earlier frame but absent here, so they do
+        # not visually persist (Rerun keeps the latest value). Clearing on the
+        # transition suffices — the cleared state then persists until the entity
+        # is logged again.
+        for stale_path in prev_overlay_paths - frame_overlay_paths:
+            rr.log(stale_path, rr.Clear(recursive=False), recording=rec)
+        prev_overlay_paths = frame_overlay_paths
 
     # ── 2. Per-axis time-series + per-frame finding text + verdict ────────
     # For every per-axis diagnostic, log the scalar score over time AND
@@ -913,38 +934,30 @@ def _build_findings_markdown(
     if instr:
         lines += [f"**Instruction:** {instr}", ""]
 
-    # Sort by worst severity first so the user sees the headlines.
-    def _per_axis_severity(traj_result: TrajectoryDiagnosticResult) -> Severity:
-        # Pick the highest-priority severity seen on any frame.
-        rank = max(
-            (r.severity for r in traj_result.per_frame),
-            default=Severity.UNKNOWN,
-            key=lambda s: s.sort_key,
-        )
-        return rank
-
+    # Headline severity AND the quoted finding both come from the trajectory
+    # aggregate (trajectory_severity / trajectory_finding) — the SAME source
+    # report.md uses — so the label and the text always agree, and a
+    # mostly-passing axis is never headlined "couldn't test". Order
+    # most-concerning first.
+    _CONCERN = {
+        Severity.CRITICAL: 4, Severity.MODERATE: 3, Severity.INFO: 2,
+        Severity.PASS: 1, Severity.UNKNOWN: 0,
+    }
     ordered_axes = sorted(
         per_axis_results.items(),
-        key=lambda kv: -_per_axis_severity(kv[1]).sort_key,
+        key=lambda kv: -_CONCERN[kv[1].trajectory_severity()],
     )
     for axis, traj_result in ordered_axes:
-        finding = None
-        for r in traj_result.per_frame:
-            if r.finding is not None:
-                finding = r.finding
-                break
-        worst_sev = _per_axis_severity(traj_result)
-        label, _ = _verdict(worst_sev)
+        sev = traj_result.trajectory_severity()
+        label, _ = _verdict(sev)
+        finding = traj_result.trajectory_finding()
         lines.append(f"## {axis} — {label}")
-        if finding is not None:
-            lines += [
-                f"- **Observed:** {finding.observed}",
-                f"- **Meaning:** {finding.meaning}",
-                f"- **Next step:** {finding.next_step}",
-                "",
-            ]
-        else:
-            lines += ["- (no per-frame finding)", ""]
+        lines += [
+            f"- **Observed:** {finding.observed}",
+            f"- **Meaning:** {finding.meaning}",
+            f"- **Next step:** {finding.next_step}",
+            "",
+        ]
 
     for axis, info in trajectory_axis_results.items():
         sev_enum = _severity_from_string(info.get("severity", "unknown"))
