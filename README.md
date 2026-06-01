@@ -36,7 +36,12 @@ Short and full names are both accepted: `memorization`, `modality`,
 
 ## Installation
 
-### System dependency
+Emboviz is **not yet published to PyPI** — install it from a clone of this
+repository. Every package is installed **editable** (`-e`), so the isolated
+worker environments are built from your local checkout (including any local
+changes you make).
+
+### System dependencies
 
 Emboviz reads episode video through `torchcodec`, which needs FFmpeg system
 libraries:
@@ -54,44 +59,54 @@ headers and a compiler:
 sudo apt install python3-dev build-essential   # Linux only
 ```
 
-### Core + dataset reader
-
-The core package has no model or dataset dependencies. Install it together with
-the reader for your dataset format:
+### Clone + core
 
 ```bash
+git clone https://github.com/Ashok93/botsigil.git
+cd botsigil
 uv venv --python 3.11
-uv pip install emboviz                 # core engine
-uv pip install emboviz-lerobot         # LeRobot v3.0 datasets
+uv pip install -e adapters/emboviz-wire -e .   # shared wire types + core engine
 ```
 
-Supported dataset formats:
+The core package has no model or dataset dependencies — it talks to every
+adapter over a msgpack/ZeroMQ socket. Add the reader for your dataset format
+and an adapter for each policy you analyze; all editable, from the clone.
 
-| Format | Install |
+### Dataset reader
+
+```bash
+uv pip install -e adapters/emboviz-lerobot        # LeRobot v3.0 datasets
+uv pip install -e adapters/emboviz-reader-gr00t   # GR00T format (LeRobot v2.1 + modality.json)
+```
+
+| Format | Editable install |
 |---|---|
-| LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | `emboviz-lerobot` |
-| GR00T format (LeRobot v2.1 + `modality.json`) | `emboviz-reader-gr00t` |
+| LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | `-e adapters/emboviz-lerobot` |
+| GR00T format (LeRobot v2.1 + `modality.json`) | `-e adapters/emboviz-reader-gr00t` |
 
 ### The model you want
 
 Install the adapter for each policy you intend to analyze. An adapter is a small
 package; its model runtime (torch, transformers, openpi, and others) is
-installed into an isolated worker environment on first use.
+installed into an isolated worker environment on first use — built from your
+editable checkout.
 
 ```bash
-uv pip install emboviz-openvla         # OpenVLA-7B
-uv pip install emboviz-oft             # OpenVLA-OFT
-uv pip install emboviz-pi0             # π0 / π0.5
-uv pip install emboviz-gr00t           # GR00T-N1 / N1.7
-uv pip install emboviz-act             # ACT (Action Chunking Transformer)
-uv pip install emboviz-smolvla         # SmolVLA
-uv pip install emboviz-sam3            # SAM 3 detector (for the memorization mask)
-uv pip install emboviz-lama            # LaMa inpainting (on-manifold memorization fill, optional)
+uv pip install -e adapters/emboviz-openvla        # OpenVLA-7B
+uv pip install -e adapters/emboviz-oft            # OpenVLA-OFT
+uv pip install -e adapters/emboviz-pi0            # π0 / π0.5
+uv pip install -e adapters/emboviz-gr00t          # GR00T-N1 / N1.7
+uv pip install -e adapters/emboviz-act            # ACT (Action Chunking Transformer)
+uv pip install -e adapters/emboviz-smolvla        # SmolVLA
+uv pip install -e adapters/emboviz-sam3           # SAM 3 detector (memorization mask)
+uv pip install -e adapters/emboviz-lama           # LaMa inpainting (on-manifold memorization fill)
 ```
 
-Adapters do not share dependencies. Each runs in its own virtual environment and
-Python version and communicates with emboviz core over a msgpack/ZeroMQ socket.
-These environments are created automatically on first use.
+These can be combined into a single `uv pip install -e … -e …` call. Adapters do
+not share dependencies: each runs in its own virtual environment and Python
+version and communicates with emboviz core over a msgpack/ZeroMQ socket. Those
+environments are created automatically on first use (or pre-build one with
+`emboviz install-<adapter>`).
 
 > π0's attention diagnostic needs the PyTorch-converted checkpoint:
 > `emboviz convert-pi0 pi0_libero` (one-time).
