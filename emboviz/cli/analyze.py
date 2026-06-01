@@ -175,7 +175,12 @@ def _resolve_diagnostics(diagnostics_spec: str) -> frozenset[str]:
               help="Print the per-frame and per-episode forward-pass estimate "
                    "without running the diagnostic suite. Use this BEFORE "
                    "committing GPU hours on a long episode.")
-def analyze_cmd(config_ref: str, dry_run: bool) -> None:
+@click.option("--keep-warm", "keep_warm", is_flag=True, default=False,
+              help="Leave the workers (model, dataset reader, detector) running "
+                   "after the run instead of stopping them. Speeds up an "
+                   "immediate re-run, but keeps the GPU occupied until you run "
+                   "`emboviz stop`. Default: stop the workers this run spawned.")
+def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
     """Analyze a model on one or more episodes from a single config file.
 
     \b
@@ -190,6 +195,16 @@ def analyze_cmd(config_ref: str, dry_run: bool) -> None:
         # Size the GPU budget before a long run:
         emboviz analyze --config my-run.yaml --dry-run
     """
+    # Free the workers this run spawns when the command exits — on normal
+    # completion, on Ctrl-C, and on error. ``atexit`` runs in every one of
+    # those paths; teardown only touches workers WE spawned (a pre-existing /
+    # ``serve``-started worker is left alone). ``--keep-warm`` opts out.
+    if not keep_warm:
+        import atexit
+
+        from emboviz.adapters.lifecycle import teardown_spawned_workers
+        atexit.register(teardown_spawned_workers)
+
     from emboviz._internal.multi_episode import (
         EpisodeReport,
         aggregate_episodes,
