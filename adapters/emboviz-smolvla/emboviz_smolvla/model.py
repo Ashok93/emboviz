@@ -42,6 +42,17 @@ def _read_rename_map(preprocessor) -> dict[str, str]:
     return {}
 
 
+# Pinned RNG seed for prediction. SmolVLA's action expert samples noise
+# (torch) each call, so an unseeded ``predict`` varies run-to-run. emboviz's
+# comparative diagnostics measure how the action CHANGES under an intervention;
+# against a stochastic predict that change is confounded with sampling jitter.
+# Pinning the seed makes ``predict`` deterministic in its input, so the baseline
+# and the intervention draw IDENTICAL noise and it cancels in their difference
+# (common random numbers): one forward pass per arm, no averaging. Analysis-time
+# only — the deployed policy is untouched.
+_ANALYSIS_SEED = 0
+
+
 class SmolVLAAdapter(VLAModel):
     """lerobot SmolVLAPolicy behind the emboviz VLAModel interface.
 
@@ -266,6 +277,8 @@ class SmolVLAAdapter(VLAModel):
         return arr[0]   # (chunk_size, action_dim)
 
     def predict(self, scene: Scene) -> ActionResult:
+        import torch
+        torch.manual_seed(_ANALYSIS_SEED)   # deterministic sampling — see _ANALYSIS_SEED
         chunk = self._action_chunk(scene)
         action = chunk[0]
         return ActionResult(
