@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -138,6 +139,56 @@ class Gr00tDatasetSource(EpisodeSource):
             out[ep] = scenes
         return out
 
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        """Frame count per episode WITHOUT decoding any video.
+
+        Reads the per-episode frame ranges from lerobot's ``episode_data_index``
+        (derived from the parquet metadata, not the mp4s). Overrides the base
+        default, which would materialise each whole episode just to ``len`` it —
+        pure waste on a video dataset (the modality pool only needs the counts).
+        """
+        dataset = self._open()
+        from_idx, to_idx = self._episode_bounds(dataset)
+        n_eps = len(from_idx)
+        out: dict[int, int] = {}
+        for ep in (int(i) for i in episode_indices):
+            if ep < 0 or ep >= n_eps:
+                raise IndexError(
+                    f"episode {ep} is out of range for {self.repo_id!r} "
+                    f"(has {n_eps} episodes)."
+                )
+            out[ep] = int(to_idx[ep]) - int(from_idx[ep])
+        return out
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, Scene]:
+        """Materialise ONE frame per episode, decoding only that frame.
+
+        ``{episode_idx: frame_offset}`` → ``{episode_idx: Scene}``. The global
+        row is ``episode_data_index['from'][ep] + offset``; indexing the lerobot
+        dataset there decodes just that frame's video. Overrides the base
+        default (which materialises each whole episode and keeps one frame) —
+        the modality pool needs a single frame per episode. An out-of-range
+        offset is omitted from the result, per the base contract.
+        """
+        dataset = self._open()
+        from_idx, to_idx = self._episode_bounds(dataset)
+        n_eps = len(from_idx)
+        out: dict[int, Scene] = {}
+        for ep_idx, offset in episode_offsets.items():
+            ep, off = int(ep_idx), int(offset)
+            if ep < 0 or ep >= n_eps:
+                raise IndexError(
+                    f"episode {ep} is out of range for {self.repo_id!r} "
+                    f"(has {n_eps} episodes)."
+                )
+            start, end = int(from_idx[ep]), int(to_idx[ep])
+            if not (0 <= off < end - start):
+                continue  # out-of-range offset → omit (base contract)
+            sample = dataset[start + off]
+            instruction = self._resolve_instruction(sample)
+            out[ep] = self._build_scene(sample, instruction, ep, off, self.fps)
+        return out
+
     def load_trajectory(self, episode_idx: int) -> Trajectory:
         scenes = self.load_episode(str(episode_idx))
         fps = float(scenes[0].metadata.get("fps", 5.0)) if scenes else 5.0
@@ -182,6 +233,8 @@ class Gr00tDatasetSource(EpisodeSource):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         is_local = os.path.isdir(self.repo_id) or self.repo_id.startswith("/")
+        if is_local:
+            self._ensure_episodes_stats(Path(self.repo_id))
         try:
             if is_local:
                 self._dataset = LeRobotDataset("local", root=self.repo_id)
@@ -201,6 +254,62 @@ class Gr00tDatasetSource(EpisodeSource):
                 f"fallback — the real failure is the local one above."
             ) from e
         return self._dataset
+
+    @staticmethod
+    def _ensure_episodes_stats(root: Path) -> None:
+        """Backfill ``meta/episodes_stats.jsonl`` for GR00T datasets mislabeled v2.1.
+
+        NVIDIA's GR00T export writes ``codebase_version: v2.1`` into
+        ``info.json`` but ships only the v2.0 global ``meta/stats.json`` —
+        without the per-episode ``meta/episodes_stats.jsonl`` that lerobot's
+        v2.1 reader requires (GR00T's own loader reads ``stats.json`` and never
+        needs it). lerobot then treats the absent file as an incomplete local
+        copy and retries on the Hub, failing with a misleading 404.
+
+        Generate it once with lerobot's OWN converter (``v21.convert_stats`` —
+        real per-episode statistics computed from the data), the operation
+        ``convert_dataset_v20_to_v21`` performs. No-op when the file already
+        exists, when the dataset is genuinely v2.0 (lerobot reads ``stats.json``
+        directly then), or when no ``stats.json`` exists to load it from.
+        """
+        meta = root / "meta"
+        info_path = meta / "info.json"
+        if (meta / "episodes_stats.jsonl").is_file():
+            return
+        if not info_path.is_file() or not (meta / "stats.json").is_file():
+            return
+        version = str(json.loads(info_path.read_text()).get("codebase_version", "")).lstrip("v")
+        if not version.startswith("2.1"):
+            # Genuine v2.0 (or older) — lerobot's v2.0 branch reads stats.json.
+            return
+
+        from lerobot.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDataset
+        from lerobot.datasets.utils import write_info
+        from lerobot.datasets.v21.convert_stats import convert_stats
+
+        print(
+            f"[reader-gr00t] {root}: declares codebase_version v2.1 but has no "
+            "meta/episodes_stats.jsonl (GR00T export ships only the v2.0 "
+            "meta/stats.json). Generating per-episode stats once with lerobot's "
+            "v2.0->v2.1 converter.",
+            file=sys.stderr, flush=True,
+        )
+
+        # Present the dataset as v2.0 so lerobot loads it from the existing
+        # stats.json (its sanctioned v2.0 path), compute the real per-episode
+        # stats, then restore the v2.1 label. The end state — episodes_stats.jsonl
+        # present, info.json at v2.1 — is exactly what convert_dataset_v20_to_v21
+        # produces. info.json is rewritten in place; the change is logged above,
+        # never silent.
+        info = json.loads(info_path.read_text())
+        info["codebase_version"] = "v2.0"
+        info_path.write_text(json.dumps(info, indent=4))
+        try:
+            ds = LeRobotDataset("local", root=str(root))
+            convert_stats(ds)
+        finally:
+            info["codebase_version"] = CODEBASE_VERSION
+            write_info(info, root)
 
     @staticmethod
     def _episode_bounds(dataset):

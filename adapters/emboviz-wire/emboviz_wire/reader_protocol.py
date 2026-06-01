@@ -16,10 +16,14 @@ The contract is deliberately tiny and format-agnostic:
   * ``all_instructions``   — every unique instruction string.
   * ``name``               — a stable dataset identity (used for caching).
 
-``load_episodes`` and ``load_trajectory`` ship default implementations on
-top of ``load_episode`` so a minimal reader only implements three
-abstract methods; readers with a cheaper batched path (LeRobot loads many
-episodes from one dataset handle) override ``load_episodes``.
+``load_episodes``, ``load_trajectory`` and ``load_first_scene`` ship default
+implementations on top of ``load_episode``. The abstract methods every reader
+must implement are ``list_episodes``, ``load_episode``, ``all_instructions``,
+``episode_lengths`` and ``sample_frames``. The last two are part of the
+required contract — not optional optimizations — so the modality pool can
+sample single frames cheaply; there is no silent whole-episode-decode default
+to inherit. Readers with a cheaper batched path (LeRobot loads many episodes
+from one dataset handle) also override ``load_episodes``.
 """
 
 from __future__ import annotations
@@ -61,30 +65,31 @@ class EpisodeSource(ABC):
         """
         return {int(i): self.load_episode(str(int(i))) for i in episode_indices}
 
+    @abstractmethod
     def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
-        """Frame count for each episode, keyed by index.
+        """Frame count for each episode, keyed by index — WITHOUT decoding
+        any frame.
 
-        Default materializes each episode via :meth:`load_episode`; readers
-        whose metadata records episode lengths override this to answer
-        without decoding any frame.
+        Required contract method. The modality pool needs episode lengths to
+        pick random frames and must never pay a full-episode decode to learn a
+        count. Readers answer from their own metadata (parquet row ranges, h5
+        array shapes, cached step lists). There is deliberately NO base
+        implementation: a reader states how it counts, explicitly, rather than
+        inheriting a silent whole-episode-decode that runs in the wrong place.
         """
-        return {int(i): len(self.load_episode(str(int(i)))) for i in episode_indices}
 
+    @abstractmethod
     def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, "Scene"]:
-        """Materialize one frame per episode — ``{episode_idx: frame_offset}``
-        → ``{episode_idx: Scene}``.
+        """Materialize ONE frame per episode — ``{episode_idx: frame_offset}``
+        → ``{episode_idx: Scene}`` — decoding only the requested frames.
 
-        Default loads each episode and indexes the requested offset; readers
-        with random per-frame access override this to decode ONLY the
-        requested frames (the modality pool needs one frame per episode, not
-        the whole episode). An out-of-range offset is omitted from the result.
+        Required contract method. The modality pool samples a single frame
+        from each of several episodes and must never decode whole episodes to
+        do so. Readers with random per-frame access decode only the requested
+        frame; sequential formats state their access cost explicitly in the
+        override. An out-of-range offset is omitted from the result. There is
+        deliberately NO base implementation — see :meth:`episode_lengths`.
         """
-        out: dict[int, "Scene"] = {}
-        for ep_idx, offset in episode_offsets.items():
-            scenes = self.load_episode(str(int(ep_idx)))
-            if 0 <= int(offset) < len(scenes):
-                out[int(ep_idx)] = scenes[int(offset)]
-        return out
 
     def load_trajectory(self, episode_idx: int) -> Trajectory:
         """Load one episode as a typed :class:`Trajectory`.

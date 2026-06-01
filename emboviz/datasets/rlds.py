@@ -193,6 +193,41 @@ class RLDSEpisodeSource(EpisodeSource):
                 out.add(ep_instr)
         return sorted(out)
 
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        """Frame count per episode, from the cached materialized episodes.
+
+        RLDS/TFDS is sequential: episodes are materialized once into
+        :meth:`_episodes` (cached), after which the scene count is computed
+        from the in-memory steps — no per-frame decode.
+        """
+        eps = self._episodes()
+        out: dict[int, int] = {}
+        for i in episode_indices:
+            idx = int(i)
+            if idx < 0 or idx >= len(eps):
+                raise IndexError(f"episode {i} out of range (have {len(eps)})")
+            out[idx] = len(self._episode_to_scenes(eps[idx], idx))
+        return out
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, Scene]:
+        """One frame per episode, from the cached materialized episodes.
+
+        RLDS has no random per-step access, but the episodes are already in
+        memory after the one-time materialization, so this builds the scenes
+        and indexes the requested offset (no re-decode). An out-of-range offset
+        is omitted from the result.
+        """
+        eps = self._episodes()
+        out: dict[int, Scene] = {}
+        for ep_idx, offset in episode_offsets.items():
+            idx = int(ep_idx)
+            if idx < 0 or idx >= len(eps):
+                raise IndexError(f"episode {ep_idx} out of range (have {len(eps)})")
+            scenes = self._episode_to_scenes(eps[idx], idx)
+            if 0 <= int(offset) < len(scenes):
+                out[idx] = scenes[int(offset)]
+        return out
+
     # ── internals ──────────────────────────────────────────────────
 
     def _episodes(self) -> list[dict]:
