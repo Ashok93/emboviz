@@ -1,6 +1,6 @@
 [project]
 name = "emboviz-reader-gr00t"
-version = "0.1.0"
+version = "0.3.0"
 description = "GR00T-format dataset reader for emboviz — reads LeRobot v2.1 + modality.json datasets in its own isolated venv as a ZeroMQ worker."
 readme = "README.md"
 license = { text = "Apache-2.0" }

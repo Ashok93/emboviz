@@ -468,6 +468,10 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "emboviz-lama" },
+    { name = "emboviz-lerobot" },
+    { name = "emboviz-reader-gr00t" },
+    { name = "emboviz-sam3" },
     { name = "emboviz-wire" },
     { name = "h5py" },
     { name = "huggingface-hub" },
@@ -488,21 +492,63 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+act = [
+    { name = "emboviz-act" },
+]
+all = [
+    { name = "emboviz-act" },
+    { name = "emboviz-gr00t" },
+    { name = "emboviz-oft" },
+    { name = "emboviz-openvla" },
+    { name = "emboviz-pi0" },
+    { name = "emboviz-smolvla" },
+]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+gr00t = [
+    { name = "emboviz-gr00t" },
+]
+oft = [
+    { name = "emboviz-oft" },
+]
+openvla = [
+    { name = "emboviz-openvla" },
+]
+pi0 = [
+    { name = "emboviz-pi0" },
+]
 rlds = [
     { name = "rlds" },
     { name = "tensorflow-cpu" },
     { name = "tensorflow-datasets" },
 ]
+smolvla = [
+    { name = "emboviz-smolvla" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
+    { name = "emboviz-act", marker = "extra == 'act'", editable = "adapters/emboviz-act" },
+    { name = "emboviz-act", marker = "extra == 'all'", editable = "adapters/emboviz-act" },
+    { name = "emboviz-gr00t", marker = "extra == 'all'", editable = "adapters/emboviz-gr00t" },
+    { name = "emboviz-gr00t", marker = "extra == 'gr00t'", editable = "adapters/emboviz-gr00t" },
+    { name = "emboviz-lama", editable = "adapters/emboviz-lama" },
+    { name = "emboviz-lerobot", editable = "adapters/emboviz-lerobot" },
+    { name = "emboviz-oft", marker = "extra == 'all'", editable = "adapters/emboviz-oft" },
+    { name = "emboviz-oft", marker = "extra == 'oft'", editable = "adapters/emboviz-oft" },
+    { name = "emboviz-openvla", marker = "extra == 'all'", editable = "adapters/emboviz-openvla" },
+    { name = "emboviz-openvla", marker = "extra == 'openvla'", editable = "adapters/emboviz-openvla" },
+    { name = "emboviz-pi0", marker = "extra == 'all'", editable = "adapters/emboviz-pi0" },
+    { name = "emboviz-pi0", marker = "extra == 'pi0'", editable = "adapters/emboviz-pi0" },
+    { name = "emboviz-reader-gr00t", editable = "adapters/emboviz-reader-gr00t" },
+    { name = "emboviz-sam3", editable = "adapters/emboviz-sam3" },
+    { name = "emboviz-smolvla", marker = "extra == 'all'", editable = "adapters/emboviz-smolvla" },
+    { name = "emboviz-smolvla", marker = "extra == 'smolvla'", editable = "adapters/emboviz-smolvla" },
     { name = "emboviz-wire", editable = "adapters/emboviz-wire" },
     { name = "h5py", specifier = ">=3.10" },
     { name = "huggingface-hub", specifier = ">=0.24" },
@@ -527,7 +573,157 @@ requires-dist = [
     { name = "tensorflow-datasets", marker = "extra == 'rlds'", specifier = ">=4.9" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["rlds", "dev"]
+provides-extras = ["openvla", "oft", "pi0", "gr00t", "act", "smolvla", "all", "rlds", "dev"]
+
+[[package]]
+name = "emboviz-act"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-act" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-gr00t"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-gr00t" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-lama"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-lama" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-lerobot"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-lerobot" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-oft"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-oft" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-openvla"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-openvla" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-pi0"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-pi0" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-reader-gr00t"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-reader-gr00t" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-sam3"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-sam3" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-smolvla"
+version = "0.3.0"
+source = { editable = "adapters/emboviz-smolvla" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
 
 [[package]]
 name = "emboviz-wire"

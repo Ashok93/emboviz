@@ -86,10 +86,9 @@ def _resolve_model_spec(adapter: str) -> str:
         f"  Installed adapters (entry-point): {sorted(installed) or '(none)'}\n"
         f"  Legacy aliases:                   {sorted(_LEGACY_MODEL_ALIASES)}\n"
         f"  Power-user form:                  '<module>:<Class>'\n"
-        f"  To add '{adapter}' as a ZMQ-worker adapter, run:\n"
-        f"      uv pip install emboviz-{adapter}\n"
-        f"      emboviz install-{adapter}\n"
-        f"      emboviz-{adapter} serve &"
+        f"  To install '{adapter}', from the emboviz repo root run:\n"
+        f"      uv sync --extra {adapter}\n"
+        f"  (its isolated worker venv builds automatically on the next run)."
     )
 
 

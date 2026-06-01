@@ -224,10 +224,10 @@ def apply_fill(
         if inpainter is None:
             raise ValueError(
                 "fill mode 'lama_inpaint' requires the LaMa inpainter "
-                "worker, but no inpainter was provided. Install + start it "
-                "(uv pip install emboviz-lama; emboviz install-lama) and "
-                "request it via analysis.fills, or drop 'lama_inpaint' from "
-                "analysis.fills."
+                "worker, but no inpainter was provided. LaMa ships with emboviz "
+                "and its worker builds automatically when a config requests the "
+                "lama_inpaint fill — request it via analysis.fills, or drop "
+                "'lama_inpaint' from analysis.fills."
             )
         return inpainter.inpaint(arr, mask, key=cache_key)
     return _apply_fill(arr, mask, fill_mode)

@@ -14,15 +14,20 @@ the same pattern as the other model adapters.
 
 ## Install
 
+From the [emboviz](../../README.md#installation) repo root:
+
 ```bash
-uv pip install emboviz emboviz-lerobot emboviz-act
-emboviz install-act          # builds the isolated lerobot runtime venv
+uv sync --extra act
 ```
+
+Installs this adapter alongside core, both dataset readers, and the SAM 3 /
+LaMa workers. Its isolated runtime venv builds automatically on the first
+`uv run emboviz analyze` — you never build it by hand.
 
 ## Run
 
 ```bash
-emboviz-act serve --kwargs '{"checkpoint": "<repo_or_dir>", "camera_mapping": {"primary": "observation.images.top"}}'
+uv run emboviz-act serve --kwargs '{"checkpoint": "<repo_or_dir>", "camera_mapping": {"primary": "observation.images.top"}}'
 ```
 
 The analyze runner auto-spawns the worker from the run config; the manual

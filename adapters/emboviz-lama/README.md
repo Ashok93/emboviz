@@ -25,10 +25,9 @@ conservative fill that does not hallucinate new content into the hole.
 
 ## Install
 
-```bash
-uv pip install emboviz emboviz-lama
-emboviz install-lama          # builds the isolated runtime venv
-```
+Ships with [emboviz](../../README.md#installation) core — `uv sync` installs
+it; you do not install it separately. The isolated worker venv builds
+automatically on first use.
 
 `emboviz install-lama` materialises `~/.emboviz/venvs/lama` from this
 adapter's `AdapterSpec` — the same path a PyPI user follows.
@@ -39,7 +38,7 @@ adapter's `AdapterSpec` — the same path a PyPI user follows.
 # preload the model + run a one-forward self-test BEFORE accepting
 # requests (the analyze runner auto-spawns this for you when a config
 # requests the lama_inpaint fill)
-emboviz-lama serve
+uv run emboviz-lama serve
 ```
 
 `emboviz-lama serve` starts a **ZMQ worker** over a Unix-domain socket

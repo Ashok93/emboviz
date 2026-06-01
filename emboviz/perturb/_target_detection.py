@@ -722,10 +722,11 @@ class SAM3Detector:
             from emboviz_sam3.client import Sam3Client
         except ImportError as e:
             raise ImportError(
-                "SAM3Detector requires the ``emboviz-sam3`` adapter "
-                "package to be installed (it ships the typed RPC client "
-                "alongside the worker code). Install via:\n"
-                "    uv pip install emboviz-sam3"
+                "SAM3Detector requires the ``emboviz-sam3`` adapter package "
+                "(it ships the typed RPC client alongside the worker code). "
+                "It ships with emboviz core, so if it's missing your install "
+                "is incomplete — reinstall from the repo root with:\n"
+                "    uv sync"
             ) from e
         self._client = Sam3Client(
             endpoint=self.endpoint,
@@ -749,9 +750,9 @@ class SAM3Detector:
                 "    ~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve\n\n"
                 "Or override the endpoint via "
                 "EMBOVIZ_SAM3_ENDPOINT=ipc://... or tcp://...\n\n"
-                "If the worker isn't installed, run:\n"
-                "    uv pip install emboviz-sam3\n"
-                "    emboviz install-sam3\n\n"
+                "`emboviz analyze` builds and spawns this worker automatically; "
+                "to pre-build its isolated venv yourself, run:\n"
+                "    uv run emboviz install-sam3\n\n"
                 "If you need to keep moving without SAM 3, pass\n"
                 "    --detector gd-sam\n"
                 "to fall back to GroundingDINO + SAM."
