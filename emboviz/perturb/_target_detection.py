@@ -664,8 +664,8 @@ class SAM3Detector:
         self,
         target_text: str,
         endpoint: Optional[str] = None,
-        score_threshold: float = 0.30,
-        mask_threshold: float = 0.50,
+        score_threshold: float = 0.15,
+        mask_threshold: float = 0.40,
         timeout: float = 120.0,
         device: str = "cuda",
     ):
@@ -680,11 +680,16 @@ class SAM3Detector:
                 env var, else ``ipc://~/.emboviz/sockets/sam3.sock``.
             score_threshold: detections with the top instance's score
                 below this are returned as ``None`` (the diagnostic
-                then skips that frame with a clear reason). 0.30 is
-                the "high-precision" cutoff from the SAM 3 release
-                notes.
+                then skips that frame with a clear reason). Default 0.15
+                — deliberately below the SAM 3 release "high-precision"
+                0.30 cutoff: a missed detection drops a camera from the
+                memorization mask (and a frame is only scored when the
+                target is removed from EVERY camera), so under-detecting
+                is worse than over-masking a little background.
             mask_threshold: SAM 3 emits per-pixel mask logits; values
-                above this become foreground. 0.50 is standard.
+                above this become foreground. Default 0.40 (below the
+                0.50 standard) for a slightly more generous mask that
+                covers the whole target rather than its core.
             timeout: per-request RPC timeout in seconds. SAM 3 inference
                 is ~100-300 ms per image on H100/A6000; the first
                 request to a freshly-started worker pays a ~30 s warmup

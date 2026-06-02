@@ -8,9 +8,9 @@ JSON dicts into the human-readable artifacts users actually open:
   • Per-episode HTML — same content, browser-friendly, dark theme.
   • Aggregate HTML — cross-episode patterns + per-episode links.
 
-The markdown variants are core (no extra deps). The HTML variants
-require Jinja2 from the ``viz`` extra; calling them without it raises a
-clean ImportError pointing at ``pip install 'emboviz[viz]'``.
+The markdown variants and Jinja2 both ship with emboviz core, so the
+HTML variants render out of the box; if Jinja2 is somehow missing the
+renderer raises a clean ImportError pointing at ``uv sync``.
 
 We deliberately don't synthesize prose — every sentence comes from the
 Finding objects the diagnostics emitted. The reporter is a layout +
@@ -155,8 +155,9 @@ def _jinja_env():
         from jinja2 import Environment, FileSystemLoader, select_autoescape
     except ImportError as e:
         raise ImportError(
-            "HTML report rendering needs the `viz` extra. Install with: "
-            "pip install 'emboviz[viz]'. Underlying error: " + str(e)
+            "HTML report rendering needs Jinja2, an emboviz core dependency. "
+            "If it is missing your install is incomplete — reinstall from the "
+            "repo root with: uv sync. Underlying error: " + str(e)
         ) from e
     templates_dir = Path(__file__).parent / "templates"
     return Environment(
@@ -235,7 +236,7 @@ def write_episode_reports(
         html_path = out_dir / "report.html"
         html_path.write_text(html)
     except ImportError:
-        # viz extra not installed — markdown is still written, the user
-        # can pip install 'emboviz[viz]' for HTML later.
+        # Jinja2 missing (incomplete install) — markdown is still written;
+        # `uv sync` restores the core dep and HTML renders next run.
         pass
     return {"md": md_path, "html": html_path}

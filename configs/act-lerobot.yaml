@@ -49,6 +49,13 @@ analysis:
   n_frames: 4
   mask_query: "the object"                       # <-- the manipulated object for the memorization mask
   detector: sam3
+  # Detection thresholds (optional; shown with their defaults). Memorization
+  # scores a frame only when the target is removed from EVERY camera, so these
+  # are kept permissive — a missed detection drops the frame, which is worse
+  # than over-masking a little background. Lower further if the target is small
+  # / occluded on a secondary view; raise toward 0.30 for fewer stray hits.
+  detector_score_threshold: 0.15                 # min detection confidence to keep a detection
+  detector_mask_threshold: 0.40                  # per-pixel mask cutoff (SAM 3); higher = tighter mask
   diagnostics: all
 
 output: ./report/act-lerobot

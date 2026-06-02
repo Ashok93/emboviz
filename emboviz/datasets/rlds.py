@@ -9,7 +9,7 @@ so the adapter takes explicit ``camera_keys`` + ``state_key`` mappings
 and refuses to guess.
 
 Install:
-  pip install 'emboviz[rlds]'
+  uv sync --extra rlds
 
 This pulls ``tensorflow_datasets`` (and a CPU-only tensorflow). We do
 not train through this adapter — we only read the recorded episodes —
@@ -240,7 +240,7 @@ class RLDSEpisodeSource(EpisodeSource):
         except ImportError as e:
             raise ImportError(
                 "RLDSEpisodeSource needs the `rlds` extra. Install with: "
-                "pip install 'emboviz[rlds]'. Underlying error: " + str(e)
+                "uv sync --extra rlds. Underlying error: " + str(e)
             ) from e
 
         builder = tfds.builder(self.builder_name, data_dir=self.data_dir)

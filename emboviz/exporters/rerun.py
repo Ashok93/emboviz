@@ -79,6 +79,23 @@ def _verdict(sev: Severity) -> tuple[str, tuple[int, int, int]]:
     return _VERDICT_BY_SEVERITY.get(sev, ("couldn't test", VERDICT_NOTEST_RGB))
 
 
+# Emoji per verdict. Rerun's Markdown renderer does NOT support inline HTML —
+# a ``<span style='color:...'>`` shows up as literal text — so verdict colour
+# in the text cards is carried by an emoji instead. Matches the green/yellow/
+# red/gray legend in each tab's "What this measures" description.
+_VERDICT_EMOJI: dict[Severity, str] = {
+    Severity.PASS:     "🟢",
+    Severity.INFO:     "🟢",
+    Severity.MODERATE: "🟡",
+    Severity.CRITICAL: "🔴",
+    Severity.UNKNOWN:  "⚪",
+}
+
+
+def _verdict_emoji(sev: Severity) -> str:
+    return _VERDICT_EMOJI.get(sev, "⚪")
+
+
 # Draw-order layers within a camera's 2D view (higher = on top).
 _DRAW_RGB         = 0.0
 _DRAW_SENSITIVITY = 1.5
@@ -102,58 +119,59 @@ PerFrameModalityResponse = dict[int, dict[str, float]]
 
 _DOC_MEMORIZATION = """## Memorization — is the model looking at the target?
 
-We located the manipulated target on every camera (SAM 3 or the per-frame
-annotations you provided), masked it with two independent fills (channel
-mean + Gaussian blur), and measured how much the model's action changed.
+We locate the manipulated target on every camera, mask it (channel-mean +
+Gaussian-blur fills; LaMa inpaint when enabled), and measure how much the
+model's action changes. A frame is scored only when the target is removed
+from EVERY camera the model sees: if it can't be located on one camera it
+stays visible there, so that frame is marked "couldn't test" rather than
+scored on a partial mask.
 
 **How to read this tab**
 
-- **Timeline strip** colors every frame by the verdict on that frame.
-  - 🟢 **OK** — masking the target moved the action substantially. The
-    model is reading the scene.
-  - 🟡 **MIXED** — partial response, between sampling noise and a strong
-    signal.
-  - 🔴 **WORTH A LOOK** — action barely moved. Memorized signature: the
-    policy may be predicting from state + instruction + history without
-    visually consuming the target.
-  - ⚪ **couldn't test** — target not detected on that frame, or the mask
-    didn't actually change the image (fill ≈ target color).
-- **Original | Masked** per camera lets you visually verify the mask
-  covered the right object. If SAM 3 (or your annotation) caught the
-  wrong thing, the verdict is meaningless — that's why we show it.
-- **Δaction over frames** is the magnitude of the action shift,
-  normalized to "fraction of a typical action". Higher = more visually
-  grounded.
+- **Original | Masked** per camera — verify the mask actually covered the
+  target. If the detector caught the wrong thing the verdict is meaningless,
+  which is why these come first.
+- **Δaction plot** (seekable — scrub it and the images + card update):
+  - The **line** is how much the action moved when the target was masked,
+    normalized to "fraction of a typical action".
+  - The **green band** is the "grounded" threshold, the **red band** the
+    "memorized" one. Where the line sits is the reading: above green the
+    model is reading the target; below red it barely reacted — the memorized
+    signature (predicting from state + history, not vision).
+  - Each frame's **point is coloured by its verdict** — 🟢 OK (grounded),
+    🟡 MIXED, 🔴 WORTH A LOOK (memorized), ⚪ couldn't test.
+- **This frame** card — verdict + raw numbers for the frame under the cursor.
 
-Numbers are normalized by the model's typical action magnitude (set by
-the per-trajectory calibration), so the same threshold has the same
-meaning across models.
+Numbers are normalized by the model's typical action magnitude (per-trajectory
+calibration), so the thresholds mean the same thing across models.
 """
 
 _DOC_MODALITY = """## Modality dropout — which inputs is the model using?
 
-For each declared input modality (every camera, the instruction, robot
-state, gripper, action history), we substitute it with K real values
-sampled from OTHER episodes in your dataset, and measure how much the
-action changes. If the action barely moves, that input isn't being used.
+For each declared input (every camera, the instruction, robot state, gripper,
+action history) we substitute it with K real values sampled from OTHER
+episodes in your dataset and measure how much the action changes. A big change
+means the model relies on that input; barely any change means it's ignoring it
+(or the dataset couldn't offer a different-enough value to test).
 
 **How to read this tab**
 
-- **Verdict heatmap** — rows are modalities, columns are frames, color
-  is the verdict on that (modality, frame) cell.
-  - 🟢 **OK** — strong response. The model is consuming this input.
-  - 🟡 **MIXED** — partial response (between noise and the "strong"
-    threshold).
-  - 🔴 **WORTH A LOOK** — response below the noise floor. The model
-    appears to ignore this input on this frame.
-  - ⚪ **couldn't test** — substitute too similar to the current value
-    (the pool didn't have enough variety) or pool empty for this modality.
-- **Mean response per modality** (across the whole episode) — the
-  episode-level signal at a glance. A row that's red across most frames
-  is a candidate for "the model isn't using this input."
-- A modality that's *supposed* to matter (instruction for a
-  language-conditioned task, the wrist camera for fine manipulation) but
-  reads consistently 🔴 is the strongest signal in this dataset.
+- **Per-modality response plot** (seekable — scrub it and the per-frame card
+  updates). One line per input, normalized to "fraction of a typical action":
+  - the **green band** is the "used" threshold, the **red band** the "ignored"
+    one.
+  - a line riding **above green** = the model uses that input; pinned **below
+    red** = it ignores it; in between = partial.
+- **Per modality — mean Δaction + verdict** card: the whole-episode average
+  for each input, tagged 🟢 USED / 🟡 PARTIAL / 🔴 IGNORED against the same
+  scale, strongest first.
+- **This frame** card: the verdict + numbers for the frame under the cursor.
+
+A modality you EXPECT to matter (the instruction on a language task, the wrist
+camera for fine manipulation) reading 🔴 IGNORED is the strongest signal here.
+Caveat: on a single-task dataset the substitutes can be too similar to the
+original to count as a real intervention — read a low `state` response with
+that in mind.
 """
 
 _DOC_ATTENTION = """## Attention — where is the model looking?
@@ -168,9 +186,11 @@ literature-backed filter + sink masking, per LITERATURE.md §4).
   target object / gripper / task-relevant region. If attention sits on
   the background or off-frame, the policy isn't visually grounded.
 - **Attention centroid drift (px)** — pixel distance the attention
-  centroid moves between consecutive frames. Stable focus = small
-  numbers; wandering = large jumps. Spikes correlate with the few frames
-  before a failure (model loses its anchor).
+  centroid moves between consecutive frames (seekable; scrub it against the
+  overlays above). Low = stable focus; large jumps = wandering, which tends
+  to spike in the frames before a failure.
+  - the 🟡 **warning** and 🔴 **critical** bands are the thresholds: a line
+    sitting well below the warning band means the gaze is anchored.
 - Drift is measured on the **primary** camera (configurable). Use the
   per-camera overlay to see what's drifting.
 
@@ -211,12 +231,13 @@ step 0 is best-guess and you must re-plan every step.
 
 **How to read this tab**
 
-- **Per-frame disagreement** is the normalized L2 distance between
-  ``chunk[t][k]`` and ``chunk[t+k][0]``. Lower = more consistent
+- **Per-frame disagreement** (seekable) is the normalized L2 distance
+  between ``chunk[t][k]`` and ``chunk[t+k][0]``. Lower = more consistent
   lookahead.
-- **Safely-committable horizon** — how many steps into the chunk you
-  can trust before disagreement crosses the threshold. Higher is
-  better.
+  - the 🟢 **consistent** band (noise floor) and 🔴 **drifts** band
+    (strong-disagreement threshold) mark the regions: a line below green is
+    reliable lookahead; above red the multi-step plan drifts.
+- **Episode summary** card gives the one-line verdict + the mean.
 
 This metric is hidden from the dashboard when your model is
 single-step (no ``action_chunk``).
@@ -224,17 +245,18 @@ single-step (no ``action_chunk``).
 
 _DOC_FINDINGS = """## Findings — plain English for every metric
 
-A single page summarizing every diagnostic for every axis the framework
-could compute. For each axis you get:
+A single page summarizing every diagnostic, **most-concerning first**, each
+tagged 🟢 OK / 🟡 MIXED / 🔴 WORTH A LOOK / ⚪ couldn't test. For each one:
 
-- **Observed** — what the test actually measured (numbers + the most
-  representative per-frame example).
+- **Observed** — what the test actually measured (the per-frame distribution
+  plus the most representative example).
 - **Meaning** — what the result tells you about the model.
-- **Next step** — a concrete action: what to try, what to check, where
-  to drill.
+- **Next step** — a concrete action: what to try, what to check, where to
+  drill.
 
-If a metric was inconclusive on every frame of this episode, the
-diagnostic says so — we do not pretend a number when one isn't there.
+Diagnostics that **could not run** are listed under "Not measured" with the
+reason — we surface what wasn't tested rather than silently dropping it. If a
+metric was inconclusive on every frame, it says so; we never invent a number.
 """
 
 
@@ -255,6 +277,7 @@ def export_rerun(
     masked_image_per_frame: Optional[PerFrameMaskedImage] = None,
     modality_response_per_frame: Optional[PerFrameModalityResponse] = None,
     trajectory_axis_results: Optional[dict[str, dict]] = None,
+    not_applicable: Optional[dict[str, str]] = None,
 ) -> Path:
     """Emit an .rrd with one tab per metric, plus a Findings summary.
 
@@ -269,14 +292,14 @@ def export_rerun(
     except ImportError as e:
         raise ImportError(
             "Rerun export requires the `rerun-sdk` package. It ships with "
-            "emboviz core — reinstall with: uv pip install 'emboviz' "
-            "(rerun-sdk>=0.33,<0.34)."
+            "emboviz core — if it is missing your install is incomplete; "
+            "reinstall from the repo root with: uv sync (rerun-sdk>=0.33,<0.34)."
         ) from e
 
     if not hasattr(rr, "RecordingStream"):
         raise RuntimeError(
-            "rerun-sdk too old for the export API. Install the pinned range: "
-            "uv pip install 'rerun-sdk>=0.33,<0.34'"
+            "rerun-sdk too old for the export API. Reinstall emboviz from the "
+            "repo root with: uv sync (pins rerun-sdk>=0.33,<0.34)."
         )
 
     # rerun-sdk 0.23 renamed Scalar → Scalars (plural) and unified the
@@ -307,6 +330,7 @@ def export_rerun(
     masked_image_per_frame       = masked_image_per_frame       or {}
     modality_response_per_frame  = modality_response_per_frame  or {}
     trajectory_axis_results      = trajectory_axis_results      or {}
+    not_applicable               = not_applicable               or {}
 
     # ── 0. Static descriptions ────────────────────────────────────────────
     # One markdown doc per metric tab. Always logged so the blueprint can
@@ -513,77 +537,38 @@ def export_rerun(
                     recording=rec,
                 )
 
-    # ── 3. Per-axis verdict ribbons (RGBA strips, color = verdict) ────────
-    # One RGBA strip per axis, 1 row × N_frames, drawn from the per-frame
-    # severities. Sits at the top of each metric tab so the user sees
-    # "where in the episode is the verdict different" at a glance.
-    for axis, traj_result in per_axis_results.items():
-        ribbon = _verdict_ribbon(traj_result)
-        rr.log(
-            f"ribbon/{axis}",
-            rr.Image(ribbon, draw_order=_DRAW_BOX),
-            recording=rec, static=True,
+    # ── 3. Memorization plot overlays — decision bands + verdict-coloured
+    # points on the SEEKABLE Δaction time-series. The verdict now scrubs with
+    # the time cursor instead of living in a frozen strip (the old static
+    # ribbon, removed): the two flat bands are the diagnostic's own thresholds
+    # — below "memorized" the action barely moved when the target was masked,
+    # above "grounded" it moved substantially — and each frame's point is
+    # coloured by its verdict, so where the line sits IS the reading.
+    mem_axis = "vision.memorization"
+    if mem_axis in per_axis_results:
+        _log_memorization_overlays(
+            rr, rec, Scalars, per_axis_results[mem_axis], fps, _set_time,
         )
 
-    # ── 4. Modality dropout — categorical verdict heatmap ─────────────────
-    # M-row × N-col RGBA matrix where row = modality, col = frame, color =
-    # 3-tier verdict for that (modality, frame). The single most informative
-    # view on this metric: one glance shows "instruction row is solid red".
+    # ── 4. Modality dropout — decision bands on the seekable per-modality
+    # plot + an episode-summary card that anchors each modality's mean response
+    # to a verdict. (No static verdict heatmap, no unlabelled bar chart: the
+    # per-modality lines ride the timeline, and where each sits relative to the
+    # bands is the reading.)
     modality_axis = "input.modality_dropout"
     if modality_axis in per_axis_results:
-        heatmap, modality_order = _modality_verdict_heatmap(
-            per_axis_results[modality_axis],
+        _log_modality_overlays(
+            rr, rec, Scalars, per_axis_results[modality_axis], fps, _set_time,
         )
-        if heatmap is not None:
-            rr.log(
-                "modality/heatmap",
-                rr.Image(heatmap, draw_order=_DRAW_BOX),
-                recording=rec, static=True,
-            )
-            # Episode-summary bar: mean Δ_out per modality across all frames.
-            means = _modality_episode_means(
-                per_axis_results[modality_axis], modality_order,
-            )
-            # Rerun's BarChart wants ≥2 values; for a single modality
-            # the per-modality text card alone is the right view.
-            if means is not None and len(means) >= 2:
-                rr.log(
-                    "modality/episode_summary",
-                    rr.BarChart(np.asarray(means, dtype=np.float32)),
-                    recording=rec, static=True,
-                )
-            # Always log the values as a text doc so the single-modality
-            # case still shows the number; the bar chart is just a
-            # multi-modality visual.
-            if means is not None:
-                rr.log(
-                    "modality/episode_summary_labels",
-                    rr.TextDocument(
-                        "**Mean Δaction per modality (whole episode):**\n\n"
-                        + "\n".join(
-                            f"- `{m}` — {v:.3f}"
-                            for m, v in zip(modality_order, means)
-                        ),
-                        media_type=rr.MediaType.MARKDOWN,
-                    ),
-                    recording=rec, static=True,
-                )
 
-    # ── 5. Sensitivity — per-camera concentration bar ─────────────────────
+    # ── 5. Sensitivity — per-camera concentration values ──────────────────
+    # The number already carries its own 0→1 scale, so a bare bar chart (no
+    # axis labels) added nothing over the values card; only the card is kept.
     sensitivity_axis = "vision.scene_sensitivity"
     if sensitivity_axis in per_axis_results:
         cams_order, conc = _sensitivity_concentration_per_camera(
             per_axis_results[sensitivity_axis],
         )
-        if conc and len(conc) >= 2:
-            rr.log(
-                "sensitivity/concentration",
-                rr.BarChart(np.asarray(conc, dtype=np.float32)),
-                recording=rec, static=True,
-            )
-        # The text-doc card below always logs so the single-camera case
-        # still tells the user the number; the bar chart is just a
-        # multi-camera visual.
         if conc:
             rr.log(
                 "sensitivity/concentration_labels",
@@ -639,17 +624,31 @@ def export_rerun(
     # Per-frame-pair series for the trajectory-level axes. These axes carry
     # one episode-level verdict, but the underlying signal (chunk-step
     # disagreement, attention-centroid drift) is naturally per-frame-pair.
-    # Logging it keyed to the originating frame populates each tab's
-    # time-series view — without it those views referenced an entity path
-    # that was never written.
+    # Each point MUST be stamped on both the frame_index AND the frame_time
+    # timeline: the plots display on frame_time, and setting only frame_index
+    # left every point inheriting the last frame_time set elsewhere, collapsing
+    # the whole series onto a single tick. We map the dataset frame index to
+    # its sequential position to recover the frame_time coordinate.
+    idx_to_pos = {int(fi): i for i, fi in enumerate(trajectory.frame_indices)}
     for axis, info in trajectory_axis_results.items():
-        for frame_idx, value in info.get("per_frame_series", []):
-            _set_time("frame_index", sequence=int(frame_idx))
+        series = info.get("per_frame_series", [])
+        if not series:
+            continue
+        for frame_idx, value in series:
+            fi = int(frame_idx)
+            _set_time("frame_index", sequence=fi)
+            pos = idx_to_pos.get(fi)
+            if pos is not None:
+                _set_time("frame_time", duration=pos / fps)
             rr.log(f"plots/diagnostics/{axis}", Scalars(float(value)), recording=rec)
+        _log_trajectory_axis_overlays(
+            rr, rec, Scalars, axis, info, series, idx_to_pos, fps, _set_time,
+        )
 
     # ── 7. Findings (one big plain-English page across all axes) ──────────
     findings_md = _build_findings_markdown(
         trajectory, per_axis_results, trajectory_axis_results,
+        not_applicable=not_applicable,
     )
     if dead_cams:
         findings_md += (
@@ -747,82 +746,197 @@ def _is_dead_feed(arr: np.ndarray) -> bool:
 # Verdict ribbon / categorical heatmap builders
 # ──────────────────────────────────────────────────────────────────────────
 
-# Visual height of a verdict ribbon (1 row of frames painted at this many
-# image pixels so it's visible as a strip, not a 1-pixel line).
-_RIBBON_PX_PER_ROW = 24
-_RIBBON_PX_PER_COL = 16   # each frame is this many image pixels wide
-_HEATMAP_PX_PER_CELL = 24
+# The old verdict-ribbon and modality-heatmap raster constants are gone: every
+# per-frame verdict now rides the seekable time-series, not a frozen image.
 
 
-def _verdict_ribbon(traj_result: TrajectoryDiagnosticResult) -> np.ndarray:
-    """Per-axis horizontal ribbon, one column per frame, color = verdict.
+def _verdict_point_key(sev: Severity) -> str:
+    """Per-frame severity → the point-series bucket it is drawn on in the
+    memorization plot. Keys match the ``v_<key>`` child entity paths logged
+    by :func:`_log_memorization_overlays`."""
+    if sev in (Severity.PASS, Severity.INFO):
+        return "ok"
+    if sev == Severity.MODERATE:
+        return "mixed"
+    if sev == Severity.CRITICAL:
+        return "look"
+    return "untested"   # Severity.UNKNOWN / anything else
 
-    Returned as an upsampled RGB image so it reads as a clean strip in
-    Rerun's Spatial2DView. Sits at the top of each metric tab so the
-    user sees "where the verdict changes" at a glance.
+
+def _log_memorization_overlays(
+    rr, rec, Scalars, traj_result: TrajectoryDiagnosticResult,
+    fps: float, set_time,
+) -> None:
+    """Overlay the memorization decision bands + verdict-coloured points on the
+    seekable Δaction series at ``plots/diagnostics/vision.memorization``.
+
+    Everything is logged under that entity path (or children of it) so the
+    tab's single TimeSeriesView shows the Δaction line, two flat threshold
+    bands, and one coloured point per frame — all on the same timeline the
+    images and the per-frame card scrub against. The bands are the diagnostic's
+    OWN thresholds, read from its per-frame raw numbers (falling back to the
+    documented defaults), never hard-coded blind.
     """
-    n = len(traj_result.per_frame)
-    row = np.zeros((1, max(1, n), 3), dtype=np.uint8)
+    base = "plots/diagnostics/vision.memorization"
+
+    # Thresholds are constant across frames; take them from the first frame
+    # that reported them (the diagnostic stamps them into finding.raw_numbers).
+    memorized_thr, grounded_thr = 0.05, 0.30
+    for r in traj_result.per_frame:
+        rn = (r.finding.raw_numbers if r.finding is not None else None) or {}
+        if "ignored_threshold" in rn:
+            memorized_thr = float(rn["ignored_threshold"])
+        if "grounded_threshold" in rn:
+            grounded_thr = float(rn["grounded_threshold"])
+        if rn:
+            break
+
+    # Static styling (logged once): the main Δaction line + the two bands.
+    rr.log(base, rr.SeriesLines(
+        colors=[120, 130, 140], names="Δaction (masked − baseline)", widths=1.5,
+    ), recording=rec, static=True)
+    rr.log(f"{base}/memorized_below", rr.SeriesLines(
+        colors=list(VERDICT_LOOK_RGB),
+        names=f"memorized below {memorized_thr:.2f}", widths=1.0,
+    ), recording=rec, static=True)
+    rr.log(f"{base}/grounded_above", rr.SeriesLines(
+        colors=list(VERDICT_OK_RGB),
+        names=f"grounded above {grounded_thr:.2f}", widths=1.0,
+    ), recording=rec, static=True)
+
+    # Verdict point series — one per category, static colour + circle marker.
+    _VPOINTS = {
+        "ok":       (VERDICT_OK_RGB,     "OK (grounded)"),
+        "mixed":    (VERDICT_MIXED_RGB,  "MIXED"),
+        "look":     (VERDICT_LOOK_RGB,   "WORTH A LOOK (memorized)"),
+        "untested": (VERDICT_NOTEST_RGB, "couldn't test"),
+    }
+    for key, (rgb, name) in _VPOINTS.items():
+        rr.log(f"{base}/v_{key}", rr.SeriesPoints(
+            colors=list(rgb), names=name, markers="circle", marker_sizes=6.0,
+        ), recording=rec, static=True)
+
+    # Per-frame data: the two flat band values at every frame, and the frame's
+    # Δaction drawn as a point on the series matching its verdict.
     for i, r in enumerate(traj_result.per_frame):
-        _, rgb = _verdict(r.severity)
-        row[0, i] = rgb
-    # Upsample so the strip is visible (NEAREST so colors stay crisp).
-    from PIL import Image as PILImage
-    H = _RIBBON_PX_PER_ROW
-    W = max(_RIBBON_PX_PER_COL, n * _RIBBON_PX_PER_COL)
-    out = np.asarray(
-        PILImage.fromarray(row).resize((W, H), PILImage.NEAREST)
-    )
-    return out
+        set_time("frame_time", duration=i / fps)
+        set_time("frame_index", sequence=traj_result.frame_indices[i])
+        rr.log(f"{base}/memorized_below", Scalars(memorized_thr), recording=rec)
+        rr.log(f"{base}/grounded_above", Scalars(grounded_thr), recording=rec)
+        score = r.scalar_score
+        if score == score:   # not NaN
+            key = _verdict_point_key(r.severity)
+            rr.log(f"{base}/v_{key}", Scalars(float(score)), recording=rec)
 
 
-def _modality_verdict_heatmap(
+# Distinct line colours for the per-modality response plot, cycled in the
+# order modalities first appear. Readable on Rerun's dark theme.
+_MODALITY_LINE_RGB = [
+    (77, 171, 247),   # blue
+    (132, 94, 247),   # violet
+    (32, 201, 151),   # teal
+    (255, 146, 43),   # orange
+    (240, 101, 149),  # pink
+    (148, 216, 45),   # lime
+]
+
+
+def _modality_thresholds(
     traj_result: TrajectoryDiagnosticResult,
-) -> tuple[Optional[np.ndarray], list[str]]:
-    """M × N RGBA matrix of per-(modality, frame) verdicts.
+) -> tuple[float, float]:
+    """``(ignored_below, used_above)`` — the modality diagnostic's own
+    noise-floor and grounded thresholds, read from its per-frame raw output.
+    Falls back to the documented defaults (0.05 / 0.30) if absent."""
+    ignored_below, used_above = 0.05, 0.30
+    for r in traj_result.per_frame:
+        raw = r.raw or {}
+        if "noise_floor_score" in raw:
+            ignored_below = float(raw["noise_floor_score"])
+        if "grounded_threshold" in raw:
+            used_above = float(raw["grounded_threshold"])
+        if raw:
+            break
+    return ignored_below, used_above
 
-    Categorical encoding — not a continuous magnitude colormap. The
-    palette is the 3-tier verdict palette + gray for "couldn't test."
-    Returns ``(heatmap, modality_order)`` or ``(None, [])`` if the
-    diagnostic produced no per-modality data.
-    """
-    # Collect every modality that appears in any frame.
-    modality_order: list[str] = []
+
+def _modality_order(traj_result: TrajectoryDiagnosticResult) -> list[str]:
+    """Modalities in first-seen order across the episode."""
+    order: list[str] = []
     seen: set[str] = set()
     for r in traj_result.per_frame:
-        per = (r.raw or {}).get("per_modality") or {}
-        for m in per:
+        for m in ((r.raw or {}).get("per_modality") or {}):
             if m not in seen:
                 seen.add(m)
-                modality_order.append(m)
-    if not modality_order:
-        return None, []
-    M = len(modality_order)
-    N = len(traj_result.per_frame)
-    row = np.full((M, N, 3), VERDICT_NOTEST_RGB, dtype=np.uint8)
-    for j, r in enumerate(traj_result.per_frame):
-        per = (r.raw or {}).get("per_modality") or {}
-        for i, m in enumerate(modality_order):
-            sub = per.get(m)
-            if not isinstance(sub, dict):
-                continue
-            verdict = sub.get("verdict")
-            row[i, j] = _modality_cell_rgb(verdict)
-    from PIL import Image as PILImage
-    H = M * _HEATMAP_PX_PER_CELL
-    W = N * _HEATMAP_PX_PER_CELL
-    out = np.asarray(PILImage.fromarray(row).resize((W, H), PILImage.NEAREST))
-    return out, modality_order
+                order.append(m)
+    return order
 
 
-def _modality_cell_rgb(verdict: Optional[str]) -> tuple[int, int, int]:
-    """ModalityDropout per-(modality, frame) verdict → ribbon color."""
-    if verdict == "USED":        return VERDICT_OK_RGB
-    if verdict == "PARTIAL":     return VERDICT_MIXED_RGB
-    if verdict == "IGNORED":     return VERDICT_LOOK_RGB
-    if verdict == "BELOW_NOISE": return VERDICT_NOTEST_RGB
-    if verdict == "UNTESTABLE":  return VERDICT_NOTEST_RGB
-    return VERDICT_NOTEST_RGB
+def _log_modality_overlays(
+    rr, rec, Scalars, traj_result: TrajectoryDiagnosticResult,
+    fps: float, set_time,
+) -> None:
+    """Decision bands + named/coloured lines on the seekable per-modality plot
+    at ``plots/modality``, plus an episode-summary card anchoring each
+    modality's mean response to a USED / PARTIAL / IGNORED verdict.
+
+    Replaces the static verdict heatmap (frozen, unseekable) and the
+    unlabelled bar chart (redundant with the values card). The bands are the
+    diagnostic's own thresholds, read from its raw output — never hard-coded.
+    """
+    ignored_below, used_above = _modality_thresholds(traj_result)
+    order = _modality_order(traj_result)
+    base = "plots/modality"
+
+    # Name + colour each modality line (logged static; the per-frame loop logs
+    # the data). The safe-path mirrors that loop's transform exactly.
+    for idx, m in enumerate(order):
+        safe = m.replace(":", "_").replace("/", "_")
+        rgb = _MODALITY_LINE_RGB[idx % len(_MODALITY_LINE_RGB)]
+        rr.log(f"{base}/{safe}", rr.SeriesLines(
+            colors=list(rgb), names=m, widths=1.8,
+        ), recording=rec, static=True)
+
+    # Decision bands: above "used" the model responds to the input, below
+    # "ignored" it does not. Where each modality line sits IS the verdict.
+    rr.log(f"{base}/_ignored_below", rr.SeriesLines(
+        colors=list(VERDICT_LOOK_RGB),
+        names=f"ignored below {ignored_below:.2f}", widths=1.0,
+    ), recording=rec, static=True)
+    rr.log(f"{base}/_used_above", rr.SeriesLines(
+        colors=list(VERDICT_OK_RGB),
+        names=f"used above {used_above:.2f}", widths=1.0,
+    ), recording=rec, static=True)
+    for i in range(len(traj_result.per_frame)):
+        set_time("frame_time", duration=i / fps)
+        set_time("frame_index", sequence=traj_result.frame_indices[i])
+        rr.log(f"{base}/_ignored_below", Scalars(ignored_below), recording=rec)
+        rr.log(f"{base}/_used_above", Scalars(used_above), recording=rec)
+
+    # Episode-summary card: mean Δaction per modality + its verdict + the scale.
+    means = _modality_episode_means(traj_result, order)
+    if means is None:
+        return
+
+    def _verdict_for(v: float) -> str:
+        if v > used_above:
+            return "🟢 USED"
+        if v >= ignored_below:
+            return "🟡 PARTIAL"
+        return "🔴 IGNORED"
+
+    lines = [
+        "**Mean Δaction per modality (whole episode)**",
+        "",
+        f"_scale: 🟢 USED > {used_above:.2f}  ·  🟡 PARTIAL "
+        f"{ignored_below:.2f}–{used_above:.2f}  ·  🔴 IGNORED < {ignored_below:.2f}_",
+        "",
+    ]
+    # Strongest response first — the most-used input reads at the top.
+    for m, v in sorted(zip(order, means), key=lambda kv: -kv[1]):
+        lines.append(f"- `{m}` — {v:.3f}  {_verdict_for(v)}")
+    rr.log("modality/episode_summary_labels", rr.TextDocument(
+        "\n".join(lines), media_type=rr.MediaType.MARKDOWN,
+    ), recording=rec, static=True)
 
 
 def _modality_episode_means(
@@ -850,6 +964,70 @@ def _modality_episode_means(
     return [float(np.mean(v)) if v else 0.0 for v in sums.values()]
 
 
+# Main-series legend names for the trajectory-level axis plots.
+_TRAJ_AXIS_SERIES_NAME = {
+    "internal.attention_drift":   "centroid drift (px)",
+    "internal.chunk_consistency": "chunk disagreement (normalized)",
+}
+
+
+def _log_trajectory_axis_overlays(
+    rr, rec, Scalars, axis: str, info: dict, series: list,
+    idx_to_pos: dict, fps: float, set_time,
+) -> None:
+    """Name the trajectory-axis line and draw any decision bands it declares,
+    as flat reference lines on the same TimeSeriesView so the magnitude reads
+    against them. Thresholds come from ``info`` (forwarded by the runner) —
+    never hard-coded here. Band values span the same frames as the series, on
+    both timelines, so they land on the frame_time axis the plot uses."""
+    base = f"plots/diagnostics/{axis}"
+
+    # Name the main line (its data was already logged by the caller).
+    name = _TRAJ_AXIS_SERIES_NAME.get(axis)
+    if name:
+        rr.log(base, rr.SeriesLines(
+            colors=[120, 130, 140], names=name, widths=1.8,
+        ), recording=rec, static=True)
+
+    # Decision bands per axis. Attention drift declares warn/critical px;
+    # chunk consistency declares a noise floor (consistent below) and a
+    # grounded threshold (strong disagreement above).
+    bands: list[tuple[str, float, tuple[int, int, int], str]] = []
+    if axis == "internal.attention_drift":
+        warn = info.get("warn_px")
+        crit = info.get("critical_px")
+        if warn is not None:
+            bands.append(("warn", float(warn), VERDICT_MIXED_RGB,
+                          f"warning {float(warn):.0f}px"))
+        if crit is not None:
+            bands.append(("critical", float(crit), VERDICT_LOOK_RGB,
+                          f"critical {float(crit):.0f}px"))
+    elif axis == "internal.chunk_consistency":
+        nf = info.get("noise_floor")
+        gt = info.get("grounded_threshold")
+        if nf is not None:
+            bands.append(("consistent", float(nf), VERDICT_OK_RGB,
+                          f"consistent below {float(nf):.2f}"))
+        if gt is not None:
+            bands.append(("drifts", float(gt), VERDICT_LOOK_RGB,
+                          f"drifts above {float(gt):.2f}"))
+    if not bands:
+        return
+
+    for key, _val, rgb, bname in bands:
+        rr.log(f"{base}/band_{key}", rr.SeriesLines(
+            colors=list(rgb), names=bname, widths=1.0,
+        ), recording=rec, static=True)
+    for frame_idx, _value in series:
+        fi = int(frame_idx)
+        set_time("frame_index", sequence=fi)
+        pos = idx_to_pos.get(fi)
+        if pos is not None:
+            set_time("frame_time", duration=pos / fps)
+        for key, val, _rgb, _bname in bands:
+            rr.log(f"{base}/band_{key}", Scalars(val), recording=rec)
+
+
 def _sensitivity_concentration_per_camera(
     traj_result: TrajectoryDiagnosticResult,
 ) -> tuple[list[str], list[float]]:
@@ -873,11 +1051,23 @@ def _sensitivity_concentration_per_camera(
 # Markdown builders (per-frame + trajectory-level + final findings page)
 # ──────────────────────────────────────────────────────────────────────────
 
+# Human-friendly titles for the dotted axis IDs (match the tab names). Used
+# everywhere a verdict is shown to the user so no raw ``vision.memorization``
+# style identifier leaks into the dashboard.
+_AXIS_TITLE = {
+    "vision.memorization":        "Memorization",
+    "input.modality_dropout":     "Modality dropout",
+    "vision.scene_sensitivity":   "Scene sensitivity",
+    "internal.attention_drift":   "Attention drift",
+    "internal.chunk_consistency": "Chunk consistency",
+}
+
+
 def _current_frame_markdown(axis: str, r: DiagnosticResult, f) -> str:
     """Per-frame current-cursor card. Big verdict label + observed +
     numbers. NO Severity word; uses the 3-tier label."""
-    label, rgb = _verdict(r.severity)
-    hex_color = "#%02x%02x%02x" % rgb
+    label, _ = _verdict(r.severity)
+    emoji = _verdict_emoji(r.severity)
     raw = f.raw_numbers or {}
     keys = [k for k in raw if not k.startswith("_")][:8]   # top 8 numbers
     num_lines = "\n".join(
@@ -886,8 +1076,8 @@ def _current_frame_markdown(axis: str, r: DiagnosticResult, f) -> str:
         for k in keys
     )
     return (
-        f"### {axis}\n\n"
-        f"<span style='color:{hex_color};font-weight:bold'>{label}</span>\n\n"
+        f"### {_AXIS_TITLE.get(axis, axis)}\n\n"
+        f"**{emoji} {label}**\n\n"
         f"**Observed:** {f.observed}\n\n"
         + (f"**Numbers**\n{num_lines}\n" if num_lines else "")
     )
@@ -898,13 +1088,12 @@ def _trajectory_axis_markdown(
 ) -> str:
     sev = info.get("severity", "unknown")
     sev_enum = _severity_from_string(sev)
-    label, rgb = _verdict(sev_enum)
-    hex_color = "#%02x%02x%02x" % rgb
+    label, _ = _verdict(sev_enum)
+    emoji = _verdict_emoji(sev_enum)
     expl = info.get("explanation", "")
     return (
         f"### {title}\n\n"
-        f"<span style='color:{hex_color};font-weight:bold'>{label}</span>"
-        f"{extra}\n\n"
+        f"**{emoji} {label}**{extra}\n\n"
         f"{expl}\n"
     )
 
@@ -920,13 +1109,17 @@ def _build_findings_markdown(
     trajectory: Trajectory,
     per_axis_results: dict[str, TrajectoryDiagnosticResult],
     trajectory_axis_results: dict[str, dict],
+    not_applicable: Optional[dict[str, str]] = None,
 ) -> str:
     """Plain-English findings page for the Findings tab.
 
-    Mixes per-axis (per-frame Finding rolled up) AND trajectory-level
-    axes (attention drift, chunk consistency). Worst-first ordering so
-    things that warrant a look surface at the top of the page.
+    One entry per diagnostic — per-frame axes (rolled up) and trajectory-level
+    axes (attention drift, chunk consistency) merged into a SINGLE list, most-
+    concerning first, each with a human title + verdict emoji. Diagnostics that
+    could not run are listed at the end so the user also sees what was NOT
+    measured (and why), never a silent omission.
     """
+    not_applicable = not_applicable or {}
     lines = ["# Emboviz findings", ""]
     instr = getattr(trajectory, "instruction", None) or (
         trajectory.frames[0].instruction if trajectory.frames else None
@@ -934,36 +1127,53 @@ def _build_findings_markdown(
     if instr:
         lines += [f"**Instruction:** {instr}", ""]
 
-    # Headline severity AND the quoted finding both come from the trajectory
-    # aggregate (trajectory_severity / trajectory_finding) — the SAME source
-    # report.md uses — so the label and the text always agree, and a
-    # mostly-passing axis is never headlined "couldn't test". Order
-    # most-concerning first.
+    # The verdict label + quoted text come from the trajectory aggregate
+    # (trajectory_severity / trajectory_finding) — the SAME source report.md
+    # uses — so label and text always agree. Per-frame and trajectory-level
+    # axes are unified into one list and ordered most-concerning first, so the
+    # ordering is genuinely worst-first across BOTH kinds.
     _CONCERN = {
         Severity.CRITICAL: 4, Severity.MODERATE: 3, Severity.INFO: 2,
         Severity.PASS: 1, Severity.UNKNOWN: 0,
     }
-    ordered_axes = sorted(
-        per_axis_results.items(),
-        key=lambda kv: -_CONCERN[kv[1].trajectory_severity()],
-    )
-    for axis, traj_result in ordered_axes:
-        sev = traj_result.trajectory_severity()
-        label, _ = _verdict(sev)
-        finding = traj_result.trajectory_finding()
-        lines.append(f"## {axis} — {label}")
-        lines += [
-            f"- **Observed:** {finding.observed}",
-            f"- **Meaning:** {finding.meaning}",
-            f"- **Next step:** {finding.next_step}",
-            "",
-        ]
-
+    entries: list[tuple[str, Severity, str, Optional[str], Optional[str]]] = []
+    for axis, tr in per_axis_results.items():
+        f = tr.trajectory_finding()
+        entries.append((axis, tr.trajectory_severity(),
+                        f.observed, f.meaning, f.next_step))
     for axis, info in trajectory_axis_results.items():
-        sev_enum = _severity_from_string(info.get("severity", "unknown"))
-        label, _ = _verdict(sev_enum)
-        lines.append(f"## {axis} — {label}")
-        lines += [info.get("explanation", "") or "(no explanation)", ""]
+        sev = _severity_from_string(info.get("severity", "unknown"))
+        entries.append((axis, sev,
+                        info.get("explanation", "") or "(no explanation)",
+                        None, None))
+    entries.sort(key=lambda e: -_CONCERN.get(e[1], 0))
+
+    # One-line verdict spread so the user gets the gist before reading.
+    if entries:
+        spread: dict[str, int] = {}
+        for _axis, sev, *_rest in entries:
+            lbl, _ = _verdict(sev)
+            spread[lbl] = spread.get(lbl, 0) + 1
+        summary = " · ".join(f"{n} {lbl}" for lbl, n in spread.items())
+        lines += [f"**{len(entries)} diagnostics —** {summary}", ""]
+
+    for axis, sev, observed, meaning, next_step in entries:
+        title = _AXIS_TITLE.get(axis, axis)
+        label, _ = _verdict(sev)
+        emoji = _verdict_emoji(sev)
+        lines.append(f"## {emoji} {title} — {label}")
+        lines.append(f"- **Observed:** {observed}")
+        if meaning:
+            lines.append(f"- **Meaning:** {meaning}")
+        if next_step:
+            lines.append(f"- **Next step:** {next_step}")
+        lines.append("")
+
+    if not_applicable:
+        lines += ["---", "", "### Not measured", ""]
+        for axis, why in not_applicable.items():
+            lines.append(f"- **{_AXIS_TITLE.get(axis, axis)}** — {why}")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -1031,14 +1241,12 @@ def _memorization_tab(
     rrb, cams_all: list[str], cams_with_mask: set[str],
     cams_with_masked_image: list[str], fill_modes: list[str],
 ):
-    """Description → verdict ribbon → per-camera (original | masked)
-    grid → Δaction time-series → current-frame card."""
+    """Description → per-camera (original | masked) grid → Δaction
+    time-series (with decision bands + verdict-coloured points) →
+    current-frame card. No static verdict strip — the verdict rides the
+    seekable plot."""
     description = rrb.TextDocumentView(
         origin="docs/memorization", name="What this measures",
-    )
-    ribbon = rrb.Spatial2DView(
-        origin="ribbon/vision.memorization",
-        name="Per-frame verdict (green = OK, yellow = MIXED, red = WORTH A LOOK)",
     )
 
     # Per-camera before/after. For each camera: the original frame with the
@@ -1078,7 +1286,10 @@ def _memorization_tab(
 
     delta_plot = rrb.TimeSeriesView(
         origin="plots/diagnostics/vision.memorization",
-        name="Action change when target is masked (higher = more grounded)",
+        name=(
+            "Δaction when target masked — above green = grounded, "
+            "below red = memorized; point colour = per-frame verdict"
+        ),
     )
     current_frame = rrb.TextDocumentView(
         origin="current_frame/vision.memorization",
@@ -1087,37 +1298,31 @@ def _memorization_tab(
 
     return rrb.Vertical(
         description,
-        ribbon,
         cameras_block,
         delta_plot,
         current_frame,
         name="Memorization",
-        row_shares=[2, 1, 6, 3, 3],
+        row_shares=[2, 6, 4, 3],
     )
 
 
 def _modality_tab(rrb):
-    """Description → verdict heatmap (M×N RGBA) → episode summary bar →
-    per-modality time-series → current-frame card."""
+    """Description → seekable per-modality response plot (with used/ignored
+    bands) → episode-summary card (mean Δaction + verdict per modality) →
+    current-frame card. No static heatmap, no unlabelled bar chart."""
     description = rrb.TextDocumentView(
         origin="docs/modality", name="What this measures",
     )
-    heatmap = rrb.Spatial2DView(
-        origin="modality/heatmap",
-        name="Per-frame verdict (rows = input, cols = frame; "
-             "green = OK, yellow = MIXED, red = WORTH A LOOK, gray = couldn't test)",
-    )
-    episode_summary = rrb.BarChartView(
-        origin="modality/episode_summary",
-        name="Mean Δaction per modality (whole episode)",
+    per_modality_series = rrb.TimeSeriesView(
+        origin="plots/modality",
+        name=(
+            "Per-modality response over time — above green = used, "
+            "below red = ignored (one line per input)"
+        ),
     )
     episode_labels = rrb.TextDocumentView(
         origin="modality/episode_summary_labels",
-        name="Mean Δaction — values",
-    )
-    per_modality_series = rrb.TimeSeriesView(
-        origin="plots/modality",
-        name="Per-modality response over time",
+        name="Per modality — mean Δaction + verdict",
     )
     current_frame = rrb.TextDocumentView(
         origin="current_frame/input.modality_dropout",
@@ -1126,12 +1331,11 @@ def _modality_tab(rrb):
 
     return rrb.Vertical(
         description,
-        heatmap,
-        rrb.Horizontal(episode_summary, episode_labels, column_shares=[3, 2]),
         per_modality_series,
+        episode_labels,
         current_frame,
         name="Modality dropout",
-        row_shares=[2, 5, 3, 3, 3],
+        row_shares=[2, 6, 3, 3],
     )
 
 
@@ -1160,7 +1364,10 @@ def _attention_tab(
     bottom = []
     drift_plot = rrb.TimeSeriesView(
         origin="plots/diagnostics/internal.attention_drift",
-        name="Attention centroid drift over time (px)",
+        name=(
+            "Attention centroid drift (px) — below yellow = anchored, "
+            "above = wandering"
+        ),
     )
     bottom.append(drift_plot)
     if has_drift:
@@ -1182,7 +1389,8 @@ def _sensitivity_tab(
     rrb, cams_all: list[str], cams_with_sensitivity: set[str],
 ):
     """Description → per-camera sensitivity overlay grid → per-camera
-    concentration bar → current-frame card."""
+    concentration values → current-frame card. No bar chart — the values
+    card carries the same number with its 0→1 scale."""
     description = rrb.TextDocumentView(
         origin="docs/sensitivity", name="What this measures",
     )
@@ -1198,13 +1406,9 @@ def _sensitivity_tab(
         origin="docs/sensitivity", name="(no live cameras)",
     )
 
-    concentration_bar = rrb.BarChartView(
-        origin="sensitivity/concentration",
-        name="Per-camera focus (0 = diffuse, 1 = sharp)",
-    )
     concentration_labels = rrb.TextDocumentView(
         origin="sensitivity/concentration_labels",
-        name="Per-camera focus — values",
+        name="Per-camera focus — values (0 = diffuse, 1 = sharp)",
     )
     current_frame = rrb.TextDocumentView(
         origin="current_frame/vision.scene_sensitivity",
@@ -1214,10 +1418,10 @@ def _sensitivity_tab(
     return rrb.Vertical(
         description,
         cameras_block,
-        rrb.Horizontal(concentration_bar, concentration_labels, column_shares=[3, 2]),
+        concentration_labels,
         current_frame,
         name="Sensitivity",
-        row_shares=[2, 7, 3, 3],
+        row_shares=[2, 7, 2, 3],
     )
 
 
@@ -1228,7 +1432,10 @@ def _chunk_tab(rrb):
     )
     disagreement_plot = rrb.TimeSeriesView(
         origin="plots/diagnostics/internal.chunk_consistency",
-        name="Chunk-step disagreement over time (lower = more consistent)",
+        name=(
+            "Chunk-step disagreement over time — below green = consistent, "
+            "above red = drifts (lower is better)"
+        ),
     )
     summary = rrb.TextDocumentView(
         origin="chunk/summary",

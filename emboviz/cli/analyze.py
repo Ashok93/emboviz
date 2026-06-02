@@ -283,6 +283,8 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
             target_text=cfg.analysis.mask_query,
             target_annotations=cfg.analysis.target_annotations or "",
             detector=cfg.analysis.detector,
+            detector_score_threshold=cfg.analysis.detector_score_threshold,
+            detector_mask_threshold=cfg.analysis.detector_mask_threshold,
             fills=cfg.analysis.fills,
             enabled_diagnostics=enabled_diagnostics,
             show_imitation=cfg.analysis.show_imitation,
@@ -347,5 +349,5 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
     if html is not None:
         click.echo(f"[analyze] wrote {html}")
     else:
-        click.echo("[analyze] (skipped aggregate.html — install 'emboviz[viz]' for HTML reports)")
+        click.echo("[analyze] (skipped aggregate.html — Jinja2 missing; run `uv sync` to restore it)")
     click.echo(f"[analyze] per-episode reports in {out}/episode_*/")

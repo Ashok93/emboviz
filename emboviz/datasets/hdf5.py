@@ -24,8 +24,7 @@ follow this convention. Different teams put images under different
 sub-keys, so the adapter takes explicit ``camera_keys`` and ``state_key``
 mappings and refuses to guess.
 
-Install:
-  pip install 'emboviz[hdf5]'
+Install: h5py ships with emboviz core — no extra is required.
 
 Reference: Robomimic docs at
 https://robomimic.github.io/docs/datasets/overview.html ;
@@ -245,8 +244,9 @@ class HDF5EpisodeSource(EpisodeSource):
                 import h5py
             except ImportError as e:
                 raise ImportError(
-                    "HDF5EpisodeSource needs the `hdf5` extra. Install with: "
-                    "pip install 'emboviz[hdf5]'. Underlying error: " + str(e)
+                    "HDF5EpisodeSource needs h5py, an emboviz core dependency. "
+                    "If it is missing your install is incomplete — reinstall "
+                    "from the repo root with: uv sync. Underlying error: " + str(e)
                 ) from e
             self._file_cache = h5py.File(self.path, "r")
         return self._file_cache

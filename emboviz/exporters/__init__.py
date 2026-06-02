@@ -18,8 +18,10 @@ from __future__ import annotations
 __all__ = ["export_rerun"]
 
 
+# extra_name is "" because the Rerun exporter runs on core deps (rerun-sdk
+# ships with emboviz core — there is no `rerun` extra).
 _LAZY: dict[str, tuple[str, str, str]] = {
-    "export_rerun": ("emboviz.exporters.rerun", "export_rerun", "rerun"),
+    "export_rerun": ("emboviz.exporters.rerun", "export_rerun", ""),
 }
 
 
@@ -35,10 +37,14 @@ def __getattr__(name: str):
         if extra:
             raise ImportError(
                 f"emboviz.exporters.{name} requires the '{extra}' extra. "
-                f"Install with: pip install 'emboviz[{extra}]'.  "
+                f"Install from the repo root with: uv sync --extra {extra}.  "
                 f"Underlying ImportError: {e}"
             ) from e
-        raise
+        raise ImportError(
+            f"emboviz.exporters.{name} requires core dependencies that appear "
+            f"to be missing — reinstall from the repo root with: uv sync.  "
+            f"Underlying ImportError: {e}"
+        ) from e
     value = getattr(module, attr_name)
     globals()[name] = value
     return value
