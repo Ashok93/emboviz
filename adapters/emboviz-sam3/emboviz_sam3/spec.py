@@ -45,6 +45,11 @@ SPEC = AdapterSpec(
         "emboviz-wire",
         "emboviz-sam3",
     ),
+    # Pin torch to the cu126 PyTorch index (driver >= 12.6) via the stable
+    # UV_EXTRA_INDEX_URL: uv ranks the extra index above default PyPI, so
+    # torch resolves from cu126, the rest from PyPI. NOT the preview
+    # --torch-backend flag. Core stays torch-blind.
+    runtime_env_vars={"UV_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu126"},
     default_actor_kwargs={
         "model_id": "facebook/sam3",
         "device_map": "auto",
