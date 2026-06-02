@@ -24,8 +24,7 @@ follow this convention. Different teams put images under different
 sub-keys, so the adapter takes explicit ``camera_keys`` and ``state_key``
 mappings and refuses to guess.
 
-Install:
-  pip install 'emboviz[hdf5]'
+Install: h5py ships with emboviz core — no extra is required.
 
 Reference: Robomimic docs at
 https://robomimic.github.io/docs/datasets/overview.html ;
@@ -198,6 +197,45 @@ class HDF5EpisodeSource(EpisodeSource):
                     out.add(_bytes_to_str(demo.attrs[self.instruction_attr]))
         return sorted(out)
 
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        """Frame count per demo.
+
+        HDF5 builds a demo's frames together, so this materializes the demo's
+        scenes and counts them — explicit, per the contract (no inherited
+        whole-episode-decode default). Robomimic-style files are local and
+        random-access, so this is disk reads rather than video decode.
+        """
+        names = self._demo_names()
+        out: dict[int, int] = {}
+        for i in episode_indices:
+            try:
+                demo_name = names[int(i)]
+            except IndexError as e:
+                raise IndexError(
+                    f"episode {i} out of range (have {len(names)} demos)"
+                ) from e
+            out[int(i)] = len(self._demo_to_scenes(demo_name))
+        return out
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, Scene]:
+        """One frame per demo. HDF5 has no single-frame scene builder, so this
+        materializes the demo and indexes the requested offset (local disk
+        reads). An out-of-range offset is omitted from the result.
+        """
+        names = self._demo_names()
+        out: dict[int, Scene] = {}
+        for ep_idx, offset in episode_offsets.items():
+            try:
+                demo_name = names[int(ep_idx)]
+            except IndexError as e:
+                raise IndexError(
+                    f"episode {ep_idx} out of range (have {len(names)} demos)"
+                ) from e
+            scenes = self._demo_to_scenes(demo_name)
+            if 0 <= int(offset) < len(scenes):
+                out[int(ep_idx)] = scenes[int(offset)]
+        return out
+
     # ── internals ──────────────────────────────────────────────────
 
     def _h5_file(self):
@@ -206,8 +244,9 @@ class HDF5EpisodeSource(EpisodeSource):
                 import h5py
             except ImportError as e:
                 raise ImportError(
-                    "HDF5EpisodeSource needs the `hdf5` extra. Install with: "
-                    "pip install 'emboviz[hdf5]'. Underlying error: " + str(e)
+                    "HDF5EpisodeSource needs h5py, an emboviz core dependency. "
+                    "If it is missing your install is incomplete — reinstall "
+                    "from the repo root with: uv sync. Underlying error: " + str(e)
                 ) from e
             self._file_cache = h5py.File(self.path, "r")
         return self._file_cache

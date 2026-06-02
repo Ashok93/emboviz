@@ -234,6 +234,8 @@ class DatasetReaderHandler:
             "list_episodes":    self._list_episodes,
             "load_episode":     self._load_episode,
             "load_episodes":    self._load_episodes,
+            "episode_lengths":  self._episode_lengths,
+            "sample_frames":    self._sample_frames,
             "load_trajectory":  self._load_trajectory,
             "all_instructions": self._all_instructions,
         }
@@ -252,6 +254,16 @@ class DatasetReaderHandler:
         indices = [int(i) for i in args["episode_indices"]]
         out = self._s.load_episodes(indices)
         return {int(k): [wire.encode_scene(s) for s in v] for k, v in out.items()}
+
+    def _episode_lengths(self, args: dict) -> dict:
+        indices = [int(i) for i in args["episode_indices"]]
+        out = self._s.episode_lengths(indices)
+        return {int(k): int(v) for k, v in out.items()}
+
+    def _sample_frames(self, args: dict) -> dict:
+        offsets = {int(k): int(v) for k, v in args["episode_offsets"].items()}
+        out = self._s.sample_frames(offsets)
+        return {int(k): wire.encode_scene(s) for k, s in out.items()}
 
     def _load_trajectory(self, args: dict) -> dict:
         traj = self._s.load_trajectory(int(args["episode_idx"]))

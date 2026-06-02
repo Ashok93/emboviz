@@ -36,9 +36,14 @@ Short and full names are both accepted: `memorization`, `modality`,
 
 ## Installation
 
-### System dependency
+Emboviz is **not yet published to PyPI** — install it from a clone of this
+repository with [`uv`](https://docs.astral.sh/uv/). One `uv sync` command sets
+up everything: the core engine, both dataset readers, the SAM 3 detector and the
+LaMa fill, and the model adapter you ask for — all from the clone.
 
-Emboviz reads episode video through `torchcodec`, which needs FFmpeg system
+### 1. System dependencies
+
+Emboviz reads episode video through `torchcodec`, which needs the FFmpeg system
 libraries:
 
 ```bash
@@ -46,55 +51,63 @@ sudo apt install ffmpeg     # Linux
 brew install ffmpeg         # macOS
 ```
 
-The `act` and `smolvla` adapters build LeRobot, which compiles a C-extension
-dependency (`evdev`, via `pynput`). On Linux that needs the Python development
-headers and a compiler:
+The `act` and `smolvla` adapters build LeRobot, which compiles a small
+C-extension (`evdev`, via `pynput`). For those two only, also install the
+Python development headers and a compiler (Linux):
 
 ```bash
-sudo apt install python3-dev build-essential   # Linux only
+sudo apt install python3-dev build-essential   # only for act / smolvla
 ```
 
-### Core + dataset reader
+### 2. Clone + install your model
 
-The core package has no model or dataset dependencies. Install it together with
-the reader for your dataset format:
+Pick the extra for the policy you want to analyze — the command is the same,
+only the name changes:
 
 ```bash
-uv venv --python 3.11
-uv pip install emboviz                 # core engine
-uv pip install emboviz-lerobot         # LeRobot v3.0 datasets
+git clone https://github.com/Ashok93/emboviz.git && cd emboviz
+
+uv sync --extra openvla     # OpenVLA-7B
+uv sync --extra oft         # OpenVLA-OFT
+uv sync --extra pi0         # π0 / π0.5
+uv sync --extra gr00t       # GR00T-N1 / N1.7
+uv sync --extra act         # ACT
+uv sync --extra smolvla     # SmolVLA
+# uv sync --extra all       # every adapter at once
 ```
 
-Supported dataset formats:
+That single command installs everything host-side: the core engine, the **SAM 3
+detector** and **LaMa fill** (used by the memorization diagnostic), **both**
+dataset readers (LeRobot v3.0 and GR00T-format — `dataset.format: lerobot |
+gr00t`), and the model adapter. Each adapter is a thin shim; its heavy runtime
+(torch, transformers, openpi, …) is built into an isolated worker environment
+**automatically on first analysis** — you never install those by hand.
 
-| Format | Install |
-|---|---|
-| LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF uploads) | `emboviz-lerobot` |
-| GR00T format (LeRobot v2.1 + `modality.json`) | `emboviz-reader-gr00t` |
-
-### The model you want
-
-Install the adapter for each policy you intend to analyze. An adapter is a small
-package; its model runtime (torch, transformers, openpi, and others) is
-installed into an isolated worker environment on first use.
+Run emboviz through the project environment with `uv run`:
 
 ```bash
-uv pip install emboviz-openvla         # OpenVLA-7B
-uv pip install emboviz-oft             # OpenVLA-OFT
-uv pip install emboviz-pi0             # π0 / π0.5
-uv pip install emboviz-gr00t           # GR00T-N1 / N1.7
-uv pip install emboviz-act             # ACT (Action Chunking Transformer)
-uv pip install emboviz-smolvla         # SmolVLA
-uv pip install emboviz-sam3            # SAM 3 detector (for the memorization mask)
-uv pip install emboviz-lama            # LaMa inpainting (on-manifold memorization fill, optional)
+uv run emboviz analyze --config configs/<file>.yaml
 ```
 
-Adapters do not share dependencies. Each runs in its own virtual environment and
-Python version and communicates with emboviz core over a msgpack/ZeroMQ socket.
-These environments are created automatically on first use.
+> **Before your first run — SAM 3 is gated.** The memorization diagnostic uses
+> Meta's [SAM 3](https://huggingface.co/facebook/sam3) to locate the target
+> object, and SAM 3 is a **gated** model on the Hugging Face Hub. Accept its
+> license once, then authenticate so emboviz can download it:
+>
+> ```bash
+> uv run hf auth login          # or: export HF_TOKEN=hf_xxx
+> ```
+>
+> Not ready for that? Drop `memorization` from your config's `diagnostics:`
+> list — everything else runs with no token:
+>
+> ```yaml
+> analysis:
+>   diagnostics: [modality, sensitivity, attention, chunk]
+> ```
 
-> π0's attention diagnostic needs the PyTorch-converted checkpoint:
-> `emboviz convert-pi0 pi0_libero` (one-time).
+> **π0 attention** needs a one-time PyTorch conversion of the checkpoint:
+> `uv run emboviz convert-pi0 pi0_libero`. Plain inference needs nothing extra.
 
 ---
 
@@ -129,8 +142,8 @@ One run is one config file — model, dataset mapping, and analysis parameters i
 one place. Templates live in `configs/` (one per model on its canonical dataset).
 
 ```bash
-emboviz analyze --config configs/openvla-bridge.yaml
-emboviz analyze --config configs/my-run.yaml --dry-run   # cost estimate, no GPU
+uv run emboviz analyze --config configs/openvla-bridge.yaml
+uv run emboviz analyze --config configs/my-run.yaml --dry-run   # cost estimate, no GPU
 ```
 
 To analyze your own checkpoint and data, copy the closest template and edit it:
@@ -156,6 +169,8 @@ analysis:
   episodes: "537"                   # "7" / "0,3,7" / "0-5" / "all"
   mask_query: "the cloth"           # object the memorization diagnostic masks
   detector: sam3                    # sam3 | gd-sam
+  # detector_score_threshold: 0.5   # optional; SAM 3's default. Lower to catch faint/small targets
+  # detector_mask_threshold: 0.4    # optional; lower = fuller object removal (0.5 is SAM 3's default)
   fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
   diagnostics: all                  # or [memorization, attention]
 

@@ -36,8 +36,6 @@ dataset:
   instruction: {from: tasks}
 ```
 
-```bash
-uv pip install emboviz emboviz-lerobot
-emboviz install-lerobot          # builds the isolated reader venv
-emboviz analyze --config your-config.yaml
-```
+Ships with [emboviz](../../README.md#installation) core — `uv sync` installs
+it; you do not install it separately. The isolated worker venv builds
+automatically on first use.

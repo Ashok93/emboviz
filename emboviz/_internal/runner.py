@@ -192,6 +192,10 @@ def _build_target_detector(args) -> tuple[Optional[CachingTargetDetector], Optio
             "annotations. Re-run with --target-text \"<phrase>\" or "
             "--target-annotations <path>."
         )
+    # Detection thresholds from the run config (analysis.detector_*); fall
+    # back to the detector class defaults if an older args object omits them.
+    score_thr = float(getattr(args, "detector_score_threshold", 0.5))
+    mask_thr = float(getattr(args, "detector_mask_threshold", 0.5))
     detector_kind = (args.detector or "sam3").lower()
     if detector_kind == "sam3":
         # The detector is a client to the isolated SAM 3 worker (its own
@@ -204,18 +208,27 @@ def _build_target_detector(args) -> tuple[Optional[CachingTargetDetector], Optio
         # only need the worker UP; SAM3Detector opens its own client.
         from emboviz.adapters import connect
         connect("sam3", auto_spawn=True, auto_install=True)
-        base: TargetDetector = SAM3Detector(target_text=text, device="cuda")
+        base: TargetDetector = SAM3Detector(
+            target_text=text, device="cuda",
+            score_threshold=score_thr, mask_threshold=mask_thr,
+        )
         print(
             f"      memorization detector = "
-            f"SAM3Detector(target_text={text!r})",
+            f"SAM3Detector(target_text={text!r}, "
+            f"score_threshold={score_thr}, mask_threshold={mask_thr})",
             flush=True,
         )
     elif detector_kind in ("gd-sam", "groundingdino", "gd_sam", "gd"):
-        base = GroundingDINOSAMDetector(target_text=text, device="cuda")
+        # GD+SAM gates on a single box/text confidence; map the shared
+        # score threshold onto its min_confidence (it has no per-pixel
+        # mask-logit knob — SAM refines the box into a mask directly).
+        base = GroundingDINOSAMDetector(
+            target_text=text, device="cuda", min_confidence=score_thr,
+        )
         print(
             f"      memorization detector = "
-            f"GroundingDINOSAMDetector(target_text={text!r}) "
-            f"[fallback — prefer SAM 3]",
+            f"GroundingDINOSAMDetector(target_text={text!r}, "
+            f"min_confidence={score_thr}) [fallback — prefer SAM 3]",
             flush=True,
         )
     else:
@@ -518,7 +531,8 @@ def run_story(args) -> None:
             "same failure."
         )
     else:
-        drift = AttentionDriftDiagnostic().run_trajectory(
+        drift_diag = AttentionDriftDiagnostic()
+        drift = drift_diag.run_trajectory(
             model, trajectory,
             attention_per_frame_clean=attention_per_frame_clean,
         )
@@ -528,7 +542,9 @@ def run_story(args) -> None:
             # Per-frame-pair drift series for the Rerun time-series plot. The
             # diagnostic emits displacements_pixel as [later_frame_dataset_idx,
             # px] pairs (gap-aware: only frames adjacent in the trajectory), so
-            # we map it straight through.
+            # we map it straight through. The warn/critical thresholds are
+            # forwarded so the exporter can draw decision bands without
+            # hard-coding them.
             drift_series = [
                 [int(fi), float(d)]
                 for fi, d in drift.raw.get("displacements_pixel", [])
@@ -538,6 +554,8 @@ def run_story(args) -> None:
                 "scalar_score":     drift.scalar_score,
                 "explanation":      drift.explanation,
                 "per_frame_series": drift_series,
+                "warn_px":          float(drift_diag.drift_warn_px),
+                "critical_px":      float(drift_diag.drift_critical_px),
             }
             print(f"      attention_drift: {drift.severity.value} "
                   f"({drift.scalar_score:.1f}px)", flush=True)
@@ -560,11 +578,13 @@ def run_story(args) -> None:
             nds = chunk.raw.get("normalized_deltas", [])
             chunk_series = [[int(fi), float(v)] for fi, v in zip(cfi, nds)]
             trajectory_axes["internal.chunk_consistency"] = {
-                "severity":         chunk.severity.value,
-                "scalar_score":     chunk.scalar_score,
-                "explanation":      chunk.explanation,
-                "raw_mean_delta":   chunk.raw.get("raw_mean_delta"),
-                "per_frame_series": chunk_series,
+                "severity":           chunk.severity.value,
+                "scalar_score":       chunk.scalar_score,
+                "explanation":        chunk.explanation,
+                "raw_mean_delta":     chunk.raw.get("raw_mean_delta"),
+                "per_frame_series":   chunk_series,
+                "noise_floor":        chunk.raw.get("noise_floor"),
+                "grounded_threshold": chunk.raw.get("grounded_threshold"),
             }
             print(f"      chunk_consistency: {chunk.severity.value} "
                   f"(normalized mean_delta={chunk.scalar_score:.3f}, "
@@ -949,6 +969,7 @@ def run_story(args) -> None:
             masked_image_per_frame=masked_image_per_frame,
             modality_response_per_frame=modality_response_per_frame,
             trajectory_axis_results=trajectory_axes,
+            not_applicable=not_applicable,
         )
         print(f"      wrote {rrd_path} ({rrd_path.stat().st_size:,} bytes)",
               flush=True)

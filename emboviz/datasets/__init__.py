@@ -33,8 +33,11 @@ __all__ = [
 # Map of lazily-resolvable names → (module_path, attribute_name, extra_name).
 # LeRobot is intentionally absent: it is not an in-process reader — it runs
 # in the isolated ``emboviz-lerobot`` worker (see manifest._build_lerobot).
+# extra_name is the pyproject extra that supplies the reader's heavy deps,
+# or "" when the reader runs on core deps alone (HDF5 only needs h5py, a
+# core dependency — there is no `hdf5` extra).
 _LAZY_IMPORTS: dict[str, tuple[str, str, str]] = {
-    "HDF5EpisodeSource": ("emboviz.datasets.hdf5", "HDF5EpisodeSource", "hdf5"),
+    "HDF5EpisodeSource": ("emboviz.datasets.hdf5", "HDF5EpisodeSource", ""),
     "RLDSEpisodeSource": ("emboviz.datasets.rlds", "RLDSEpisodeSource", "rlds"),
 }
 
@@ -50,9 +53,11 @@ def __getattr__(name: str):
         import importlib
         module = importlib.import_module(module_path)
     except ImportError as e:
+        install = f"uv sync --extra {extra}" if extra else "uv sync"
+        needs = f"the '{extra}' extra" if extra else "core dependencies"
         raise ImportError(
-            f"emboviz.datasets.{name} requires the '{extra}' extra. "
-            f"Install with: pip install 'emboviz[{extra}]'.  "
+            f"emboviz.datasets.{name} requires {needs}. "
+            f"Install from the repo root with: {install}.  "
             f"Underlying ImportError: {e}"
         ) from e
     value = getattr(module, attr_name)

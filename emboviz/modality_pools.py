@@ -214,8 +214,10 @@ def build_modality_pool(
     """Build a ModalityPool sampled from episodes OTHER than current_episode.
 
     Args:
-        dataset: ``EpisodeSource`` (must implement ``list_episodes`` and
-            ``load_trajectory``).
+        dataset: ``EpisodeSource``. Uses ``list_episodes`` and the
+            ``episode_lengths`` / ``sample_frames`` pair (both have base
+            defaults; readers with random per-frame access override them so
+            only the sampled frames are decoded).
         current_episode: episode under test; we exclude it from sampling.
         declared_modalities: dict of which modalities to build pools for.
             Example: ``{"state": True, "gripper": True,
@@ -296,38 +298,33 @@ def build_modality_pool(
     for cam in want_cams:
         pool.image_samples[cam] = []
 
-    # Batched load — one LeRobotDataset construction for all sampled
-    # episodes. Without this we get N constructor calls per pool build,
-    # each triggering ~50 HF tree-listing API calls → 429 rate limit on
-    # any large dataset. The adapter caches by frozen-tuple of indices,
-    # so this also makes repeated rebuilds free.
-    episodes_dict: dict[int, list] = {}
-    batched_load = getattr(dataset, "load_episodes", None)
-    if callable(batched_load):
-        # Adapter implements batched load — let any real error inside it
-        # propagate (the runner catches it and skips modality dropout with
-        # the reason). We only gate on the METHOD's presence here, never
-        # catch AttributeError around the call (that would mask an
-        # AttributeError raised *inside* load_episodes as "no batched load").
-        episodes_dict = batched_load(chosen_ints)
-    else:
-        # No batched load — per-episode, tolerating per-episode failures.
-        for ep_idx in chosen_ints:
-            try:
-                episodes_dict[ep_idx] = dataset.load_trajectory(ep_idx).frames
-            except Exception as e:
-                pool.metadata["skipped_episodes"][str(ep_idx)] = f"{type(e).__name__}: {e}"
+    # Sample ONE frame per chosen episode, decoding ONLY those frames. The
+    # episode length comes from metadata (no decode); the offset is drawn with
+    # the seeded RNG exactly as before (same sequence → same frames); then
+    # sample_frames decodes just the chosen frame per episode. Loading the
+    # whole episode to keep a single frame scales the pool build with episode
+    # length × frame resolution — negligible on small data, minutes on large
+    # video datasets. The source opens one batched dataset handle for the
+    # whole set (one tree-listing / etag check), so this stays 429-safe.
+    lengths = dataset.episode_lengths(chosen_ints)
+    ep_to_offset: dict[int, int] = {}
+    for ep_idx in chosen_ints:
+        n = int(lengths.get(ep_idx, 0))
+        if n <= 0:
+            pool.metadata["skipped_episodes"].setdefault(
+                str(ep_idx), "episode has zero frames")
+            continue
+        ep_to_offset[ep_idx] = int(rng.choice(n))
+    scenes_by_ep = dataset.sample_frames(ep_to_offset)
 
     instr_skip = img_skip = state_skip = gripper_skip = history_skip = 0
 
     for ep_idx in chosen_ints:
-        frames = episodes_dict.get(ep_idx) or []
-        if not frames:
+        scene = scenes_by_ep.get(ep_idx)
+        if scene is None:
             pool.metadata["skipped_episodes"].setdefault(
-                str(ep_idx), "episode yielded zero frames")
+                str(ep_idx), "frame could not be decoded")
             continue
-        fi = int(rng.choice(len(frames)))
-        scene = frames[fi]
         obs = scene.observations
 
         if want_state:

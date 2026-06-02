@@ -44,10 +44,10 @@ def _build_install_cmd(name: str, description: str) -> click.Command:
     @click.command(
         f"install-{name}",
         help=(
-            f"Materialise the runtime venv for the {description} "
-            f"adapter.\n\nRun ONCE after `uv pip install emboviz-"
-            f"{name}`. Creates ~/.emboviz/venvs/{name} and installs "
-            "the heavy model deps into it."
+            f"Pre-build the isolated runtime venv for the {description} "
+            f"adapter at ~/.emboviz/venvs/{name}. OPTIONAL — `emboviz analyze` "
+            "builds it automatically on first use; run this only to do it "
+            "ahead of time (e.g. to surface install errors early)."
         ),
     )
     @click.option(

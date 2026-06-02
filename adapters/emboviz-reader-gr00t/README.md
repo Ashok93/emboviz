@@ -33,10 +33,9 @@ This is a **reader**, not the GR00T model adapter. It never imports the
 
 ## Install
 
-```bash
-uv pip install emboviz emboviz-reader-gr00t   # core + the thin reader shim
-emboviz install-reader-gr00t                  # builds the isolated reader venv
-```
+Ships with [emboviz](../../README.md#installation) core — `uv sync` installs
+it; you do not install it separately. The isolated worker venv builds
+automatically on first use.
 
 ## Use
 

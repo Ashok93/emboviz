@@ -1,0 +1,48 @@
+# ACT finetune on SO-101 pick-and-place (real user finetune).
+#   uv run emboviz analyze --config configs/act-so101-pickplace.yaml
+
+model:
+  adapter: act
+  kwargs:
+    checkpoint: /root/models/act-so101-pickplace
+    camera_mapping:
+      primary: observation.images.up
+      side:    observation.images.side
+
+dataset:
+  format: lerobot
+  path: /root/datasets/svla_so101_pickplace
+
+  cameras:
+    primary: observation.images.up
+    side:    observation.images.side
+
+  state:
+    key: observation.state
+    convention: joint_angles
+
+  action:
+    key: action
+
+  gripper:
+    source: gripper.pos
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"
+  frame_start: 0
+  n_frames: -1          # all frames from frame_start
+  frame_stride: 10
+  mask_query: "the lego block"
+  detector: sam3
+  detector_score_threshold: 0.5    # SAM 3 standard precision; the neutral query detects cleanly on both cameras
+  detector_mask_threshold: 0.4     # looser mask so the object is fully covered for clean removal
+  fills: [channel_mean, gaussian_blur, lama_inpaint]
+  diagnostics: all
+
+output: ./report/act-so101-pickplace

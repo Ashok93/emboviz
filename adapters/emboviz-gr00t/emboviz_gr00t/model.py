@@ -34,6 +34,19 @@ from emboviz_wire import Capability, RequiredInputs, VLAModel
 DEMO_EMBODIMENT = "OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
 DEMO_MODEL_PATH = "nvidia/GR00T-N1.7-3B"
 
+# Pinned RNG seed for prediction. GR00T denoises the action chunk from
+# ``torch.randn(...)`` noise with no explicit generator, so an unseeded
+# ``predict`` varies run-to-run. emboviz's comparative diagnostics measure how
+# the action CHANGES under an intervention (mask the target, occlude a patch,
+# swap a modality); against a stochastic predict that change is confounded with
+# sampling jitter — the noise floor that forces "inconclusive" verdicts.
+# Pinning the seed makes ``predict`` a deterministic function of its input, so
+# the baseline and the intervention draw IDENTICAL noise and it cancels exactly
+# in their difference (common random numbers): one forward pass per arm yields a
+# clean causal measurement, with no averaging. The deployed policy is untouched
+# — this is an analysis-time setting only.
+_ANALYSIS_SEED = 0
+
 
 class Gr00tAdapter(VLAModel):
     """Wraps `gr00t.policy.Gr00tPolicy` as an Emboviz `VLAModel`.
@@ -224,6 +237,8 @@ class Gr00tAdapter(VLAModel):
         if reason is not None:
             raise ValueError(f"Gr00tAdapter.predict: {reason}")
         observation = self._build_observation(scene)
+        import torch
+        torch.manual_seed(_ANALYSIS_SEED)   # deterministic denoise — see _ANALYSIS_SEED
         action_dict, _info = self.policy.get_action(observation)
 
         # Concatenate per-action-key arrays in declared order. GR00T's

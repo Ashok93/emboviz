@@ -173,28 +173,62 @@ class SensitivityMapDiagnostic(Diagnostic):
 
         if not consumed_cams:
             sev = Severity.UNKNOWN
-            finding = Finding(
-                observed=(
-                    f"We covered a {self.grid_side}×{self.grid_side} grid "
-                    f"of patches across {cameras} and the model's action "
-                    f"barely changed for any patch — every cell's "
-                    f"response was below the model's per-call sampling "
-                    f"noise floor."
-                ),
-                meaning=(
-                    "We cannot tell on this frame whether the model is "
-                    "ignoring all visual input, or whether the response "
-                    "is just lost in its sampling jitter. This is common "
-                    "on quiescent frames where the action is "
-                    "well-determined regardless of the image."
-                ),
-                next_step=(
-                    "Pick a more dynamic mid-trajectory frame, or "
-                    "increase averaging (model n_samples) to tighten "
-                    "the noise floor."
-                ),
-                raw_numbers=raw_numbers,
+            noise_floor = (
+                self.calibration.noise_floor if self.calibration is not None else 0.0
             )
+            if noise_floor <= 1e-9:
+                # Deterministic model (e.g. seeded diffusion): a zero response
+                # is a REAL, jitter-free measurement — do NOT blame sampling
+                # noise. The interpretation is still ambiguous (ignored vs.
+                # action-robust), so the severity stays UNKNOWN, but the wording
+                # must be honest about there being no noise to hide in.
+                finding = Finding(
+                    observed=(
+                        f"We covered a {self.grid_side}×{self.grid_side} grid "
+                        f"of patches across {cameras} and the model's action "
+                        f"did NOT change for any patch — a real, jitter-free "
+                        f"measurement (the model is deterministic on this run; "
+                        f"noise floor 0)."
+                    ),
+                    meaning=(
+                        "The action on this frame is invariant to occluding any "
+                        "region of the image. Either the model isn't using this "
+                        "camera's local detail, or the action is well-determined "
+                        "regardless of the image (a quiescent / obvious moment). "
+                        "We can't separate those two from one frame — but this "
+                        "is NOT measurement noise: the model genuinely produced "
+                        "the same action."
+                    ),
+                    next_step=(
+                        "Cross-reference memorization + modality on this frame, "
+                        "and scrub the Rerun rollout to check whether it is a "
+                        "quiescent moment."
+                    ),
+                    raw_numbers=raw_numbers,
+                )
+            else:
+                finding = Finding(
+                    observed=(
+                        f"We covered a {self.grid_side}×{self.grid_side} grid "
+                        f"of patches across {cameras} and the model's action "
+                        f"barely changed for any patch — every cell's "
+                        f"response was below the model's per-call sampling "
+                        f"noise floor."
+                    ),
+                    meaning=(
+                        "We cannot tell on this frame whether the model is "
+                        "ignoring all visual input, or whether the response "
+                        "is just lost in its sampling jitter. This is common "
+                        "on quiescent frames where the action is "
+                        "well-determined regardless of the image."
+                    ),
+                    next_step=(
+                        "Pick a more dynamic mid-trajectory frame, or "
+                        "increase averaging (model n_samples) to tighten "
+                        "the noise floor."
+                    ),
+                    raw_numbers=raw_numbers,
+                )
         elif scalar > 0.5:
             sev = Severity.PASS
             finding = Finding(

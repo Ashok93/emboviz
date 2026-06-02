@@ -432,6 +432,18 @@ class ZMQReaderClient(RpcClient, EpisodeSource):
         })
         return {int(k): [wire.decode_scene(s) for s in v] for k, v in result.items()}
 
+    def episode_lengths(self, episode_indices: list[int]) -> dict[int, int]:
+        result = self.request("episode_lengths", {
+            "episode_indices": [int(i) for i in episode_indices],
+        })
+        return {int(k): int(v) for k, v in result.items()}
+
+    def sample_frames(self, episode_offsets: dict[int, int]) -> dict[int, Scene]:
+        result = self.request("sample_frames", {
+            "episode_offsets": {int(k): int(v) for k, v in episode_offsets.items()},
+        })
+        return {int(k): wire.decode_scene(v) for k, v in result.items()}
+
     def load_trajectory(self, episode_idx: int) -> Trajectory:
         result = self.request("load_trajectory", {"episode_idx": int(episode_idx)})
         return wire.decode_trajectory(result)

@@ -163,7 +163,15 @@ class OpenVLAOFTAdapter(VLAModel):
         )
         self._get_vla_action = get_vla_action
         self._proprio_dim = PROPRIO_DIM
-        self._action_dim = 7   # standard 7-DOF for OpenVLA-class
+        # Action dimension is READ FROM THE CHECKPOINT, never hardcoded. A
+        # bimanual / non-7-DOF OFT fine-tune has a different action dim, and a
+        # hardcoded 7 silently mis-reshapes the action chunk in predict():
+        # a (chunk, 14) bimanual chunk reshaped to (-1, 7) corrupts WITHOUT
+        # erroring (14 is a multiple of 7), splitting each real timestep across
+        # two rows. We mirror the OpenVLA adapter and read the real per-dim
+        # count from the model's own normalization stats; get_action_dim raises
+        # loudly if ``unnorm_key`` is absent — no default, no silent fallback.
+        self._action_dim = int(self._vla.get_action_dim(self.unnorm_key))
 
     # ----- identification ------------------------------------------------
 

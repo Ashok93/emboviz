@@ -23,6 +23,14 @@ from emboviz.diagnostics.base import Diagnostic
 from emboviz.models.protocol import VLAModel
 
 
+# Axis-verdict cutoffs, applied over the TESTABLE frames only (UNKNOWN
+# excluded — a coverage gap is not a verdict). The axis verdict is a
+# PROPORTION of the frames we could actually test, never the single worst one:
+# a couple of flagged frames among many clean ones is a note, not a headline.
+_AXIS_CRITICAL_FRAC = 0.50   # ≥ half the testable frames flagged → CRITICAL
+_AXIS_CONCERN_FRAC  = 0.20   # ≥ this fraction flagged-or-partial → MODERATE
+
+
 @dataclass
 class TrajectoryDiagnosticResult:
     """Per-frame DiagnosticResults plus aggregate stats and failure moments."""
@@ -115,6 +123,51 @@ class TrajectoryDiagnosticResult:
         hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
         return (lo, hi)
 
+    def trajectory_severity(self) -> Severity:
+        """Axis-level verdict for the whole trajectory — a PROPORTION of the
+        TESTABLE frames, not the single worst one.
+
+        UNKNOWN ('couldn't test') is a coverage gap, not a verdict, so it is
+        excluded from the denominator: the verdict is computed only over the
+        frames the diagnostic could actually test. A handful of flagged frames
+        among many clean ones is therefore a note (PASS / MODERATE), never a
+        CRITICAL headline. If no frame was testable, the axis is UNKNOWN.
+        :meth:`trajectory_finding` quotes a frame matching this severity, so the
+        label and the text always agree.
+        """
+        counts = {s: 0 for s in Severity}
+        for r in self.per_frame:
+            counts[r.severity] += 1
+        n_test = len(self.per_frame) - counts[Severity.UNKNOWN]
+        if n_test <= 0:
+            return Severity.UNKNOWN
+        frac_critical = counts[Severity.CRITICAL] / n_test
+        frac_concern = (counts[Severity.CRITICAL] + counts[Severity.MODERATE]) / n_test
+        if frac_critical >= _AXIS_CRITICAL_FRAC:
+            return Severity.CRITICAL
+        if frac_concern >= _AXIS_CONCERN_FRAC:
+            return Severity.MODERATE
+        # Mostly clean. Report INFO only if every testable frame was at most
+        # 'noteworthy' (no clean PASS frames to represent it); else PASS.
+        if counts[Severity.PASS] == 0 and counts[Severity.INFO] > 0:
+            return Severity.INFO
+        return Severity.PASS
+
+    def _representative_finding(self, axis_sev: Severity) -> Optional[Finding]:
+        """A per-frame Finding that illustrates the axis verdict: the first
+        frame whose severity matches ``axis_sev``, else the worst testable
+        frame's Finding — so the quoted text always agrees with the headline
+        label and is never empty when any frame was testable."""
+        for r in self.per_frame:
+            if r.severity == axis_sev and r.finding is not None:
+                return r.finding
+        for sev in (Severity.CRITICAL, Severity.MODERATE,
+                    Severity.INFO, Severity.PASS):
+            for r in self.per_frame:
+                if r.severity == sev and r.finding is not None:
+                    return r.finding
+        return None
+
     def trajectory_finding(self) -> Finding:
         """Aggregate per-frame Findings into a single trajectory-level Finding.
 
@@ -151,68 +204,68 @@ class TrajectoryDiagnosticResult:
         n_mod  = counts[Severity.MODERATE]
         n_crit = counts[Severity.CRITICAL]
         n_unk  = counts[Severity.UNKNOWN]
+        n_test = n - n_unk
 
-        # Pick a representative per-frame Finding for the dominant
-        # severity. Users get its language carried up; counts give scale.
-        rep_severity = max(
-            (Severity.CRITICAL, Severity.MODERATE, Severity.INFO, Severity.PASS, Severity.UNKNOWN),
-            key=lambda s: counts[s],
-        )
-        rep_finding: Optional[Finding] = None
-        for r in self.per_frame:
-            if r.severity == rep_severity and r.finding is not None:
-                rep_finding = r.finding
-                break
+        # The quoted Finding comes from a frame matching the axis verdict (see
+        # _representative_finding), so the headline label and the text agree.
+        axis_sev = self.trajectory_severity()
+        rep_finding = self._representative_finding(axis_sev)
 
-        pct = lambda k: f"{100 * k / n:.0f}%"
-        parts: list[str] = []
-        if n_crit > 0: parts.append(f"{n_crit}/{n} ({pct(n_crit)}) flagged")
-        if n_mod  > 0: parts.append(f"{n_mod}/{n} ({pct(n_mod)}) partial")
-        if n_pass > 0: parts.append(f"{n_pass}/{n} ({pct(n_pass)}) clean")
-        if n_info > 0: parts.append(f"{n_info}/{n} ({pct(n_info)}) noteworthy")
-        if n_unk  > 0: parts.append(f"{n_unk}/{n} ({pct(n_unk)}) inconclusive")
-        dist_str = ", ".join(parts)
-
-        # Pull the representative per-frame Finding to ground the
-        # meaning + next-step in concrete language from the dominant
-        # case. Without a representative we synthesize a generic
-        # version from the severity distribution.
-        if rep_finding is not None:
+        if n_test == 0:
+            # Nothing was testable — report that honestly, never as a verdict.
             observed = (
-                f"Across {n} frames: {dist_str}. "
-                f"Representative frame says: {rep_finding.observed}"
+                f"All {n} frame(s) were inconclusive — the diagnostic could "
+                f"not test this axis on any of them."
             )
-            meaning   = rep_finding.meaning
-            next_step = rep_finding.next_step
-        elif rep_severity == Severity.PASS:
-            observed  = f"Across {n} frames: {dist_str}."
-            meaning   = "This axis is healthy throughout the episode."
-            next_step = "No action needed for this axis."
-        elif rep_severity == Severity.CRITICAL:
-            observed  = f"Across {n} frames: {dist_str}."
-            meaning   = "The dominant signal is a flagged frame — the issue persists across the episode."
-            next_step = "Inspect the worst frame in Rerun; cross-reference with other axes' findings."
-        else:
-            observed  = f"Across {n} frames: {dist_str}."
-            meaning   = "Mixed or inconclusive across the episode."
+            meaning = (
+                rep_finding.meaning if rep_finding is not None
+                else "No frame produced a testable result on this axis."
+            )
             next_step = (
-                "Re-run on a more dynamic mid-episode window, or "
-                "increase K-samples / averaging for tighter statistics."
+                rep_finding.next_step if rep_finding is not None
+                else "Re-run on a more dynamic episode or a more varied dataset."
             )
+        else:
+            # Distribution over the frames we could TEST; inconclusive frames
+            # are reported separately, never counted toward the verdict.
+            parts: list[str] = []
+            if n_crit > 0: parts.append(f"{n_crit} flagged")
+            if n_mod  > 0: parts.append(f"{n_mod} partial")
+            if n_info > 0: parts.append(f"{n_info} noteworthy")
+            if n_pass > 0: parts.append(f"{n_pass} clean")
+            dist_str = ", ".join(parts)
+            untested = f" ({n_unk} couldn't be tested)" if n_unk else ""
+            lead = f"Of {n_test} testable frame(s){untested}: {dist_str}."
+            if rep_finding is not None:
+                observed  = f"{lead} Representative frame: {rep_finding.observed}"
+                meaning   = rep_finding.meaning
+                next_step = rep_finding.next_step
+            elif axis_sev == Severity.PASS or axis_sev == Severity.INFO:
+                observed  = lead
+                meaning   = "This axis is healthy across the frames we could test."
+                next_step = "No action needed for this axis."
+            else:
+                observed  = lead
+                meaning   = "Mixed across the frames we could test."
+                next_step = (
+                    "Inspect the flagged frames in Rerun; cross-reference with "
+                    "the other axes' findings."
+                )
 
         return Finding(
             observed=observed,
             meaning=meaning,
             next_step=next_step,
             raw_numbers={
-                "n_frames":    n,
-                "n_pass":      n_pass,
-                "n_info":      n_info,
-                "n_moderate":  n_mod,
-                "n_critical":  n_crit,
-                "n_unknown":   n_unk,
-                "mean_score":  self.mean_score,
-                "median_score": self.median_score,
+                "n_frames":        n,
+                "n_testable":      n_test,
+                "n_pass":          n_pass,
+                "n_info":          n_info,
+                "n_moderate":      n_mod,
+                "n_critical":      n_crit,
+                "n_unknown":       n_unk,
+                "mean_score":      self.mean_score,
+                "median_score":    self.median_score,
                 "worst_frame_idx": self.worst_frame_idx,
             },
         )
@@ -234,6 +287,7 @@ class TrajectoryDiagnosticResult:
             "direction":         self.direction,
             "frame_indices":     self.frame_indices,
             "scores":            self.scores.tolist(),
+            "severity":          self.trajectory_severity().value,
             "severities":        [s.value for s in self.severities],
             "finding":           finding.to_dict(),
             "per_frame_findings": [

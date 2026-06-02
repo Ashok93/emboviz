@@ -15,15 +15,20 @@ worker, the same pattern as the other model adapters.
 
 ## Install
 
+From the [emboviz](../../README.md#installation) repo root:
+
 ```bash
-uv pip install emboviz emboviz-lerobot emboviz-smolvla
-emboviz install-smolvla       # builds the isolated lerobot[smolvla] runtime venv
+uv sync --extra smolvla
 ```
+
+Installs this adapter alongside core, both dataset readers, and the SAM 3 /
+LaMa workers. Its isolated runtime venv builds automatically on the first
+`uv run emboviz analyze` — you never build it by hand.
 
 ## Run
 
 ```bash
-emboviz-smolvla serve --kwargs '{"checkpoint": "lerobot/smolvla_base", "camera_mapping": {"primary": "observation.images.top"}}'
+uv run emboviz-smolvla serve --kwargs '{"checkpoint": "lerobot/smolvla_base", "camera_mapping": {"primary": "observation.images.top"}}'
 ```
 
 The analyze runner auto-spawns the worker from the run config.

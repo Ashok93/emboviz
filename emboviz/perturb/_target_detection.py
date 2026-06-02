@@ -664,8 +664,8 @@ class SAM3Detector:
         self,
         target_text: str,
         endpoint: Optional[str] = None,
-        score_threshold: float = 0.30,
-        mask_threshold: float = 0.50,
+        score_threshold: float = 0.5,
+        mask_threshold: float = 0.5,
         timeout: float = 120.0,
         device: str = "cuda",
     ):
@@ -679,12 +679,17 @@ class SAM3Detector:
                 worker. Default: read from ``EMBOVIZ_SAM3_ENDPOINT``
                 env var, else ``ipc://~/.emboviz/sockets/sam3.sock``.
             score_threshold: detections with the top instance's score
-                below this are returned as ``None`` (the diagnostic
-                then skips that frame with a clear reason). 0.30 is
-                the "high-precision" cutoff from the SAM 3 release
-                notes.
-            mask_threshold: SAM 3 emits per-pixel mask logits; values
-                above this become foreground. 0.50 is standard.
+                below this are returned as ``None`` (the diagnostic then
+                skips that frame with a clear reason). Default 0.5 — SAM 3's
+                recommended value (used throughout the transformers SAM 3
+                docs). Lower it only when a target is genuinely missed on a
+                camera; prefer a neutral ``target_text`` first, since color
+                words can throw the detector off.
+            mask_threshold: SAM 3 emits per-pixel mask logits; values above
+                this become foreground. Default 0.5 (SAM 3's standard); a
+                lower value (e.g. 0.4) gives a more generous mask that covers
+                the whole target rather than its core, which helps clean
+                removal in the memorization diagnostic.
             timeout: per-request RPC timeout in seconds. SAM 3 inference
                 is ~100-300 ms per image on H100/A6000; the first
                 request to a freshly-started worker pays a ~30 s warmup
@@ -722,10 +727,11 @@ class SAM3Detector:
             from emboviz_sam3.client import Sam3Client
         except ImportError as e:
             raise ImportError(
-                "SAM3Detector requires the ``emboviz-sam3`` adapter "
-                "package to be installed (it ships the typed RPC client "
-                "alongside the worker code). Install via:\n"
-                "    uv pip install emboviz-sam3"
+                "SAM3Detector requires the ``emboviz-sam3`` adapter package "
+                "(it ships the typed RPC client alongside the worker code). "
+                "It ships with emboviz core, so if it's missing your install "
+                "is incomplete — reinstall from the repo root with:\n"
+                "    uv sync"
             ) from e
         self._client = Sam3Client(
             endpoint=self.endpoint,
@@ -749,9 +755,9 @@ class SAM3Detector:
                 "    ~/.emboviz/venvs/sam3/bin/emboviz-sam3 serve\n\n"
                 "Or override the endpoint via "
                 "EMBOVIZ_SAM3_ENDPOINT=ipc://... or tcp://...\n\n"
-                "If the worker isn't installed, run:\n"
-                "    uv pip install emboviz-sam3\n"
-                "    emboviz install-sam3\n\n"
+                "`emboviz analyze` builds and spawns this worker automatically; "
+                "to pre-build its isolated venv yourself, run:\n"
+                "    uv run emboviz install-sam3\n\n"
                 "If you need to keep moving without SAM 3, pass\n"
                 "    --detector gd-sam\n"
                 "to fall back to GroundingDINO + SAM."

@@ -41,13 +41,12 @@ _INPROC_MODELS: dict[str, str] = {
 # in-host lerobot. HDF5's h5py ships in core. RLDS needs the rlds extra.
 _DATASET_FORMATS: dict[str, tuple[str, str, str]] = {
     "lerobot": ("LeRobot v3.0 (BridgeV2, LIBERO, DROID, ALOHA, custom HF)",
-                "emboviz_lerobot", "uv pip install emboviz-lerobot && emboviz install-lerobot"),
+                "emboviz_lerobot", ""),       # ships with emboviz core
     "gr00t":   ("GR00T format — LeRobot v2.1 + modality.json (NVIDIA Isaac-GR00T)",
-                "emboviz_reader_gr00t",
-                "uv pip install emboviz-reader-gr00t && emboviz install-reader-gr00t"),
+                "emboviz_reader_gr00t", ""),  # ships with emboviz core
     "hdf5":    ("Robomimic / ALOHA / Isaac Lab Mimic HDF5", "h5py", ""),
     "rlds":    ("RLDS / TFDS (Open-X-Embodiment, RT-X, Octo)",
-                "tensorflow_datasets", "uv pip install 'emboviz[rlds]'"),
+                "tensorflow_datasets", "uv sync --extra rlds"),
 }
 
 
@@ -62,8 +61,7 @@ def list_models_cmd() -> None:
     For each adapter we report:
 
       ✓  the adapter shim is installed (its entry point is discoverable)
-      ·  not installed — shows the ``uv pip install`` + ``emboviz install-<name>``
-         commands to get it
+      ·  not installed — shows the ``uv sync --extra <name>`` command to get it
     """
     installed = list_adapters()
     click.echo("Available model adapters (ZMQ workers):")
@@ -77,9 +75,7 @@ def list_models_cmd() -> None:
         else:
             click.echo(
                 f"  {mark} {name:<10} {desc}\n"
-                f"           install:  uv pip install emboviz-{name}\n"
-                f"                      emboviz install-{name}\n"
-                f"                      emboviz-{name} serve &"
+                f"           install:  uv sync --extra {name}"
             )
 
     click.echo()

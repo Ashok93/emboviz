@@ -210,7 +210,7 @@ def _build_rlds(path, cameras, state, action, gripper, instruction, extra):
     except ImportError as e:
         raise ImportError(
             "dataset.format='rlds' needs the `rlds` extra. Install with: "
-            "pip install 'emboviz[rlds]'. Underlying error: " + str(e)
+            "uv sync --extra rlds. Underlying error: " + str(e)
         ) from e
 
     data_dir = extra.get("data_dir")

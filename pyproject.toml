@@ -30,6 +30,16 @@ dependencies = [
     # below is HOST-only (datasets / diagnostics / viz / export) and
     # never reaches a worker venv.
     "emboviz-wire>=0.3",
+    # Mandatory companion shims. Each is lightweight (emboviz-wire + numpy
+    # only); the heavy runtime for each is built into an isolated worker venv
+    # on first use, never in the host — so bundling them here introduces no
+    # dependency conflict. Shipping them with core makes the memorization
+    # detector + on-manifold fill and BOTH dataset-format readers always
+    # present, so a first install is a single command.
+    "emboviz-sam3>=0.3",          # SAM 3 target detector (memorization mask)
+    "emboviz-lama>=0.3",          # LaMa on-manifold inpainting fill
+    "emboviz-lerobot>=0.3",       # LeRobot v3.0 dataset reader
+    "emboviz-reader-gr00t>=0.3",  # GR00T-format reader (LeRobot v2.1 + modality.json)
     # plumbing — pure-Python or fast-imported data wrangling
     "numpy>=1.26",
     "scipy>=1.11",
@@ -77,22 +87,32 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# ────────── LeRobot dataset reader ──────────
-# NOTE: there is intentionally NO ``[lerobot]`` extra. Reading LeRobot
-# datasets is done by the SEPARATE ``emboviz-lerobot`` package, whose
-# isolated reader venv holds ``lerobot`` (and its ``rerun-sdk<0.27`` pin +
-# torch). Installing it into core would drag that rerun cap into the host
-# and collide with core's own ``rerun>=0.32`` .rrd exporter. Instead:
-#
-#     uv pip install emboviz emboviz-lerobot   # core + the thin reader shim
-#     emboviz install-lerobot                  # builds the isolated reader venv
-#
-# Core stays torch-free and lerobot-free; the reader runs as a ZMQ worker.
+# ────────── Model adapters ──────────
+# One extra per VLA family. Each pulls in only that adapter's lightweight host
+# shim (entry-point registration; the heavy model runtime is built into an
+# isolated worker venv on first use). So ``uv sync --extra gr00t`` installs core
+# + the mandatory companion shims (SAM 3 / LaMa / both dataset readers, declared
+# in ``dependencies`` above) + the GR00T adapter — in a single command. Bundling
+# the shims this way is conflict-free precisely because no heavy dependency ever
+# enters the host environment; cross-adapter conflicts are isolated per worker.
+openvla = ["emboviz-openvla>=0.3"]
+oft     = ["emboviz-oft>=0.3"]
+pi0     = ["emboviz-pi0>=0.3"]
+gr00t   = ["emboviz-gr00t>=0.3"]
+act     = ["emboviz-act>=0.3"]
+smolvla = ["emboviz-smolvla>=0.3"]
+all = [
+    "emboviz-openvla>=0.3",
+    "emboviz-oft>=0.3",
+    "emboviz-pi0>=0.3",
+    "emboviz-gr00t>=0.3",
+    "emboviz-act>=0.3",
+    "emboviz-smolvla>=0.3",
+]
 
 # ────────── Optional heavy dataset family ──────────
-# Only pulled in by users who actually have RLDS / Open-X-Embodiment
-# data. Adds tensorflow_datasets + tensorflow-cpu (~500 MB) so we keep
-# it out of the core deps.
+# RLDS / Open-X-Embodiment readers run IN-PROCESS (not an isolated worker venv)
+# and pull tensorflow (~500 MB), so they stay opt-in rather than a core dep.
 rlds = [
     "tensorflow-datasets>=4.9",
     "tensorflow-cpu>=2.15",
@@ -106,12 +126,6 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
-
-# NOTE: there are no longer per-adapter extras. Adapters are separate
-# distributions (emboviz-openvla, emboviz-oft, etc.) the user installs
-# alongside emboviz. This eliminates every cross-adapter dep conflict
-# we ever hit, because each adapter's heavy deps live in its own
-# isolated runtime venv, never in the user's main env.
 
 [project.scripts]
 emboviz = "emboviz.cli:main"
@@ -127,18 +141,28 @@ emboviz = "emboviz.cli:main"
 # its own entry via its own pyproject [project.entry-points...] block.
 
 # ──────────────────────────────────────────────────────────────────────
-# Local development sources (dev-only — NOT part of the published wheel).
-#
-# ``emboviz-wire`` is the one runtime dependency of core that lives in
-# THIS repo rather than on PyPI. uv strips ``[tool.uv.sources]`` from the
-# built distribution's metadata, so PyPI users still resolve
-# ``emboviz-wire>=0.3`` from the registry; only local ``uv run`` / ``uv
-# sync`` redirect it to the in-repo checkout. The dev-pod / user install
-# scripts use ``uv pip install -e`` (which does not read sources) and pass
-# the wire checkout explicitly, so all three paths install the SAME wire.
+# Local sources for the in-repo companion packages (core's dependencies and
+# the model-adapter extras above). uv strips ``[tool.uv.sources]`` from the
+# built wheel's metadata, so a future PyPI install resolves them from the
+# registry — only the local ``uv sync`` / ``uv run`` workflow redirects them to
+# these in-repo checkouts. This is what lets ``uv sync --extra <model>`` install
+# everything from the clone in one command. (``uv pip install`` does NOT read
+# this table, which is why the documented install path is ``uv sync``.) Each is
+# editable so a worker venv built on first use picks up the local source —
+# dev path == user path.
 # ──────────────────────────────────────────────────────────────────────
 [tool.uv.sources]
-emboviz-wire = { path = "adapters/emboviz-wire", editable = true }
+emboviz-wire         = { path = "adapters/emboviz-wire",         editable = true }
+emboviz-sam3         = { path = "adapters/emboviz-sam3",         editable = true }
+emboviz-lama         = { path = "adapters/emboviz-lama",         editable = true }
+emboviz-lerobot      = { path = "adapters/emboviz-lerobot",      editable = true }
+emboviz-reader-gr00t = { path = "adapters/emboviz-reader-gr00t", editable = true }
+emboviz-openvla      = { path = "adapters/emboviz-openvla",      editable = true }
+emboviz-oft          = { path = "adapters/emboviz-oft",          editable = true }
+emboviz-pi0          = { path = "adapters/emboviz-pi0",          editable = true }
+emboviz-gr00t        = { path = "adapters/emboviz-gr00t",        editable = true }
+emboviz-act          = { path = "adapters/emboviz-act",          editable = true }
+emboviz-smolvla      = { path = "adapters/emboviz-smolvla",      editable = true }
 
 [build-system]
 requires = ["hatchling"]

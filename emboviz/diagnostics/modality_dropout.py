@@ -12,15 +12,19 @@ each sample, and measure two quantities:
   • **response magnitude** Δ_out — normalized L2 change in the model's
     action under the substitution.
 
-The verdict combines them per the causal-mediation principle:
+The verdict is response-first, with the intervention-validity (positivity)
+gate governing only the NEGATIVE claim:
 
-  • If mean Δ_in is below the pool's "minimum meaningful intervention"
-    threshold (25th percentile of intra-pool pairwise distances), the
-    test is UNTESTABLE — the substitutes were too similar to the
-    current value to count as a real intervention. We refuse to call
-    "ignored."
-  • Otherwise the verdict is USED / PARTIAL / IGNORED based on the
-    normalized Δ_out vs noise-floor and grounded thresholds.
+  • A clear response — Δ_out above the grounded / noise-floor thresholds —
+    means the modality is USED / PARTIAL. A visible action change proves the
+    model consumed the input, however small the measured Δ_in: a tiny but
+    real image edit can still swing the action, so the response is decisive
+    on its own and the intervention gate is not consulted.
+  • Only when Δ_out is below the noise floor do we consult the intervention.
+    If the input was genuinely moved (mean Δ_in >= the modality's own pool
+    spread) the modality is IGNORED; if the input barely changed either, the
+    effect is not identifiable (no overlap) and we abstain (UNTESTABLE)
+    rather than fabricate an "ignored" verdict.
 
 Implementation is faithful to the literature:
   - SHAP / marginal sampling (Janzing-Minorics-Blöbaum 2020,
@@ -497,72 +501,67 @@ class ModalityDropoutDiagnostic(Diagnostic):
         mean_out_raw  = float(np.mean(response_raws))
         std_out_norm  = float(np.std(response_norms))
         ratio = (mean_out_norm / mean_in) if mean_in > 1e-12 else float("inf")
-
-        # Intervention-validity gate.
         ref = self.pool.ref_distance.get(modality, 0.0)
-        if mean_in < ref:
-            return {
-                "verdict":                       "UNTESTABLE",
-                "skip_reason":                   (
-                    f"mean intervention magnitude {mean_in:.4f} is below "
-                    f"the pool's 25th-percentile pairwise distance "
-                    f"({ref:.4f}). The substitutions are too similar to "
-                    "the current value to count as a real intervention. "
-                    "More variety in the dataset would help."
-                ),
-                "n_samples_used":                int(len(samples)),
-                "mean_intervention_mag":         mean_in,
-                "median_intervention_mag":       median_in,
-                "ref_min_intervention":          float(ref),
-                "mean_response_normalized":      mean_out_norm,
-                "mean_response_raw":             mean_out_raw,
-                "std_response_normalized":       std_out_norm,
-                "sensitivity_ratio":             ratio,
-                "intervention_magnitudes":       intervention_mags,
-                "response_normalized_per_sample": response_norms,
-            }
-
-        # Real intervention happened. Two-stage verdict:
-        #
-        #   1) Is the response statistically distinguishable from the
-        #      model's own sampling noise? If not, we cannot tell
-        #      "model ignored input" apart from "model jitters by this
-        #      magnitude on every call regardless of input." → BELOW_NOISE
-        #
-        #   2) If yes, compare to the strength thresholds:
-        #      IGNORED  (real but tiny — < noise_floor_score of typical)
-        #      PARTIAL  (real, modest)
-        #      USED     (real, strong — > grounded_threshold of typical)
-        #
-        # The noise threshold is derived from the model's calibrated
-        # noise floor (per-call sigma) divided by sqrt(K) — the SE of
-        # the K-sample mean. See ModelCalibration.signal_threshold_normalized.
         signal_threshold = self.calibration.signal_threshold_normalized(
             k_samples=int(len(samples)),
         )
-        if mean_out_norm < signal_threshold:
-            verdict = "BELOW_NOISE"
-        elif mean_out_norm < self.noise_floor_score:
-            verdict = "IGNORED"
-        elif mean_out_norm < self.grounded_threshold:
-            verdict = "PARTIAL"
-        else:
-            verdict = "USED"
 
-        return {
-            "verdict":                       verdict,
-            "n_samples_used":                int(len(samples)),
-            "mean_intervention_mag":         mean_in,
-            "median_intervention_mag":       median_in,
-            "ref_min_intervention":          float(ref),
-            "mean_response_normalized":      mean_out_norm,
-            "mean_response_raw":             mean_out_raw,
-            "std_response_normalized":       std_out_norm,
-            "signal_threshold_normalized":   signal_threshold,
-            "sensitivity_ratio":             ratio,
-            "intervention_magnitudes":       intervention_mags,
+        # Response-first verdict (causal positivity / overlap — Geiger et al.
+        # 2023; Janzing et al. 2020).
+        #
+        # A response we can clearly see PROVES the model consumed the modality,
+        # however small the measured INPUT change looks: a tiny but real image
+        # edit can still swing the action, so a large Δ_out is decisive on its
+        # own. USED / PARTIAL therefore never consult the intervention-validity
+        # gate. That gate governs only the NEGATIVE claim: we may say IGNORED
+        # exactly when we DID move the input (mean_in >= the modality's own pool
+        # spread) and STILL saw a response below the noise floor. If the
+        # response is tiny AND the intervention was tiny, the effect is not
+        # identifiable (no overlap) and we abstain (UNTESTABLE) rather than
+        # fabricate an "ignored" verdict.
+        #
+        # This ordering is also why a clearly-used modality no longer flickers
+        # USED↔UNTESTABLE between frames: a large Δ_out short-circuits to USED
+        # before the brittle distance comparison is ever reached.
+        if mean_out_norm >= self.grounded_threshold:
+            verdict = "USED"
+        elif mean_out_norm >= self.noise_floor_score:
+            verdict = "PARTIAL"
+        elif mean_out_norm < signal_threshold:
+            # Indistinguishable from the model's own per-call sampling jitter.
+            verdict = "BELOW_NOISE"
+        elif mean_in >= ref:
+            # Real intervention, response below the noise floor → genuinely
+            # ignored on this frame.
+            verdict = "IGNORED"
+        else:
+            # Tiny response AND tiny intervention → unidentifiable; abstain.
+            verdict = "UNTESTABLE"
+
+        result = {
+            "verdict":                        verdict,
+            "n_samples_used":                 int(len(samples)),
+            "mean_intervention_mag":          mean_in,
+            "median_intervention_mag":        median_in,
+            "ref_min_intervention":           float(ref),
+            "mean_response_normalized":       mean_out_norm,
+            "mean_response_raw":              mean_out_raw,
+            "std_response_normalized":        std_out_norm,
+            "signal_threshold_normalized":    signal_threshold,
+            "sensitivity_ratio":              ratio,
+            "intervention_magnitudes":        intervention_mags,
             "response_normalized_per_sample": response_norms,
         }
+        if verdict == "UNTESTABLE":
+            result["skip_reason"] = (
+                f"response {mean_out_norm:.4f} is within noise AND the mean "
+                f"intervention magnitude {mean_in:.4f} is below the modality's "
+                f"own pool spread ({ref:.4f}): the substitutes were too similar "
+                "to the current value to count as a real intervention, so the "
+                "effect is not identifiable on this frame. More variety in the "
+                "dataset would help."
+            )
+        return result
 
 
 def _as_pil(v):

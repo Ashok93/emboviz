@@ -20,10 +20,9 @@ bytes + msgpack and is Python-version-agnostic.
 
 ## Install
 
-```bash
-uv pip install emboviz emboviz-sam3
-emboviz install-sam3          # builds the isolated Python 3.12 reader venv
-```
+Ships with [emboviz](../../README.md#installation) core — `uv sync` installs
+it; you do not install it separately. The isolated worker venv builds
+automatically on first use.
 
 `emboviz install-sam3` materialises `~/.emboviz/venvs/sam3` from this
 adapter's `AdapterSpec` — the same path a PyPI user follows.
@@ -33,7 +32,7 @@ adapter's `AdapterSpec` — the same path a PyPI user follows.
 ```bash
 # preload the model BEFORE accepting requests (so the first detect()
 # doesn't pay the ~30 s warmup)
-emboviz-sam3 serve
+uv run emboviz-sam3 serve
 ```
 
 `emboviz-sam3 serve` starts a **ZMQ worker** over a Unix-domain socket

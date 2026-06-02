@@ -28,32 +28,48 @@ Inputs:
     policy π (potentially stochastic — sample K times per call)
     instruction I (natural-language referring expression)
     observation o = {image_per_camera, state, gripper, action_history}
-    detection confidence threshold τ_det     (default 0.30)
+    detection confidence threshold τ_det     (default 0.5, SAM 3's
+                                              recommended value; surfaced as
+                                              analysis.detector_score_threshold)
     intervention magnitude threshold τ_in    (normalized pixel-L2,
                                               default 0.05)
-    response magnitude threshold τ_out       (normalized action,
+    memorized threshold τ_out                (normalized action; below this,
+                                              all fills agree → memorized;
                                               default 0.05 of typical)
+    grounded threshold τ_grounded            (normalized action; above this,
+                                              all fills agree → grounded;
+                                              default 0.30 of typical)
+    signal threshold                         (the model's per-call sampling
+                                              jitter floor, from calibration —
+                                              below it a response is noise)
 
 1.  phrase ← MLLM_parse(I) -- extract the manipulated-object phrase
     if MLLM_parse cannot find a manipulated object → return INCONCLUSIVE
     (no fabricated noun; guessing from a fixed taxonomy is not permitted)
 
 2.  per-camera detection (default detector = SAM 3, text → mask):
-    for each camera c in observation:
+    for each camera c the model consumes:
         mask_c, score_c ← SAM3(o[c], phrase)
-        if score_c < τ_det: skip camera c (record reason)
+        if score_c < τ_det: camera c has no detection (record reason)
     -- the legacy GroundingDINO + SAM combo is the `--detector gd-sam`
        fallback for environments where SAM 3 isn't available.
 
-    if no camera had a confident detection:
-        return INCONCLUSIVE ("could not locate target on any view")
+    if ANY camera lacks a detection:
+        return INCONCLUSIVE -- the target stays visible on that camera, so
+        an unchanged action cannot be attributed to memorization. A frame is
+        scored ONLY when the target is removed from EVERY camera the model
+        sees (all-cameras-or-skip); the trajectory verdict is computed over
+        those frames, and the rest are reported as "couldn't test".
 
-3.  fill ensemble — TWO independent perturbations:
+3.  fill ensemble — the perturbations listed in analysis.fills:
         o'_mean[c] = paste(o[c], mask_c, channel_mean(o[c]))
         o'_blur[c] = paste(o[c], mask_c, gaussian_blur(o[c], σ=diag/24))
-    -- the on-manifold lama_inpaint fill the literature prescribes as a
-       THIRD fill is NOT implemented (see the 2-of-3 caveat below); the
-       agreement gate runs over these two non-on-manifold fills only.
+        o'_lama[c] = paste(o[c], mask_c, lama_inpaint(o[c], mask_c))
+    -- the two OOD-leaning fills (channel_mean, gaussian_blur) are the
+       default; the on-manifold lama_inpaint fill [Suvorov et al. 2022] is
+       enabled by adding it to analysis.fills (it runs in the isolated
+       emboviz-lama worker). The agreement gate runs over whichever fills the
+       run configured, and the result records which (see Rationale).
 
 4.  for each fill F:
         Δ_in[F] = normalized_pixel_L2(o, o'[F]) over ∪mask_c
@@ -69,9 +85,15 @@ Inputs:
                                   target is itself near-mean colored")
 
 6.  verdict (require agreement across ALL fills to call memorization):
+        if max(Δ_out[F]) < signal_threshold:  return INCONCLUSIVE
+            -- response is within the model's own per-call sampling jitter;
+               cannot tell "ignored target" from "noise" on this frame
         if max(Δ_out[F]) < τ_out:    return MEMORIZATION_SIGNATURE
-        if min(Δ_out[F]) > τ_out:    return VISUALLY_GROUNDED
+        if min(Δ_out[F]) > τ_grounded: return VISUALLY_GROUNDED
         else:                        return MIXED
+    -- the trajectory-level verdict is then a PROPORTION over the frames that
+       were testable here (INCONCLUSIVE frames excluded), never the single
+       worst frame.
 
 7.  null controls (run on demand, not per-frame):
         mask_random_same_area → expect Δ_out ≈ noise
@@ -248,18 +270,25 @@ For each modality M_i:
          mean_Δ_out  = mean over r of Δ_out_r
          sensitivity_ratio = mean_Δ_out / mean_Δ_in
 
-    5. Validity gate:
-         if mean_Δ_in < τ_in_modality:
-             verdict = INTERVENTION_TOO_WEAK
-             (record reason: the chosen substitutions are not
-              meaningfully different from the original value)
-         else:
-             apply verdict thresholds below.
+    5. Verdict — response-first (causal positivity / overlap; Geiger et al.
+       2023, Janzing et al. 2020):
+         A clear response PROVES the model consumed the modality, however
+         small the measured input change looks (a tiny but real image edit
+         can still swing the action), so USED / PARTIAL are decided by Δ_out
+         alone. The intervention-validity (positivity) gate governs only the
+         NEGATIVE claim — we may say IGNORED only when we actually moved the
+         input and the action still did not respond.
 
-    6. Verdict:
-         if mean_Δ_out < noise_floor:          IGNORED
-         elif mean_Δ_out < grounded_threshold: PARTIAL
-         else:                                  USED
+         if mean_Δ_out ≥ grounded_threshold:   USED
+         elif mean_Δ_out ≥ noise_floor:        PARTIAL
+         elif mean_Δ_out < signal_threshold:   BELOW_NOISE  (within the
+              model's own per-call sampling jitter — cannot tell)
+         elif mean_Δ_in ≥ τ_in_modality:       IGNORED  (genuinely moved the
+              input — τ_in_modality = the modality's own dataset spread — and
+              the action still barely changed)
+         else:                                  UNTESTABLE  (response AND
+              intervention both tiny → effect not identifiable; abstain
+              rather than fabricate "ignored")
 ```
 
 ### Per-modality replacement protocol

@@ -1,7 +1,7 @@
 # emboviz-gr00t
 
 NVIDIA's [GR00T-N1.7](https://huggingface.co/nvidia/GR00T-N1.7-3B)
-adapter for [emboviz](https://github.com/Ashok93/botsigil).
+adapter for [emboviz](https://github.com/Ashok93/emboviz).
 
 `emboviz install-gr00t` installs NVIDIA's `gr00t` package **with its own
 declared dependencies** — gr00t's pyproject is the source of truth, we
@@ -14,18 +14,22 @@ gr00t dependency installs normally.
 
 ## Install
 
+From the [emboviz](../../README.md#installation) repo root:
+
 ```bash
-uv pip install emboviz emboviz-gr00t emboviz-reader-gr00t
-emboviz install-gr00t
-emboviz install-reader-gr00t     # GR00T-format dataset reader (format: gr00t)
+uv sync --extra gr00t
 ```
+
+Installs this adapter alongside core, both dataset readers, and the SAM 3 /
+LaMa workers. Its isolated runtime venv builds automatically on the first
+`uv run emboviz analyze` — you never build it by hand.
 
 ## Use
 
 ```bash
-emboviz-gr00t serve &
+uv run emboviz-gr00t serve &
 
-emboviz analyze --config configs/gr00t-libero.yaml
+uv run emboviz analyze --config configs/gr00t-libero.yaml
 ```
 
 Copy the template and set `model.kwargs.model_path` to your own fine-tune.

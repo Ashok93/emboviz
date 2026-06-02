@@ -23,7 +23,9 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -81,10 +83,54 @@ def venv_python(name: str) -> Path:
     return p
 
 
-def pid_file(name: str) -> Path:
+def _run_dir() -> Path:
+    """Directory holding one JSON run-record per live worker."""
     p = Path.home() / ".emboviz" / "run"
     p.mkdir(parents=True, exist_ok=True)
-    return p / f"{name}.pid"
+    return p
+
+
+def _endpoint_stem(endpoint: str) -> str:
+    """Filesystem-safe identity for an endpoint, shared by its run-record and
+    its ipc socket. For ``ipc://…/<stem>.sock`` this is ``<stem>`` — so the
+    per-dataset reader sockets (which carry a path hash) each map to a distinct
+    record, and ``stop`` can pair a socket with its pid exactly."""
+    if endpoint.startswith("ipc://"):
+        return Path(endpoint[len("ipc://"):]).stem
+    return endpoint.replace("://", "-").replace(":", "-").replace("/", "_")
+
+
+def _run_record_path(endpoint: str) -> Path:
+    return _run_dir() / f"{_endpoint_stem(endpoint)}.json"
+
+
+def record_worker(name: str, endpoint: str, pid: int) -> None:
+    """Register a spawned worker so ``emboviz stop`` can find it: one JSON
+    record per endpoint holding the adapter name, endpoint and pid. Best-effort
+    — if the write fails, ``stop`` still finds the worker by its socket and can
+    shut it down gracefully; only ``--force`` (which needs the pid) is lost."""
+    try:
+        _run_record_path(endpoint).write_text(
+            json.dumps({"name": name, "endpoint": endpoint, "pid": int(pid)})
+        )
+    except OSError:
+        pass
+
+
+def forget_worker(endpoint: str) -> None:
+    """Remove a worker's run-record (called once it has been stopped)."""
+    try:
+        _run_record_path(endpoint).unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def _read_record(path: Path) -> Optional[dict]:
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) and "endpoint" in rec else None
 
 
 def log_file(name: str) -> Path:
@@ -346,6 +392,36 @@ class WorkerHandle:
                     self.process.wait(timeout=5)
             except Exception:
                 pass
+            forget_worker(self.endpoint)
+
+
+# Workers THIS process spawned, for auto-teardown by ``analyze`` on exit and on
+# Ctrl-C. A worker we ATTACHED to (already running / started via
+# ``emboviz-<x> serve``) is never added — we only ever stop what we started.
+_SPAWNED_THIS_PROCESS: list[WorkerHandle] = []
+
+
+def teardown_spawned_workers() -> None:
+    """Stop every worker THIS process spawned.
+
+    Called by ``emboviz analyze`` on normal exit and on Ctrl-C (unless
+    ``--keep-warm``). Graceful: each worker gets SIGTERM, runs its close
+    handlers — closing the model and freeing the GPU — and exits. Idempotent:
+    handles are drained as they close, so a second call is a no-op.
+    """
+    if not _SPAWNED_THIS_PROCESS:
+        return
+    print(
+        f"[emboviz] stopping {len(_SPAWNED_THIS_PROCESS)} worker(s) spawned this "
+        "run (use --keep-warm to keep them loaded) ...",
+        file=sys.stderr, flush=True,
+    )
+    while _SPAWNED_THIS_PROCESS:
+        handle = _SPAWNED_THIS_PROCESS.pop()
+        try:
+            handle.close(terminate=True)
+        except Exception:
+            pass
 
 
 def _is_alive(endpoint: str, *, timeout_ms: int = 1500) -> bool:
@@ -427,12 +503,9 @@ def _spawn_worker(
         stdin=subprocess.DEVNULL,
         start_new_session=True,         # detach from our process group
     )
-    # Best-effort PID file so external tools (and future
-    # ``emboviz status`` / ``emboviz stop``) can find the worker.
-    try:
-        pid_file(spec.name).write_text(str(proc.pid))
-    except OSError:
-        pass
+    # Register the worker (name + endpoint + pid) so ``emboviz stop`` can
+    # find it and shut it down — gracefully or, with --force, by pid.
+    record_worker(spec.name, endpoint, proc.pid)
     return proc
 
 
@@ -583,9 +656,11 @@ def _connect_with_spec(
         raise
 
     client = client_cls(name=name, endpoint=endpoint)
-    return WorkerHandle(
+    handle = WorkerHandle(
         name=name, endpoint=endpoint, client=client, process=proc, spawned=True,
     )
+    _SPAWNED_THIS_PROCESS.append(handle)
+    return handle
 
 
 def connect(
@@ -651,3 +726,173 @@ def connect_reader(
 def shutdown(handle: WorkerHandle, *, terminate: bool = False) -> None:
     """Compatibility shim: close the client (and optionally the worker)."""
     handle.close(terminate=terminate)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Stop: discover running workers and shut them down (graceful or forced).
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _pid_alive(pid: int) -> bool:
+    """True iff a process with ``pid`` currently exists."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by another user
+    return True
+
+
+def _wait_pid_gone(pid: int, timeout_s: float) -> bool:
+    """Poll until ``pid`` exits or the deadline passes. Returns True if gone."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not _pid_alive(pid)
+
+
+def _wait_endpoint_gone(endpoint: str, timeout_s: float) -> bool:
+    """Poll until ``endpoint`` stops answering ``ping``. Used to confirm a
+    worker exited when its pid is unknown (record missing / write failed)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _is_alive(endpoint, timeout_ms=500):
+            return True
+        time.sleep(0.2)
+    return not _is_alive(endpoint, timeout_ms=500)
+
+
+@dataclass
+class WorkerInfo:
+    """A discovered worker: adapter name, endpoint, pid (if recorded), its ipc
+    socket file, its run-record file, and whether it answers ``ping`` now."""
+    name: str
+    endpoint: str
+    pid: Optional[int]
+    socket_path: Optional[Path]
+    record_path: Optional[Path]
+    alive: bool
+
+
+def list_running_workers() -> list[WorkerInfo]:
+    """Every emboviz worker this host has a run-record for.
+
+    The run-record — written on spawn, removed on stop — is the single
+    registry. Liveness is confirmed by pinging the endpoint, so a stale record
+    (left by a crash or ``kill -9``) is still listed and gets cleaned up by
+    ``stop``. The socket path is derived from the endpoint for that cleanup.
+    """
+    out: list[WorkerInfo] = []
+    for rp in sorted(_run_dir().glob("*.json")):
+        rec = _read_record(rp)
+        if rec is None:
+            continue
+        endpoint = rec["endpoint"]
+        sp = Path(endpoint[len("ipc://"):]) if endpoint.startswith("ipc://") else None
+        out.append(WorkerInfo(
+            name=rec.get("name", rp.stem),
+            endpoint=endpoint,
+            pid=rec.get("pid"),
+            socket_path=sp,
+            record_path=rp,
+            alive=_is_alive(endpoint, timeout_ms=1000),
+        ))
+    return out
+
+
+def _cleanup_worker(w: WorkerInfo) -> None:
+    """Remove a stopped worker's socket file and run-record."""
+    if w.socket_path is not None:
+        try:
+            w.socket_path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+    forget_worker(w.endpoint)
+
+
+def _stop_worker(w: WorkerInfo, *, force: bool, timeout_s: float) -> dict:
+    """Stop one worker and report exactly what happened.
+
+    Graceful (default): send the transport-level ``shutdown`` RPC — the worker
+    closes its model (freeing the GPU) and exits — then verify the process is
+    gone. ``force``: SIGKILL its pid. Never a silent best-effort: the returned
+    ``action`` always reflects the verified outcome, and an unresponsive worker
+    is reported (so the user can choose ``--force``), never killed implicitly.
+    """
+    base = {"name": w.name, "endpoint": w.endpoint, "pid": w.pid}
+
+    # Not answering ``ping``: it is either already gone, or wedged with an
+    # unreachable socket. Decide from the pid — do not guess.
+    if not w.alive:
+        if w.pid is not None and _pid_alive(w.pid):
+            if not force:
+                return {**base, "action": "unreachable",
+                        "detail": "process alive but not answering; re-run with --force"}
+            try:
+                os.kill(w.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            killed = _wait_pid_gone(w.pid, timeout_s=5.0)
+            _cleanup_worker(w)
+            return {**base, "action": "killed" if killed else "kill-failed"}
+        _cleanup_worker(w)
+        return {**base, "action": "already-stopped"}
+
+    if force:
+        if w.pid is None:
+            return {**base, "action": "no-pid",
+                    "detail": "no run-record for this socket; cannot SIGKILL. "
+                              "Graceful `emboviz stop` (no --force) still works."}
+        try:
+            os.kill(w.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            _cleanup_worker(w)
+            return {**base, "action": "already-stopped"}
+        killed = _wait_pid_gone(w.pid, timeout_s=5.0)
+        _cleanup_worker(w)
+        return {**base, "action": "killed" if killed else "kill-failed"}
+
+    # Graceful: ask the worker to shut itself down, then verify it exited.
+    client = ZMQAdapterClient(name="_stop", endpoint=w.endpoint, timeout_ms=5000)
+    try:
+        client.shutdown()
+    except Exception:
+        # The worker may drop the connection mid-shutdown before replying;
+        # that is not an error — the truth is whether it exits, checked next.
+        pass
+    finally:
+        client.close()
+
+    gone = (_wait_pid_gone(w.pid, timeout_s) if w.pid is not None
+            else _wait_endpoint_gone(w.endpoint, timeout_s))
+    if gone:
+        _cleanup_worker(w)
+        return {**base, "action": "stopped"}
+    return {**base, "action": "still-running",
+            "detail": f"graceful shutdown did not exit within {timeout_s:.0f}s; "
+                      "re-run with --force"}
+
+
+def stop_workers(
+    names: Optional[list[str]] = None, *, force: bool = False,
+    timeout_s: float = 20.0,
+) -> list[dict]:
+    """Stop emboviz workers and free their GPUs.
+
+    With no ``names``, stops every running worker; otherwise only those whose
+    adapter name is in ``names``. Graceful by default (the worker frees its
+    model and exits); ``force`` SIGKILLs. Returns one result dict per worker
+    acted on, each with a verified ``action``.
+    """
+    name_filter = set(names) if names else None
+    results: list[dict] = []
+    for w in list_running_workers():
+        if name_filter is not None and w.name not in name_filter:
+            continue
+        results.append(_stop_worker(w, force=force, timeout_s=timeout_s))
+    return results

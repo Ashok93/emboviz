@@ -5,7 +5,7 @@ which checkpoint, the dataset mapping, the memorization target, which episodes,
 and where to write the report. No CLI flag soup.
 
 ```bash
-emboviz analyze --config configs/pi0-libero.yaml
+uv run emboviz analyze --config configs/pi0-libero.yaml
 ```
 
 ## Bring your own model + dataset
@@ -22,7 +22,7 @@ Copy the template closest to your setup and edit three things:
 ```bash
 cp configs/pi0-libero.yaml configs/my-run.yaml
 $EDITOR configs/my-run.yaml
-emboviz analyze --config configs/my-run.yaml
+uv run emboviz analyze --config configs/my-run.yaml
 ```
 
 ## The contract is identical for every format
@@ -59,8 +59,8 @@ analysis:
 - `lama_inpaint` — the **on-manifold** fill (plausible background via LaMa).
   Adding it makes the agreement gate span the on-manifold/OOD axis the
   literature prescribes (`LITERATURE.md` §1). It runs in the isolated
-  `emboviz-lama` worker (install once: `uv pip install emboviz-lama` then
-  `emboviz install-lama`); the analyze runner auto-starts it. Without it,
+  `emboviz-lama` worker, which ships with emboviz core and is built
+  automatically on first use — the analyze runner auto-starts it. Without it,
   every memorization result honestly flags
   `fill_ensemble.on_manifold_fill_present = false`.
 

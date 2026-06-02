@@ -31,12 +31,16 @@ Implementation principles (LITERATURE.md §1):
      the intervention didn't happen (e.g. fill ≈ target color); we
      refuse to emit a verdict.
 
-  4. **Per-camera detection and masking.** Each camera in the scene is
-     queried independently via a probe scene that aliases the camera as
-     ``primary`` and sets ``scene.metadata['_emboviz_probe_camera']`` so
-     annotation connectors can resolve the right per-camera entry. We
-     mask EVERY camera that produced a confident detection,
-     simultaneously, in one perturbed scene.
+  4. **Per-camera detection and masking (all-or-skip).** Each camera in
+     the scene is queried independently via a probe scene that aliases the
+     camera as ``primary`` and sets ``scene.metadata['_emboviz_probe_camera']``
+     so annotation connectors can resolve the right per-camera entry. The
+     target is masked on every camera simultaneously in one perturbed
+     scene — but only if EVERY camera the model consumes yielded a confident
+     detection. If any camera lacks one, the target remains visible there,
+     so an unchanged action cannot be attributed to memorization; the frame
+     is reported as "couldn't test" and excluded from the trajectory verdict
+     rather than scored on a partial mask.
 
   5. **N-sample averaging for stochastic policies.** π0, GR00T,
      diffusion policies need K samples per prediction averaged before
@@ -224,10 +228,10 @@ def apply_fill(
         if inpainter is None:
             raise ValueError(
                 "fill mode 'lama_inpaint' requires the LaMa inpainter "
-                "worker, but no inpainter was provided. Install + start it "
-                "(uv pip install emboviz-lama; emboviz install-lama) and "
-                "request it via analysis.fills, or drop 'lama_inpaint' from "
-                "analysis.fills."
+                "worker, but no inpainter was provided. LaMa ships with emboviz "
+                "and its worker builds automatically when a config requests the "
+                "lama_inpaint fill — request it via analysis.fills, or drop "
+                "'lama_inpaint' from analysis.fills."
             )
         return inpainter.inpaint(arr, mask, key=cache_key)
     return _apply_fill(arr, mask, fill_mode)
@@ -422,15 +426,33 @@ class MemorizationDiagnostic(Diagnostic):
             per_cam_mask[cam] = _dilate_mask(detection.mask, radius)
             per_cam_dilation[cam] = radius
 
-        if not per_cam_original:
+        # Memorization is only honest when the target is removed from EVERY
+        # camera the model consumes: masking it on a subset leaves it fully
+        # visible on the others, so an unchanged action proves nothing. A frame
+        # where any camera lacks a confident detection is therefore NOT scored —
+        # it is reported as "couldn't test" and excluded from the trajectory
+        # verdict, which is computed over the frames where removal was complete.
+        missing_cams = [c for c in cameras if c not in per_cam_original]
+        if missing_cams:
+            located = sorted(per_cam_original)
+            if not located:
+                return self._not_applicable(
+                    model, scene,
+                    "could not confidently locate the manipulated target on ANY "
+                    f"camera ({sorted(cameras)}). Lower "
+                    "analysis.detector_score_threshold, give the detector a more "
+                    "specific target_text, or supply per-frame annotations. We "
+                    "never fabricate a centred rectangle.",
+                )
             return self._not_applicable(
                 model, scene,
-                "could not confidently locate the manipulated target in ANY "
-                f"of the scene's cameras ({sorted(scene.observations.images)}). "
-                "Try providing an explicit ``target_text`` to "
-                "SAM3Detector / GroundingDINOSAMDetector, or a custom "
-                "TargetDetector. We "
-                "never fabricate a centred rectangle.",
+                f"located the target on {located} but NOT on {missing_cams}: it "
+                f"stays visible to the model on {missing_cams}, so an unchanged "
+                "action cannot be attributed to memorization. Memorization is "
+                "scored only on frames where the target is removed from every "
+                "camera the model sees. Lower analysis.detector_score_threshold "
+                "to catch it on the remaining camera(s), or this frame genuinely "
+                "does not show the target on all views.",
             )
 
         detected_cams = sorted(per_cam_original)

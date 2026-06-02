@@ -3,6 +3,8 @@
 Subcommands:
 
   emboviz analyze            — run diagnostics on a model + episode
+  emboviz stop [names]       — stop running workers + free their GPUs
+                               (graceful by default; --force to SIGKILL)
   emboviz list-models        — show installed model adapters
   emboviz list-datasets      — show installed dataset / recording adapters
   emboviz version            — print version + Python info
@@ -26,6 +28,7 @@ from emboviz.cli.analyze import analyze_cmd
 from emboviz.cli.convert_pi0 import convert_pi0_cmd
 from emboviz.cli.info import list_datasets_cmd, list_models_cmd, version_cmd
 from emboviz.cli.install_adapter import register_install_commands
+from emboviz.cli.stop import stop_cmd
 
 
 @click.group(
@@ -44,6 +47,7 @@ main.add_command(list_models_cmd)
 main.add_command(list_datasets_cmd)
 main.add_command(version_cmd)
 main.add_command(convert_pi0_cmd)
+main.add_command(stop_cmd)
 register_install_commands(main)
 
 

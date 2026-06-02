@@ -1,0 +1,56 @@
+# emboviz run config — NVIDIA GR00T-N1.7 finetune (Unitree G1 + Inspire hands)
+# on PID0930/g1-inspire-pick-cube-gr00t-lerobot.
+#
+#   emboviz analyze --config configs/gr00t-g1-broccoli.yaml --dry-run   # cost estimate, no GPU
+#   emboviz analyze --config configs/gr00t-g1-broccoli.yaml             # full run
+#
+# Third-party finetune: nvidia/GR00T-N1.7-3B fine-tuned with embodiment_tag
+# `new_embodiment` on a bimanual Unitree G1 with 6-DOF Inspire DFX56 hands.
+# Task: "Pick up the broccoli plush with the right hand and place it on the
+# red tray." State and action are 26-dim, split by the dataset's own
+# meta/modality.json into left_arm(0:7) + right_arm(7:14) + left_hand(14:20)
+# + right_hand(20:26). These are DEXTEROUS HANDS, not a parallel-jaw gripper,
+# so there is no dataset.gripper block — the hand DOFs stay inside the state
+# vector (nothing is fabricated). The adapter routes each GR00T state key
+# through the modality.json segment layout, the same layout the model was
+# trained on.
+
+model:
+  adapter: gr00t
+  kwargs:
+    model_path: /root/models/gr00t-broccoli  # local download of PID0930/gr00t-n17-g1-inspire-broccoli-tray-20k
+    embodiment_tag: NEW_EMBODIMENT     # EmbodimentTag.NEW_EMBODIMENT (.value "new_embodiment")
+    device: "cuda:0"
+    # camera_mapping omitted: this embodiment declares exactly one video key
+    # (ego_view), which the adapter auto-maps to the 'primary' role.
+
+dataset:
+  format: gr00t                        # LeRobot v2.1 + meta/modality.json → emboviz-reader-gr00t
+  path: /root/data/g1-inspire-broccoli     # local download dir (see hf download below)
+
+  cameras:
+    primary: observation.images.ego_view   # single ego-view head camera, 480x640
+
+  state:
+    key: observation.state             # [26] left_arm + right_arm + left_hand + right_hand
+    convention: joint_angles           # arm joints + hand DOFs — NOT ee_pose
+
+  action:
+    key: action                        # [26]
+
+  # No gripper block: Inspire hands are 6-DOF dexterous, not a parallel jaw.
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "1"                        # ep0's video is static/broken (227 KB); ep1+ are real
+  frame_start: 0
+  n_frames: -1                         # whole episode, but subsampled by frame_stride
+  frame_stride: 15                     # ~2 fps from 30 fps source — adjacent frames are near-duplicates
+  mask_query: "the broccoli"           # task object the memorization diagnostic masks
+  detector: sam3
+  fills: [channel_mean, gaussian_blur, lama_inpaint]   # on-manifold LaMa fill — needs emboviz-lama
+  diagnostics: all
+
+output: ./report/gr00t-g1-broccoli-ep1
