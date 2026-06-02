@@ -144,15 +144,16 @@ class AnalysisCfg(_Strict):
     mask_query: str = ""                          # memorization target phrase (single — one episode, one mask)
     target_annotations: Optional[str] = None      # per-frame bbox/mask file — replaces text detection when set
     detector: str = "sam3"                        # sam3 | gd-sam
-    # Target-detection thresholds (SAM 3 / GD-SAM). Deliberately permissive:
-    # a missed detection silently drops a camera from the memorization mask,
-    # and a frame is only scored when the target is removed from EVERY camera
-    # the model sees — so a too-tight cutoff turns testable frames into
-    # "couldn't test". Set below the SAM 3 release "high-precision" 0.30 cutoff
-    # so faint / small / partially-occluded targets are still caught on
-    # secondary views. Over-masking a little background is the safe failure.
-    detector_score_threshold: float = 0.15        # min detection confidence to keep a detection
-    detector_mask_threshold: float = 0.40         # per-pixel mask-logit cutoff (SAM 3)
+    # Target-detection thresholds (SAM 3 / GD-SAM). Default to SAM 3's
+    # recommended 0.5 / 0.5 (the value used throughout the transformers SAM 3
+    # docs). If a target is faint / small / partially-occluded and gets missed
+    # on a camera, lower detector_score_threshold rather than guessing — a
+    # missed detection drops that frame (memorization scores a frame only when
+    # the target is removed from EVERY camera the model sees). Phrase the
+    # mask_query neutrally (color words can throw the detector off) before
+    # reaching for a lower threshold.
+    detector_score_threshold: float = 0.5         # min detection confidence to keep a detection
+    detector_mask_threshold: float = 0.5          # per-pixel mask-logit cutoff (SAM 3)
     # memorization mask-fill ensemble. Default = the two OOD-leaning pure
     # fills (no worker). Add 'lama_inpaint' for the on-manifold fill (needs
     # the emboviz-lama worker) so the agreement gate spans the on-manifold/

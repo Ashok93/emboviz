@@ -175,8 +175,8 @@ class Sam3Detector:
         self,
         image_bytes: bytes,
         target_text: str,
-        score_threshold: float = 0.15,
-        mask_threshold: float = 0.40,
+        score_threshold: float = 0.5,
+        mask_threshold: float = 0.5,
     ) -> dict[str, Any]:
         """Run one (image, text) concept segmentation.
 
@@ -189,12 +189,11 @@ class Sam3Detector:
             be non-empty — we never guess targets.
         score_threshold
             Instances with score below this are dropped at the source
-            (mirrors what the perturber would otherwise filter). Default
-            0.15 — below SAM 3's "high-precision" 0.30 so faint / small /
-            partially-occluded targets survive on secondary views.
+            (mirrors what the perturber would otherwise filter). Default 0.5,
+            SAM 3's recommended value (used throughout the transformers docs).
         mask_threshold
-            Per-pixel mask-logit cutoff for binarization. Default 0.40,
-            slightly below SAM 3's published 0.50, for a fuller mask.
+            Per-pixel mask-logit cutoff for binarization. Default 0.5 (SAM 3's
+            standard); a lower value gives a fuller mask.
 
         Returns
         -------

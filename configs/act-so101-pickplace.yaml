@@ -37,11 +37,11 @@ analysis:
   episodes: "0"
   frame_start: 0
   n_frames: -1          # all frames from frame_start
-  frame_stride: 15
-  mask_query: "the pink lego brick"
+  frame_stride: 10
+  mask_query: "the lego block"
   detector: sam3
-  detector_score_threshold: 0.15   # permissive: catch the target on every camera (missing one drops the frame)
-  detector_mask_threshold: 0.40
+  detector_score_threshold: 0.5    # SAM 3 standard precision; the neutral query detects cleanly on both cameras
+  detector_mask_threshold: 0.4     # looser mask so the object is fully covered for clean removal
   fills: [channel_mean, gaussian_blur, lama_inpaint]
   diagnostics: all
 

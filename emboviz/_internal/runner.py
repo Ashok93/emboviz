@@ -194,8 +194,8 @@ def _build_target_detector(args) -> tuple[Optional[CachingTargetDetector], Optio
         )
     # Detection thresholds from the run config (analysis.detector_*); fall
     # back to the detector class defaults if an older args object omits them.
-    score_thr = float(getattr(args, "detector_score_threshold", 0.15))
-    mask_thr = float(getattr(args, "detector_mask_threshold", 0.40))
+    score_thr = float(getattr(args, "detector_score_threshold", 0.5))
+    mask_thr = float(getattr(args, "detector_mask_threshold", 0.5))
     detector_kind = (args.detector or "sam3").lower()
     if detector_kind == "sam3":
         # The detector is a client to the isolated SAM 3 worker (its own
