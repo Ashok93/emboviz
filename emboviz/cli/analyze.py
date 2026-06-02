@@ -285,6 +285,7 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
             detector=cfg.analysis.detector,
             detector_score_threshold=cfg.analysis.detector_score_threshold,
             detector_mask_threshold=cfg.analysis.detector_mask_threshold,
+            memorization_require_cameras=cfg.analysis.memorization_require_cameras,
             fills=cfg.analysis.fills,
             enabled_diagnostics=enabled_diagnostics,
             show_imitation=cfg.analysis.show_imitation,

@@ -604,6 +604,7 @@ def run_story(args) -> None:
             MemorizationDiagnostic(
                 target_detector=cached_detector, calibration=calibration,
                 fill_modes=memo_fills, inpainter=cached_inpainter,
+                require_cameras=getattr(args, "memorization_require_cameras", "primary"),
             ),
             progress=True,
         )

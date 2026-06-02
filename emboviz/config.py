@@ -148,12 +148,15 @@ class AnalysisCfg(_Strict):
     # recommended 0.5 / 0.5 (the value used throughout the transformers SAM 3
     # docs). If a target is faint / small / partially-occluded and gets missed
     # on a camera, lower detector_score_threshold rather than guessing — a
-    # missed detection drops that frame (memorization scores a frame only when
-    # the target is removed from EVERY camera the model sees). Phrase the
-    # mask_query neutrally (color words can throw the detector off) before
-    # reaching for a lower threshold.
+    # missed detection on a REQUIRED camera (see memorization_require_cameras)
+    # drops that frame. Phrase the mask_query neutrally (color words can throw
+    # the detector off) before reaching for a lower threshold.
     detector_score_threshold: float = 0.5         # min detection confidence to keep a detection
     detector_mask_threshold: float = 0.5          # per-pixel mask-logit cutoff (SAM 3)
+    # Views that must carry a detection for a memorization frame to be scored.
+    # "primary" (default) gates on the main scene view — a wrist camera often
+    # cannot see scene objects; "all" requires every camera; a list names roles.
+    memorization_require_cameras: Union[str, list[str]] = "primary"
     # memorization mask-fill ensemble. Default = the two OOD-leaning pure
     # fills (no worker). Add 'lama_inpaint' for the on-manifold fill (needs
     # the emboviz-lama worker) so the agreement gate spans the on-manifold/

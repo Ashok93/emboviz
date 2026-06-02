@@ -171,6 +171,7 @@ analysis:
   detector: sam3                    # sam3 | gd-sam
   # detector_score_threshold: 0.5   # optional; SAM 3's default. Lower to catch faint/small targets
   # detector_mask_threshold: 0.4    # optional; lower = fuller object removal (0.5 is SAM 3's default)
+  # memorization_require_cameras: primary  # primary (default) | all | [roles]; views that must show the target
   fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
   diagnostics: all                  # or [memorization, attention]
 

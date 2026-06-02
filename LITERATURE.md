@@ -54,12 +54,14 @@ Inputs:
     -- the legacy GroundingDINO + SAM combo is the `--detector gd-sam`
        fallback for environments where SAM 3 isn't available.
 
-    if ANY camera lacks a detection:
-        return INCONCLUSIVE -- the target stays visible on that camera, so
-        an unchanged action cannot be attributed to memorization. A frame is
-        scored ONLY when the target is removed from EVERY camera the model
-        sees (all-cameras-or-skip); the trajectory verdict is computed over
-        those frames, and the rest are reported as "couldn't test".
+    if any REQUIRED camera lacks a detection:
+        return INCONCLUSIVE -- the target stays visible there, so an unchanged
+        action cannot be attributed to memorization. The required views are set
+        by analysis.memorization_require_cameras (the primary scene view by
+        default; "all" requires every camera). The target is masked on every
+        camera where it is found and a frame is scored when the required views
+        are covered; the rest are reported as "couldn't test". An in-scope view
+        left unmasked is disclosed in the verdict.
 
 3.  fill ensemble — the perturbations listed in analysis.fills:
         o'_mean[c] = paste(o[c], mask_c, channel_mean(o[c]))
