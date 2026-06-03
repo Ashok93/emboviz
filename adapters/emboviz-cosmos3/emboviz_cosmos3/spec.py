@@ -33,6 +33,9 @@ SPEC = AdapterSpec(
         "av>=12",
         "Pillow>=10",
         "numpy>=1.26",
+        # The vendored Cosmos action encoding (emboviz_cosmos3._cosmos_action)
+        # reproduces NVIDIA's pose math with numpy + scipy only — no torch.
+        "scipy>=1.11",
         # Core wire contract + this shim. The lifecycle layer rewrites both
         # to ``-e <local_path>`` in dev mode; user-mode pulls from PyPI.
         "emboviz-wire",

@@ -141,6 +141,50 @@ class WorldModel(ABC):
         Capability: ``FORWARD_DYNAMICS``.
         """
 
+    # ----- episode → conditioning actions ----------------------------------
+
+    def prepare_actions(
+        self,
+        episode: Trajectory,
+        *,
+        frame_start: int = 0,
+        n_actions: Optional[int] = None,
+    ) -> np.ndarray:
+        """Encode the actions this world model conditions on, from a recorded
+        episode — the input to :meth:`rollout`.
+
+        How an episode maps to conditioning actions is **model-specific** (raw
+        logged actions, or a per-embodiment encoding such as normalized pose
+        deltas), so it lives behind this method rather than in the runner. The
+        runner calls it polymorphically and never encodes a model's action
+        format itself.
+
+        Default: the per-frame logged actions from
+        ``scene.metadata["expert_action"]`` (which the readers populate from the
+        dataset's action key), starting at ``frame_start`` and limited to
+        ``n_actions`` (all available if ``None``). Adapters whose model consumes
+        a different representation override this. Raises if a frame lacks a
+        logged action rather than inventing one.
+        """
+        rows: list[list[float]] = []
+        for i in range(max(0, frame_start), len(episode.frames)):
+            a = episode.frames[i].metadata.get("expert_action")
+            if a is None:
+                raise ValueError(
+                    f"frame {i} has no 'expert_action' in metadata — the reader did "
+                    "not expose logged actions. Configure the dataset's `action` key, "
+                    "or use a world model that encodes actions from state."
+                )
+            rows.append(list(a))
+            if n_actions is not None and len(rows) >= int(n_actions):
+                break
+        if not rows:
+            raise ValueError(f"no actions available from frame_start={frame_start}")
+        actions = np.asarray(rows, dtype=np.float32)
+        if actions.ndim != 2:
+            raise ValueError(f"prepared actions are not 2-D (T, action_dim): {actions.shape}")
+        return actions
+
     # ----- inverse dynamics (capability-gated; reserved) -------------------
 
     def actions_from_video(self, frames: Trajectory) -> np.ndarray:

@@ -85,18 +85,28 @@ A green Stage 1b means the full emboviz path works: conditioning frame + actions
 → HTTP → MP4 decode → `Trajectory`. (Synthetic frame + zero actions → a
 near-static rainbow rollout; that proves the *pipe*, not anything meaningful.)
 
-## Stage 2 — first real rollout (a recorded episode's real actions)
+## Stage 2 — first real trust curve (a recorded DROID episode)
 
-Only after both smokes are green. The v1 deliverable: feed a real episode's
-logged actions, get Cosmos's predicted rollout. Resolve two embodiment
-specifics first, empirically, against the working AgiBot baseline:
+Only after both smokes are green. This feeds a real episode's actions, gets
+Cosmos's predicted rollout, and scores how far it can be trusted vs reality.
 
-  * the DROID/bridge `domain_name` string and its `action_dim`
-  * the action normalization the domain expects (supply an `action_normalizer`;
-    the adapter never guesses it)
+The embodiment encoding is **implemented** for DROID (`droid_lerobot`, 10-D
+`[pos_delta(3), rot6d_delta(6), gripper(1)]`, quantile-normalized — bit-faithful
+to NVIDIA's `DROIDLeRobotDataset`). The adapter's `prepare_actions` derives the
+actions from the episode's cartesian state + gripper, so the dataset config must
+map state to the cartesian pose and the gripper. Run the driver from the Mac:
 
-The Stage-2 driver (lerobot reader frame + real actions → `connect_world_model`
-→ Rerun) is written once Stage 1 confirms the domain/normalization.
+```bash
+uv run python -m emboviz.world_models.stage2_cli \
+  --config configs/droid.yaml --episode 0 \
+  --world-model cosmos3 --server-url $U \
+  --domain droid_lerobot --action-dim 10 --n-actions 16 \
+  --out report/cosmos_trust
+```
+
+Out comes `report/cosmos_trust/trust_report.json` + `trust_curve.png` and a
+plain-text verdict (trust horizon + the action-dependence control). Other
+embodiments need their own `prepare_actions` builder before they can run.
 
 ## Teardown (stop paying)
 

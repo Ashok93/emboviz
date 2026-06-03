@@ -20,7 +20,6 @@ from emboviz.world_models.trust import (
     frame_divergence,
 )
 from emboviz.world_models.rollout import (
-    episode_actions,
     rollout_episode,
     summarize,
     trust_report,
@@ -34,7 +33,6 @@ __all__ = [
     "compute_trust_curve",
     "frame_divergence",
     # rollout orchestration
-    "episode_actions",
     "rollout_episode",
     "summarize",
     "trust_report",

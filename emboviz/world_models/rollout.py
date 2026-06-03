@@ -4,10 +4,11 @@ score how far the prediction can be trusted.
 Given a real episode (a :class:`Trajectory` from any reader) and a
 :class:`WorldModel`, this:
 
-1. extracts the episode's real logged actions (``scene.metadata["expert_action"]``,
-   which the readers populate from the dataset's action key),
+1. asks the world model to encode the episode into its conditioning actions
+   (``WorldModel.prepare_actions`` — raw logged actions by default, or a
+   per-embodiment encoding such as Cosmos's normalized pose deltas),
 2. conditions the world model on the episode's frame at ``frame_start`` and
-   rolls those real actions forward,
+   rolls those actions forward,
 3. aligns the predicted rollout to the corresponding real frames and computes
    the :mod:`emboviz.world_models.trust` curve,
 4. runs the action-dependence control (a second rollout under shuffled actions)
@@ -40,30 +41,6 @@ from emboviz.world_models.trust import (
     action_dependence,
     compute_trust_curve,
 )
-
-
-def episode_actions(real: Trajectory) -> np.ndarray:
-    """Return the episode's ``(T, action_dim)`` logged actions.
-
-    Reads ``scene.metadata["expert_action"]`` from each frame — the per-step
-    action the readers populate from the dataset's action key. Raises if any
-    frame lacks it (the dataset's ``action`` key must be configured), rather
-    than silently fabricating actions.
-    """
-    rows: list[list[float]] = []
-    for i, scene in enumerate(real.frames):
-        a = scene.metadata.get("expert_action")
-        if a is None:
-            raise ValueError(
-                f"frame {i} has no 'expert_action' in metadata — the reader did "
-                "not expose logged actions. Configure the dataset's `action` key "
-                "so the rollout conditions on real actions, never invented ones."
-            )
-        rows.append(list(a))
-    actions = np.asarray(rows, dtype=np.float32)
-    if actions.ndim != 2:
-        raise ValueError(f"episode actions are not 2-D (T, action_dim): {actions.shape}")
-    return actions
 
 
 def _subtrajectory(traj: Trajectory, lo: int, hi: int) -> Trajectory:
@@ -123,11 +100,17 @@ def trust_report(
     real frames. Returns the trust curve, the control verdict, and the headline
     numbers a report/Rerun view would surface.
     """
-    actions = episode_actions(real)[frame_start:]
-    if n_actions is not None:
-        actions = actions[:n_actions]
-    if len(actions) == 0:
-        raise ValueError("no actions to roll out from frame_start")
+    # The world model owns how an episode maps to conditioning actions (raw
+    # logged actions by default; a per-domain encoding for Cosmos).
+    actions = np.asarray(
+        world_model.prepare_actions(real, frame_start=frame_start, n_actions=n_actions),
+        dtype=np.float32,
+    )
+    if actions.ndim != 2 or actions.shape[0] == 0:
+        raise ValueError(
+            f"world model prepared no usable actions (shape {actions.shape}) for "
+            f"frame_start={frame_start}, n_actions={n_actions}"
+        )
 
     predicted, aligned_real = rollout_episode(
         world_model, real, actions,

@@ -8,18 +8,19 @@ verdict.
 Run (host side; needs the reader + world-model workers reachable)::
 
     uv run python -m emboviz.world_models.stage2_cli \
-        --config configs/openvla.yaml --episode 537 \
+        --config configs/droid.yaml --episode 0 \
         --world-model cosmos3 \
         --server-url https://<podid>-8000.proxy.runpod.net \
-        --domain bridge_orig_lerobot --action-dim 7 \
+        --domain droid_lerobot --action-dim 10 \
         --n-actions 16 --out report/cosmos_trust
 
-The dataset (camera mapping, action key, …) comes from the run config's
+The dataset (camera mapping, state/action keys, …) comes from the run config's
 ``dataset`` section — the same file the analyze CLI uses — so the episode is
 loaded identically to a normal run. The world-model embodiment (``domain`` /
-``action-dim``) and the action normalization are NOT inferred; ``domain`` and
-``action-dim`` are required, and the conditioning offset (which real frame each
-predicted frame maps to) is exposed for the embodiment-specific cadence.
+``action-dim``) is NOT inferred; the action encoding for that domain is owned by
+the world-model adapter (``WorldModel.prepare_actions``). Currently implemented:
+``droid_lerobot`` (10-D normalized pose deltas). The conditioning offset (which
+real frame each predicted frame maps to) is exposed for the embodiment cadence.
 """
 
 from __future__ import annotations

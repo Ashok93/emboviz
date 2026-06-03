@@ -306,6 +306,7 @@ class WorldModelHandler:
         return {
             "static_metadata":    self._static_metadata,
             "rollout":            self._rollout,
+            "prepare_actions":    self._prepare_actions,
             "actions_from_video": self._actions_from_video,
         }
 
@@ -326,6 +327,15 @@ class WorldModelHandler:
         num_frames = None if num_frames is None else int(num_frames)
         traj = self._m.rollout(init, actions, num_frames=num_frames)
         return wire.encode_trajectory(traj)
+
+    def _prepare_actions(self, args: dict) -> np.ndarray:
+        episode = wire.decode_trajectory(args["episode"])
+        frame_start = int(args.get("frame_start", 0))
+        n_actions = args.get("n_actions")
+        n_actions = None if n_actions is None else int(n_actions)
+        return np.asarray(
+            self._m.prepare_actions(episode, frame_start=frame_start, n_actions=n_actions)
+        )
 
     def _actions_from_video(self, args: dict) -> np.ndarray:
         frames = wire.decode_trajectory(args["frames"])

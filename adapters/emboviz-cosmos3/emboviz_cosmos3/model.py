@@ -236,6 +236,43 @@ class Cosmos3WorldModel(WorldModel):
 
         return self._build_trajectory(generated, prompt, n_chunks=len(chunks))
 
+    # ----- episode → conditioning actions ----------------------------------
+
+    def prepare_actions(
+        self,
+        episode: Trajectory,
+        *,
+        frame_start: int = 0,
+        n_actions: Optional[int] = None,
+    ) -> np.ndarray:
+        """Encode the episode into this domain's normalized action representation.
+
+        Overrides the default (raw logged actions): Cosmos conditions each domain
+        on a specific encoding (e.g. DROID's normalized pose deltas), implemented
+        in :mod:`emboviz_cosmos3.domains`. The result feeds :meth:`rollout`.
+        """
+        from emboviz_cosmos3 import domains
+
+        expected_dim = domains.ACTION_DIMS.get(self._domain_name)
+        if expected_dim is not None and expected_dim != self._action_dim:
+            raise ValueError(
+                f"cosmos3 domain '{self._domain_name}' encodes {expected_dim}-D actions, "
+                f"but the adapter was configured with action_dim={self._action_dim}. "
+                "Set action_dim to match the domain."
+            )
+
+        if n_actions is None:
+            # One relative delta per consecutive frame pair from frame_start.
+            n_actions = len(episode.frames) - frame_start - 1
+            if n_actions < 1:
+                raise ValueError(
+                    f"episode has too few frames ({len(episode.frames)}) to encode "
+                    f"any action from frame_start={frame_start}"
+                )
+        return domains.prepare_actions(
+            self._domain_name, episode, frame_start=frame_start, n_actions=int(n_actions)
+        )
+
     # ----- request / response ----------------------------------------------
 
     def _request_chunk(

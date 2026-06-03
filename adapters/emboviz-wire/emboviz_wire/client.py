@@ -522,6 +522,20 @@ class ZMQWorldModelClient(RpcClient, WorldModel):
         })
         return wire.decode_trajectory(result)
 
+    def prepare_actions(
+        self,
+        episode: Trajectory,
+        *,
+        frame_start: int = 0,
+        n_actions: Optional[int] = None,
+    ) -> np.ndarray:
+        result = self.request("prepare_actions", {
+            "episode": wire.encode_trajectory(episode),
+            "frame_start": int(frame_start),
+            "n_actions": None if n_actions is None else int(n_actions),
+        })
+        return np.asarray(result)
+
     def actions_from_video(self, frames: Trajectory) -> np.ndarray:
         result = self.request("actions_from_video", {
             "frames": wire.encode_trajectory(frames),

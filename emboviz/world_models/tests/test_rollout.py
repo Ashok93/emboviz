@@ -19,7 +19,6 @@ from emboviz_wire.types import Observations, Scene, Trajectory
 from emboviz_wire.world_model_protocol import WorldModel, WorldModelCapability
 
 from emboviz.world_models.rollout import (
-    episode_actions,
     rollout_episode,
     summarize,
     trust_report,
@@ -80,23 +79,27 @@ class _MockColorWM(WorldModel):
         )
 
 
-# ── episode_actions ──────────────────────────────────────────────────────────
+# ── prepare_actions default (logged actions) ─────────────────────────────────
 
 
-def test_episode_actions_extracts_expert_action() -> None:
-    a = episode_actions(_episode(5))
+def test_prepare_actions_default_extracts_expert_action() -> None:
+    # _MockColorWM does not override prepare_actions, so it uses the WorldModel
+    # ABC default: the per-frame expert_action.
+    a = _MockColorWM().prepare_actions(_episode(5))
     assert a.shape == (5, 1)
     assert a[0, 0] == 10.0 and a[3, 0] == 40.0
+    # frame_start + n_actions slice the result.
+    assert _MockColorWM().prepare_actions(_episode(5), frame_start=1, n_actions=2).shape == (2, 1)
 
 
-def test_episode_actions_missing_raises() -> None:
+def test_prepare_actions_default_missing_raises() -> None:
     cam = "primary"
     bad = Trajectory(
         frames=[Scene(observations=Observations(images={cam: RGBImage(data=_solid(0), camera_id=cam)}))],
         frame_indices=[0], fps=5.0, episode_id="x", source="t", metadata={},
     )
     try:
-        episode_actions(bad)
+        _MockColorWM().prepare_actions(bad)
     except ValueError as e:
         assert "expert_action" in str(e)
     else:
@@ -108,7 +111,7 @@ def test_episode_actions_missing_raises() -> None:
 
 def test_rollout_alignment_lengths_match() -> None:
     ep = _episode(8)
-    actions = episode_actions(ep)[:7]  # window from frame 0
+    actions = _MockColorWM().prepare_actions(ep, n_actions=7)  # window from frame 0
     predicted, aligned_real = rollout_episode(_MockColorWM(), ep, actions, frame_start=0)
     assert len(predicted.frames) == len(aligned_real.frames) == 7
     # aligned_real starts at frame_start + 1 = frame index 1
@@ -149,8 +152,8 @@ def test_summarize_static_prior_is_refused() -> None:
 
 
 def _run_all() -> None:
-    test_episode_actions_extracts_expert_action()
-    test_episode_actions_missing_raises()
+    test_prepare_actions_default_extracts_expert_action()
+    test_prepare_actions_default_missing_raises()
     test_rollout_alignment_lengths_match()
     test_trust_report_real_actions_fully_trusted()
     test_summarize_static_prior_is_refused()
