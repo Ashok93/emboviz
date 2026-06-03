@@ -408,20 +408,49 @@ def teardown_spawned_workers() -> None:
     ``--keep-warm``). Graceful: each worker gets SIGTERM, runs its close
     handlers — closing the model and freeing the GPU — and exits. Idempotent:
     handles are drained as they close, so a second call is a no-op.
+
+    During graceful teardown a second Ctrl-C (a frustrated user mashing the
+    key) escalates to an immediate hard kill — SIGKILL to each worker's
+    process group, reaping the worker and any children it spawned — then
+    exits, mirroring ``docker stop``'s grace-then-SIGKILL. The previous
+    signal handlers are restored if teardown completes gracefully.
     """
     if not _SPAWNED_THIS_PROCESS:
         return
     print(
         f"[emboviz] stopping {len(_SPAWNED_THIS_PROCESS)} worker(s) spawned this "
-        "run (use --keep-warm to keep them loaded) ...",
+        "run (Ctrl-C again to force-kill; --keep-warm keeps them loaded) ...",
         file=sys.stderr, flush=True,
     )
-    while _SPAWNED_THIS_PROCESS:
-        handle = _SPAWNED_THIS_PROCESS.pop()
-        try:
-            handle.close(terminate=True)
-        except Exception:
-            pass
+
+    def _force_kill(signum, frame):
+        for handle in _SPAWNED_THIS_PROCESS:
+            proc = handle.process
+            if proc is None:
+                continue
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass  # already gone, or no group — nothing to kill
+        os._exit(130)  # 128 + SIGINT; skip the rest of interpreter shutdown
+
+    previous = {
+        sig: signal.signal(sig, _force_kill)
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        while _SPAWNED_THIS_PROCESS:
+            # Peek, not pop: the worker stays reachable by ``_force_kill`` for
+            # the duration of its (possibly slow) close, then is drained.
+            handle = _SPAWNED_THIS_PROCESS[-1]
+            try:
+                handle.close(terminate=True)
+            except Exception:
+                pass
+            _SPAWNED_THIS_PROCESS.pop()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def _is_alive(endpoint: str, *, timeout_ms: int = 1500) -> bool:
