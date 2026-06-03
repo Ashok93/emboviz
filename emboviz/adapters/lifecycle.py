@@ -36,11 +36,13 @@ from emboviz.adapters.client import (
     RpcClient,
     ZMQAdapterClient,
     ZMQReaderClient,
+    ZMQWorldModelClient,
     default_endpoint,
 )
 from emboviz.adapters.protocol import AdapterSpec
 from emboviz.adapters.registry import find_adapter
 from emboviz.adapters.reader_registry import find_reader
+from emboviz.adapters.world_model_registry import find_world_model
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -748,6 +750,39 @@ def connect_reader(
         find_reader(name), client_cls=ZMQReaderClient,
         actor_kwargs=reader_kwargs, auto_spawn=auto_spawn,
         auto_install=auto_install, timeout_s=timeout_s, endpoint=endpoint,
+    )
+    return handle.client  # type: ignore[return-value]
+
+
+def connect_world_model(
+    name: str,
+    *,
+    world_model_kwargs: Optional[dict] = None,
+    auto_spawn: bool = True,
+    auto_install: bool = True,
+    timeout_s: int = 600,
+) -> ZMQWorldModelClient:
+    """Return a live :class:`ZMQWorldModelClient` (a WorldModel) for the
+    named world model (e.g. ``"cosmos3"``).
+
+    Identical lifecycle to :func:`connect` — same isolated venv, same
+    spawn-and-wait over the wire — but resolves the spec from the
+    ``emboviz.world_models`` entry-point group and returns the WorldModel
+    client directly (the worker stays warm, detached, like a model worker).
+    ``world_model_kwargs`` is the run config's world-model section
+    (``server_url``, ``domain_name``, ``action_dim``, …), forwarded to the
+    adapter constructor.
+
+    A world-model worker is configured for one backend + embodiment at spawn,
+    so the shared "already alive + kwargs" guard in :func:`_connect_with_spec`
+    refuses to route this run's kwargs to a warm worker that may hold a
+    different configuration — the same silent-wrong-answer protection the
+    model and reader paths get.
+    """
+    handle = _connect_with_spec(
+        find_world_model(name), client_cls=ZMQWorldModelClient,
+        actor_kwargs=world_model_kwargs, auto_spawn=auto_spawn,
+        auto_install=auto_install, timeout_s=timeout_s,
     )
     return handle.client  # type: ignore[return-value]
 

@@ -497,11 +497,15 @@ act = [
 ]
 all = [
     { name = "emboviz-act" },
+    { name = "emboviz-cosmos3" },
     { name = "emboviz-gr00t" },
     { name = "emboviz-oft" },
     { name = "emboviz-openvla" },
     { name = "emboviz-pi0" },
     { name = "emboviz-smolvla" },
+]
+cosmos3 = [
+    { name = "emboviz-cosmos3" },
 ]
 dev = [
     { name = "mypy" },
@@ -535,6 +539,8 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "emboviz-act", marker = "extra == 'act'", editable = "adapters/emboviz-act" },
     { name = "emboviz-act", marker = "extra == 'all'", editable = "adapters/emboviz-act" },
+    { name = "emboviz-cosmos3", marker = "extra == 'all'", editable = "adapters/emboviz-cosmos3" },
+    { name = "emboviz-cosmos3", marker = "extra == 'cosmos3'", editable = "adapters/emboviz-cosmos3" },
     { name = "emboviz-gr00t", marker = "extra == 'all'", editable = "adapters/emboviz-gr00t" },
     { name = "emboviz-gr00t", marker = "extra == 'gr00t'", editable = "adapters/emboviz-gr00t" },
     { name = "emboviz-lama", editable = "adapters/emboviz-lama" },
@@ -573,12 +579,27 @@ requires-dist = [
     { name = "tensorflow-datasets", marker = "extra == 'rlds'", specifier = ">=4.9" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["openvla", "oft", "pi0", "gr00t", "act", "smolvla", "all", "rlds", "dev"]
+provides-extras = ["openvla", "oft", "pi0", "gr00t", "act", "smolvla", "cosmos3", "all", "rlds", "dev"]
 
 [[package]]
 name = "emboviz-act"
 version = "0.3.0"
 source = { editable = "adapters/emboviz-act" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-cosmos3"
+version = "0.1.0"
+source = { editable = "adapters/emboviz-cosmos3" }
 dependencies = [
     { name = "emboviz-wire" },
     { name = "numpy" },

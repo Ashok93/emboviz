@@ -32,12 +32,14 @@ from emboviz.adapters.client import (
     RpcClient,
     ZMQAdapterClient,
     ZMQReaderClient,
+    ZMQWorldModelClient,
     default_endpoint,
 )
 from emboviz.adapters.lifecycle import (
     WorkerHandle,
     connect,
     connect_reader,
+    connect_world_model,
     install_venv,
     shutdown,
     venv_path,
@@ -47,10 +49,15 @@ from emboviz.adapters.lifecycle import (
 from emboviz.adapters.protocol import AdapterSpec
 from emboviz.adapters.registry import find_adapter, list_adapters
 from emboviz.adapters.reader_registry import find_reader, list_readers
+from emboviz.adapters.world_model_registry import (
+    find_world_model,
+    list_world_models,
+)
 from emboviz.adapters.server_base import (
     DatasetReaderHandler,
     ServiceHandler,
     VLAModelHandler,
+    WorldModelHandler,
     serve,
 )
 
@@ -61,17 +68,22 @@ __all__ = [
     "ServiceHandler",
     "VLAModelHandler",
     "DatasetReaderHandler",
+    "WorldModelHandler",
     "WorkerHandle",
     "ZMQAdapterClient",
     "ZMQReaderClient",
+    "ZMQWorldModelClient",
     "connect",
     "connect_reader",
+    "connect_world_model",
     "default_endpoint",
     "find_adapter",
     "find_reader",
+    "find_world_model",
     "install_venv",
     "list_adapters",
     "list_readers",
+    "list_world_models",
     "serve",
     "shutdown",
     "venv_path",

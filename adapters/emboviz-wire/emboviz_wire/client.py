@@ -48,6 +48,7 @@ from emboviz_wire.types import (
 )
 from emboviz_wire.model_protocol import Capability, RequiredInputs, VLAModel
 from emboviz_wire.reader_protocol import EpisodeSource
+from emboviz_wire.world_model_protocol import WorldModel, WorldModelCapability
 from emboviz_wire.types import Trajectory
 
 
@@ -450,3 +451,79 @@ class ZMQReaderClient(RpcClient, EpisodeSource):
 
     def all_instructions(self) -> list[str]:
         return [str(x) for x in self.request("all_instructions")]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# World-model client — typed wrappers, satisfies the WorldModel ABC.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class ZMQWorldModelClient(RpcClient, WorldModel):
+    """WorldModel facade over an :class:`RpcClient`.
+
+    The third sibling of :class:`ZMQAdapterClient` (policy) and
+    :class:`ZMQReaderClient` (dataset). The host talks to an isolated
+    world-model worker — its own venv with the heavy generative stack —
+    exactly as it talks to the other two: same wire, same lifecycle. The
+    server side is :class:`emboviz_wire.server.WorldModelHandler`; the two
+    must be kept on the SAME method list.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        endpoint: Optional[str] = None,
+        timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+    ):
+        super().__init__(name, endpoint=endpoint, timeout_ms=timeout_ms)
+        self._meta: Optional[dict] = None
+
+    def _ensure_meta(self) -> dict:
+        if self._meta is None:
+            self._meta = self.request("static_metadata")
+        return self._meta
+
+    # ----- WorldModel ABC: identification -------------------------------
+
+    @property
+    def model_id(self) -> str:
+        return self._ensure_meta()["model_id"]
+
+    @property
+    def capabilities(self) -> WorldModelCapability:
+        return WorldModelCapability(self._ensure_meta()["capabilities"])
+
+    @property
+    def action_dim(self) -> int:
+        return int(self._ensure_meta()["action_dim"])
+
+    @property
+    def supported_domains(self) -> frozenset[str]:
+        return frozenset(self._ensure_meta()["supported_domains"])
+
+    @property
+    def conditioning_camera(self) -> str:
+        return self._ensure_meta().get("conditioning_camera") or "primary"
+
+    # ----- WorldModel ABC: prediction -----------------------------------
+
+    def rollout(
+        self,
+        init: Scene,
+        actions: np.ndarray,
+        *,
+        num_frames: Optional[int] = None,
+    ) -> Trajectory:
+        result = self.request("rollout", {
+            "init": wire.encode_scene(init),
+            "actions": np.asarray(actions),
+            "num_frames": None if num_frames is None else int(num_frames),
+        })
+        return wire.decode_trajectory(result)
+
+    def actions_from_video(self, frames: Trajectory) -> np.ndarray:
+        result = self.request("actions_from_video", {
+            "frames": wire.encode_trajectory(frames),
+        })
+        return np.asarray(result)
