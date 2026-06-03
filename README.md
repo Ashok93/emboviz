@@ -14,6 +14,10 @@ Every diagnostic is derived from published methodology and cited in
 [`LITERATURE.md`](./LITERATURE.md). If an algorithm can't be justified from the
 literature, it isn't shipped.
 
+<p align="center">
+  <img src="./assets/attention.gif" alt="Emboviz attention overlay scrubbed frame-by-frame in Rerun" width="100%">
+</p>
+
 ---
 
 ## The diagnostics
