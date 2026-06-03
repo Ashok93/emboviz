@@ -100,7 +100,6 @@ one place. Templates live in `configs/` (one per model on its canonical dataset)
 
 ```bash
 uv run emboviz analyze --config configs/openvla-bridge.yaml
-uv run emboviz analyze --config configs/my-run.yaml --dry-run   # cost estimate, no GPU
 ```
 
 To analyze your own checkpoint and data, copy the closest template and edit it:
@@ -113,15 +112,14 @@ model:
     unnorm_key: bridge_orig         # adapter-specific; see the shipped template for your model
 
 dataset:
-  format: lerobot                   # lerobot | gr00t | hdf5 | rlds
-  path: your-org/your-dataset       # HF repo id, local dir, HDF5 file, or RLDS builder name
+  format: lerobot                   # lerobot | gr00t
+  path: your-org/your-dataset       # HF repo id or local dir
   cameras:                          # model camera role → this dataset's image key
     primary: observation.images.image_0
   state:    {key: observation.state, convention: ee_pose}   # convention: joint_angles | ee_pose | ... (required, never guessed)
   action:   {key: action}
   gripper:  {source: 6, kind: parallel_jaw, units: unit, range: [0.0, 1.0]}   # optional; omit to leave the gripper inside the state vector
-  instruction: {from: tasks}        # from: tasks (lerobot) | key: <field> (rlds) | text: "<literal>" (hdf5)
-  # extra: {}                       # format-specific reader knobs (HDF5 demo_group; RLDS data_dir / split)
+  instruction: {from: tasks}        # natural-language instruction from the dataset's task table
 
 analysis:
   episodes: "537"                   # the episode to analyze
@@ -149,14 +147,14 @@ convention, gripper spec). See `configs/README.md` for the full field reference.
 Per episode, in `report/episode_<idx>/`:
 
 - **`summary.json`** — every metric, with the per-frame numbers.
-- **`report.md` / `report.html`** — plain-English findings, worst-first.
+- **`report.md`** — plain-English findings, worst-first.
 - **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention
   heatmaps, memorization mask + per-fill overlays, per-modality response
   timelines, occlusion grids, and action plots.
 
 Across all analyzed episodes, at the top of `report/`:
 
-- **`aggregate.{json,md,html}`** — cross-episode patterns, linked to per-episode
+- **`aggregate.{json,md}`** — cross-episode patterns, linked to per-episode
   pages.
 
 ---
