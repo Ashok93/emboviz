@@ -45,6 +45,10 @@ dataset:
   instruction:
     from: tasks                             # falls back to the Cosmos default prompt if the episode has none
 
+  extra:
+    revision: main                          # droid_v3 has no version tag; load from the default branch
+                                            # (lerobot defaults to a version-TAG lookup, which this repo lacks)
+
 analysis:
   episodes: "0"                             # episode index to roll out
   frame_start: 0

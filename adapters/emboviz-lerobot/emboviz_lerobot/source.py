@@ -83,6 +83,7 @@ class LeRobotEpisodeSource(EpisodeSource):
         action_key: Optional[str] = None,
         gripper_extractor: GripperExtractor = _identity_state,
         gripper_key: Optional[str] = None,
+        revision: Optional[str] = None,
         n_episodes: int = 1_000_000,
     ):
         if not image_keys:
@@ -92,6 +93,10 @@ class LeRobotEpisodeSource(EpisodeSource):
         self.image_keys = dict(image_keys)
         self.state_key = state_key
         self.action_key = action_key
+        # HF dataset revision (branch/tag/commit). LeRobot defaults to a
+        # version-TAG lookup, which untagged community datasets lack — set
+        # ``dataset.extra.revision: main`` to load from the default branch.
+        self.revision = revision
         # The gripper comes from EITHER the state vector (via gripper_extractor)
         # OR a separate feature column (gripper_key) — never both (config-checked).
         self.gripper_extractor = gripper_extractor
@@ -277,7 +282,10 @@ class LeRobotEpisodeSource(EpisodeSource):
         try:
             if is_local:
                 return LeRobotDataset("local", root=self.repo_id, episodes=indices)
-            return LeRobotDataset(self.repo_id, episodes=indices, force_cache_sync=True)
+            return LeRobotDataset(
+                self.repo_id, episodes=indices, force_cache_sync=True,
+                revision=self.revision,
+            )
         except Exception as e:
             if not is_local:
                 raise
@@ -469,10 +477,14 @@ def build_lerobot_source(
     action: Optional[dict] = None,
     gripper: Optional[dict] = None,
     instruction: Optional[dict] = None,
+    extra: Optional[dict] = None,
     n_episodes: Optional[int] = None,
 ) -> LeRobotEpisodeSource:
     """Build a configured :class:`LeRobotEpisodeSource` from a run config's
-    ``dataset`` section. Runs in the reader worker (has lerobot)."""
+    ``dataset`` section. Runs in the reader worker (has lerobot).
+
+    ``extra`` carries lerobot-specific reader knobs from ``dataset.extra`` —
+    currently ``revision`` (the HF dataset branch/tag/commit)."""
     if "primary" not in (cameras or {}):
         raise KeyError(
             "dataset.cameras must include a 'primary' role (the main "
@@ -527,5 +539,6 @@ def build_lerobot_source(
         action_key=action_key,
         gripper_extractor=make_gripper_extractor(gripper, state_names),
         gripper_key=gripper_key,
+        revision=(extra or {}).get("revision"),
         n_episodes=int(n_episodes or info.get("total_episodes", 1_000_000)),
     )
