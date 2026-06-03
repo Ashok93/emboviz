@@ -1,0 +1,69 @@
+# emboviz run config — DROID (LeRobot) for Cosmos world-model trust calibration.
+#
+#   uv run python -m emboviz.world_models.stage2_cli \
+#     --config configs/droid.yaml --episode 0 \
+#     --world-model cosmos3 --server-url https://<podid>-8000.proxy.runpod.net \
+#     --domain droid_lerobot --action-dim 10 --n-actions 16 --out report/cosmos_trust
+#
+# This config's job is to LOAD a real DROID episode (the lerobot reader runs on
+# your Mac — no GPU). The Cosmos rollout + trust math then run against it. The
+# camera/state/action keys below are taken from NVIDIA's own DROIDLeRobotDataset
+# (cosmos-framework), NOT guessed:
+#   state   = observation.state.cartesian_position   ([xyz, euler_xyz])
+#   gripper = action.gripper_position
+#   cameras = observation.image.{wrist,exterior_1,exterior_2}_left
+#
+# ── VERIFY against the actual dataset before the first run (on the Mac) ───────
+# Three things depend on the specific DROID-LeRobot repo and can't be assumed;
+# load one episode locally and confirm them from the dataset's meta/info.json:
+#   1. dataset.path — the real HF repo id / local dir of the DROID lerobot dataset.
+#   2. gripper — DROID's gripper is `action.gripper_position`, a SEPARATE feature,
+#      while emboviz's gripper.source indexes into the STATE vector. If this
+#      dataset's `observation.state` includes the gripper at some index, point
+#      state.key there and set gripper.source to that index; otherwise the gripper
+#      needs mapping from the action (a reader/encoder follow-up). The Cosmos DROID
+#      encoder reads `observations.gripper.value` and inverts it (1 - g).
+#   3. primary camera — Cosmos DROID's view_point is `concat_view` (wrist on top,
+#      two exteriors stitched below). The trust comparison runs on ONE camera role;
+#      for a first pass we condition on / compare the main exterior view. Matching
+#      Cosmos's native concat layout (so predicted and real are the same view) is a
+#      Stage-2 runtime follow-up, not a config field.
+
+model:
+  # Not used by the trust driver (it loads the dataset + drives the world model),
+  # but a valid config needs a model section. `mock` is the GPU-free built-in.
+  adapter: mock
+
+dataset:
+  format: lerobot
+  path: <VERIFY-droid-lerobot-repo>        # <-- the real DROID LeRobot HF repo / local dir
+
+  cameras:                                  # model camera role -> this dataset's image key
+    primary: observation.image.exterior_image_1_left   # main exterior view (see VERIFY #3)
+    exterior_2: observation.image.exterior_image_2_left
+    wrist: observation.image.wrist_image_left
+
+  state:
+    key: observation.state.cartesian_position   # [x, y, z, roll, pitch, yaw] (DROID convention)
+    convention: ee_pose                          # cartesian EE pose
+
+  action:
+    key: action
+
+  gripper:                                  # see VERIFY #2 — confirm source against the schema
+    source: <VERIFY-gripper-index>          # index of the gripper within the state vector
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"                             # episode index to roll out
+  frame_start: 0
+  n_frames: -1                              # the reader loads the whole episode; the driver windows it
+  frame_stride: 1                           # consecutive frames — pose deltas need the native cadence
+  diagnostics: [attention]                  # unused by the trust driver; a valid value is required
+
+output: ./report/cosmos_trust
