@@ -18,9 +18,6 @@ literature, it isn't shipped.
 
 ## The diagnostics
 
-Run one or more per analysis. Each one refuses to emit a verdict (and says why)
-when its preconditions aren't met, rather than fabricating a number.
-
 | Diagnostic | The question it answers |
 |---|---|
 | **Memorization** | Is the policy actually looking at the target object, or replaying a memorized motion? We mask the object and measure how much the action changes. |
