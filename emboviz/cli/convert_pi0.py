@@ -68,7 +68,7 @@ def convert_pi0_cmd(
     \b
         emboviz install-pi0          # creates the pi0 runtime venv (with openpi)
         emboviz convert-pi0 pi0_libero
-        emboviz analyze --config pi0-libero
+        emboviz analyze --config pi0
     """
     from emboviz.adapters.lifecycle import venv_python
     from emboviz.adapters.registry import find_adapter

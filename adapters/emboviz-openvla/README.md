@@ -23,7 +23,7 @@ LaMa workers. Its isolated runtime venv builds automatically on the first
 ## Use
 
 ```bash
-uv run emboviz analyze --config configs/openvla-bridge.yaml
+uv run emboviz analyze --config configs/openvla.yaml
 ```
 
 The run is described entirely by the config (model + checkpoint, dataset

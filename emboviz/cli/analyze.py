@@ -7,8 +7,8 @@ model (adapter + the user's checkpoint kwargs), the dataset mapping
 format can't encode), and the analysis parameters (episodes, memorization
 target, diagnostics, output). There is no CLI flag soup:
 
-    emboviz analyze --config configs/openvla-bridge.yaml
-    emboviz analyze --config openvla-bridge          # shipped template name
+    emboviz analyze --config configs/openvla.yaml
+    emboviz analyze --config openvla          # shipped template name
     emboviz analyze --config my-run.yaml --dry-run   # cost estimate only
 
 We produce, per episode:
@@ -167,8 +167,8 @@ def _resolve_diagnostics(diagnostics_spec: str) -> frozenset[str]:
 @click.command("analyze")
 @click.option("--config", "config_ref", required=True,
               help="Path to a run config YAML, or the name of a shipped "
-                   "template under configs/ (e.g. 'openvla-bridge', "
-                   "'pi0-libero'). The config declares the model, dataset "
+                   "template under configs/ (e.g. 'openvla', "
+                   "'pi0'). The config declares the model, dataset "
                    "mapping, and analysis parameters — everything for the run.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="Print the per-frame and per-episode forward-pass estimate "
@@ -184,11 +184,11 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
 
     \b
         # Shipped template (copy + edit it for your own checkpoint/data):
-        emboviz analyze --config configs/openvla-bridge.yaml
+        emboviz analyze --config configs/openvla.yaml
 
     \b
         # By template name:
-        emboviz analyze --config pi0-libero
+        emboviz analyze --config pi0
 
     \b
         # Size the GPU budget before a long run:
@@ -200,9 +200,24 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
     # ``serve``-started worker is left alone). ``--keep-warm`` opts out.
     if not keep_warm:
         import atexit
+        import os
+        import signal
 
         from emboviz.adapters.lifecycle import teardown_spawned_workers
         atexit.register(teardown_spawned_workers)
+
+        # Ctrl-C must stop the run immediately. The default SIGINT path is
+        # unreliable here: the per-frame model call blocks in a C-level zmq
+        # poll that swallows the EINTR, so the KeyboardInterrupt never
+        # propagates to ``atexit``. Handle SIGINT explicitly — stop the
+        # workers, then hard-exit so nothing downstream can intercept or
+        # retry past it. A second Ctrl-C during teardown escalates to the
+        # force-kill handler that ``teardown_spawned_workers`` installs.
+        def _on_sigint(signum, frame):
+            teardown_spawned_workers()
+            os._exit(130)  # 128 + SIGINT
+
+        signal.signal(signal.SIGINT, _on_sigint)
 
     from emboviz._internal.multi_episode import (
         EpisodeReport,
@@ -285,6 +300,7 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
             detector=cfg.analysis.detector,
             detector_score_threshold=cfg.analysis.detector_score_threshold,
             detector_mask_threshold=cfg.analysis.detector_mask_threshold,
+            memorization_require_cameras=cfg.analysis.memorization_require_cameras,
             fills=cfg.analysis.fills,
             enabled_diagnostics=enabled_diagnostics,
             show_imitation=cfg.analysis.show_imitation,

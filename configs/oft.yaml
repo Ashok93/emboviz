@@ -1,0 +1,59 @@
+# emboviz run config — OpenVLA-OFT (7B, multi-stream).
+#
+#   emboviz analyze --config configs/oft.yaml
+#
+# Runs out of the box on the LIBERO-Spatial OFT fine-tune. To diagnose YOUR
+# fine-tune on YOUR data, replace model.kwargs.checkpoint and dataset.path,
+# and fix the camera / state bindings. OFT consumes TWO views (primary + wrist).
+
+model:
+  adapter: oft
+  kwargs:
+    checkpoint: moojink/openvla-7b-oft-finetuned-libero-spatial   # <-- replace with YOUR checkpoint (HF repo id or local dir)
+    unnorm_key: libero_spatial_no_noops
+    num_images: 2                        # OFT consumes primary + wrist
+    use_proprio: true
+    use_l1_regression: true
+    center_crop: true
+
+dataset:
+  format: lerobot
+  path: lerobot/libero_spatial_image     # <-- replace with YOUR dataset (HF repo id or local dir)
+
+  cameras:                               # OFT needs two views
+    primary: observation.images.image
+    wrist:   observation.images.wrist_image
+
+  state:
+    key: observation.state
+    convention: ee_pose                  # [x, y, z, qx, qy, qz, qw, gripper]
+
+  action:
+    key: action
+
+  gripper:
+    source: 7
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"                          # episode index to analyze
+  frame_start: 0
+  n_frames: -1                           # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                        # analyze every 5th frame
+
+  # memorization is omitted by default: it needs SAM 3, a GATED model that
+  # requires an HF token (`uv run hf auth login`). Add `memorization` to the
+  # list once your token is set.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the black bowl"           # matches LIBERO-Spatial ep0 ("pick up the black bowl ...")
+  detector: sam3                         # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/oft

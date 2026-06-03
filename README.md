@@ -18,9 +18,6 @@ literature, it isn't shipped.
 
 ## The diagnostics
 
-Run one or more per analysis. Each one refuses to emit a verdict (and says why)
-when its preconditions aren't met, rather than fabricating a number.
-
 | Diagnostic | The question it answers |
 |---|---|
 | **Memorization** | Is the policy actually looking at the target object, or replaying a memorized motion? We mask the object and measure how much the action changes. |
@@ -34,6 +31,20 @@ Short and full names are both accepted: `memorization`, `modality`,
 
 ---
 
+## System requirements
+
+emboviz loads your policy in its native runtime, so you need roughly the
+**same machine you'd run that model's inference on** — plus a bit of headroom
+for the SAM 3 detector and LaMa fill when you use the memorization diagnostic.
+
+| | |
+|---|---|
+| **GPU** | Enough VRAM to run your policy (~24 GB for a 7B VLA like OpenVLA / OFT; less for smaller policies) |
+| **CPU** | Any modern multi-core (video decoding is CPU-bound) |
+| **RAM** | 16 GB for a 7B VLA (enough to stage its weights); less for smaller policies |
+
+---
+
 ## Installation
 
 Emboviz is **not yet published to PyPI** — install it from a clone of this
@@ -43,20 +54,8 @@ LaMa fill, and the model adapter you ask for — all from the clone.
 
 ### 1. System dependencies
 
-Emboviz reads episode video through `torchcodec`, which needs the FFmpeg system
-libraries:
-
 ```bash
-sudo apt install ffmpeg     # Linux
-brew install ffmpeg         # macOS
-```
-
-The `act` and `smolvla` adapters build LeRobot, which compiles a small
-C-extension (`evdev`, via `pynput`). For those two only, also install the
-Python development headers and a compiler (Linux):
-
-```bash
-sudo apt install python3-dev build-essential   # only for act / smolvla
+sudo apt install ffmpeg python3-dev build-essential
 ```
 
 ### 2. Clone + install your model
@@ -81,33 +80,98 @@ detector** and **LaMa fill** (used by the memorization diagnostic), **both**
 dataset readers (LeRobot v3.0 and GR00T-format — `dataset.format: lerobot |
 gr00t`), and the model adapter. Each adapter is a thin shim; its heavy runtime
 (torch, transformers, openpi, …) is built into an isolated worker environment
-**automatically on first analysis** — you never install those by hand.
+**automatically on first analysis**.
 
-Run emboviz through the project environment with `uv run`:
-
-```bash
-uv run emboviz analyze --config configs/<file>.yaml
-```
-
-> **Before your first run — SAM 3 is gated.** The memorization diagnostic uses
-> Meta's [SAM 3](https://huggingface.co/facebook/sam3) to locate the target
-> object, and SAM 3 is a **gated** model on the Hugging Face Hub. Accept its
-> license once, then authenticate so emboviz can download it:
+> **Memorization needs SAM 3 (gated).** The shipped configs run four
+> diagnostics by default — `[modality, sensitivity, attention, chunk]` — which
+> need no token. The **memorization** diagnostic is left out by default because
+> it uses Meta's [SAM 3](https://huggingface.co/facebook/sam3) to locate the
+> target object, and SAM 3 is a **gated** model on the Hugging Face Hub. To use
+> it, accept its license once, authenticate, then add `memorization` to your
+> config's `diagnostics:` list:
 >
 > ```bash
 > uv run hf auth login          # or: export HF_TOKEN=hf_xxx
 > ```
 >
-> Not ready for that? Drop `memorization` from your config's `diagnostics:`
-> list — everything else runs with no token:
->
 > ```yaml
 > analysis:
->   diagnostics: [modality, sensitivity, attention, chunk]
+>   diagnostics: [memorization, modality, sensitivity, attention, chunk]
 > ```
 
 > **π0 attention** needs a one-time PyTorch conversion of the checkpoint:
 > `uv run emboviz convert-pi0 pi0_libero`. Plain inference needs nothing extra.
+
+---
+
+## Running an analysis
+
+One run is one config file — model, dataset mapping, and analysis parameters in
+one place. Templates live in `configs/` (one per model on its canonical dataset).
+
+```bash
+uv run emboviz analyze --config configs/openvla.yaml
+```
+
+To analyze your own checkpoint and data, copy the closest template and edit it:
+
+```yaml
+model:
+  adapter: openvla                  # openvla | oft | pi0 | gr00t | act | smolvla
+  kwargs:                           # constructor overrides → your checkpoint
+    hf_repo: your-org/your-finetune # HF repo id or local dir
+    unnorm_key: bridge_orig         # adapter-specific; see the shipped template for your model
+
+dataset:
+  format: lerobot                   # lerobot | gr00t
+  path: your-org/your-dataset       # HF repo id or local dir
+  cameras:                          # model camera role → this dataset's image key
+    primary: observation.images.image_0
+  state:    {key: observation.state, convention: ee_pose}   # convention: joint_angles | ee_pose | ... (required, never guessed)
+  action:   {key: action}
+  gripper:  {source: 6, kind: parallel_jaw, units: unit, range: [0.0, 1.0]}   # optional; omit to leave the gripper inside the state vector
+  instruction: {from: tasks}        # natural-language instruction from the dataset's task table
+
+analysis:
+  episodes: "537"                   # the episode to analyze
+  frame_start: 0                    # first frame analyzed
+  n_frames: -1                      # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                   # analyze every 5th frame
+
+  # memorization is omitted by default — it needs SAM 3 (see the gated-model
+  # note above). Add `memorization` once you've authenticated.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the cloth"           # the manipulated object to mask
+  detector: sam3                    # sam3 | gd-sam
+  # detector_score_threshold: 0.5   # optional; SAM 3's default. Lower to catch faint/small targets
+  # detector_mask_threshold: 0.5    # optional; per-pixel mask cutoff (SAM 3's default). Lower = fuller object removal
+  # memorization_require_cameras: primary  # primary (default) | all | [roles]; views that must show the target
+  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/my-run
+```
+
+The schema is identical for every input format — only the reader behind each
+`key` changes. Dimensions and per-dim names are read from the dataset's own
+schema; you declare only what the format can't encode (camera roles, state
+convention, gripper spec). See `configs/README.md` for the full field reference.
+
+### What you get back
+
+Per episode, in `report/episode_<idx>/`:
+
+- **`summary.json`** — every metric, with the per-frame numbers.
+- **`report.md`** — plain-English findings, worst-first.
+- **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention
+  heatmaps, memorization mask + per-fill overlays, per-modality response
+  timelines, occlusion grids, and action plots.
+
+Across all analyzed episodes, at the top of `report/`:
+
+- **`aggregate.{json,md}`** — cross-episode patterns, linked to per-episode
+  pages.
 
 ---
 
@@ -133,69 +197,6 @@ uv run emboviz analyze --config configs/<file>.yaml
 > emboviz bug — see [`LITERATURE.md` §4](./LITERATURE.md) for the citations
 > (ReconVLA, the VLA survey, the GR00T-N1.5 mechanistic study). Treat it as
 > "where the action pathway attends," not as a reliable object localizer.
-
----
-
-## Running an analysis
-
-One run is one config file — model, dataset mapping, and analysis parameters in
-one place. Templates live in `configs/` (one per model on its canonical dataset).
-
-```bash
-uv run emboviz analyze --config configs/openvla-bridge.yaml
-uv run emboviz analyze --config configs/my-run.yaml --dry-run   # cost estimate, no GPU
-```
-
-To analyze your own checkpoint and data, copy the closest template and edit it:
-
-```yaml
-model:
-  adapter: openvla                  # openvla | oft | pi0 | gr00t
-  kwargs:
-    hf_repo: your-org/your-finetune
-    unnorm_key: bridge_orig
-
-dataset:
-  format: lerobot                   # lerobot | gr00t
-  path: your-org/your-dataset       # HF repo id or local dir
-  cameras:
-    primary: observation.images.image_0
-  state:    {key: observation.state, convention: ee_pose}
-  action:   {key: action}
-  gripper:  {source: 6, kind: parallel_jaw, units: unit, range: [0.0, 1.0]}
-  instruction: {from: tasks}
-
-analysis:
-  episodes: "537"                   # "7" / "0,3,7" / "0-5" / "all"
-  mask_query: "the cloth"           # object the memorization diagnostic masks
-  detector: sam3                    # sam3 | gd-sam
-  # detector_score_threshold: 0.5   # optional; SAM 3's default. Lower to catch faint/small targets
-  # detector_mask_threshold: 0.4    # optional; lower = fuller object removal (0.5 is SAM 3's default)
-  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
-  diagnostics: all                  # or [memorization, attention]
-
-output: ./report/my-run
-```
-
-The schema is identical for every input format — only the reader behind each
-`key` changes. Dimensions and per-dim names are read from the dataset's own
-schema; you declare only what the format can't encode (camera roles, state
-convention, gripper spec). See `configs/README.md` for the full field reference.
-
-### What you get back
-
-Per episode, in `report/episode_<idx>/`:
-
-- **`summary.json`** — every metric, with the per-frame numbers.
-- **`report.md` / `report.html`** — plain-English findings, worst-first.
-- **`rollout.rrd`** — open in Rerun: scrub frame-by-frame with attention
-  heatmaps, memorization mask + per-fill overlays, per-modality response
-  timelines, occlusion grids, and action plots.
-
-Across all analyzed episodes, at the top of `report/`:
-
-- **`aggregate.{json,md,html}`** — cross-episode patterns, linked to per-episode
-  pages.
 
 ---
 

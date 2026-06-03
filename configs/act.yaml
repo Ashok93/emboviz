@@ -1,0 +1,56 @@
+# emboviz run config — ACT (Action Chunking Transformer).
+#
+#   emboviz analyze --config configs/act.yaml
+#
+# ACT consumes vision + robot state only (no language). Replace the checkpoint
+# and dataset below, and map camera roles to your checkpoint's image-feature keys.
+
+model:
+  adapter: act
+  kwargs:
+    checkpoint: your-org/your-act-checkpoint    # <-- replace with YOUR ACT policy (HF repo id or local dir)
+    camera_mapping:                             # camera role -> the checkpoint's image-feature key
+      primary: observation.images.top
+      wrist:   observation.images.wrist
+
+dataset:
+  format: lerobot
+  path: your-org/your-act-dataset               # <-- replace with YOUR dataset (HF repo id or local dir)
+
+  cameras:                                      # camera role -> this dataset's image key
+    primary: observation.images.top
+    wrist:   observation.images.wrist
+
+  state:
+    key: observation.state
+    convention: joint_angles                    # ACT/ALOHA typically joint angles — state it explicitly
+
+  action:
+    key: action
+
+  gripper:
+    source: 6
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks                                 # ACT ignores language; used only to label the episode
+
+analysis:
+  episodes: "0"                                 # episode index to analyze
+  frame_start: 0
+  n_frames: -1                                  # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                               # analyze every 5th frame
+
+  # memorization is omitted by default: it needs SAM 3, a GATED model that
+  # requires an HF token (`uv run hf auth login`). Add `memorization` to the
+  # list once your token is set.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the object"                      # the manipulated object to mask
+  detector: sam3                                # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]          # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/act

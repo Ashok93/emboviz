@@ -29,8 +29,13 @@ SPEC = AdapterSpec(
     # RUNTIME the hub modeling code requires — not a mirror of a package's
     # transitive deps. The runtime venv needs:
     #
-    #   • torch — cap below 2.10 to avoid the cu13-only 2.12 wheel that
-    #     breaks on every cloud A40/A6000/A100 driver in 2026.
+    #   • torch — cap below 2.10 to keep transformers/timm in OpenVLA's
+    #     tested window; the cu13-only 2.12 wheel is excluded by this cap.
+    #     The CUDA *build* (which must match the host driver) is pinned to
+    #     cu126 via ``runtime_env_vars`` below — NOT by version-juggling —
+    #     so the wheel runs on any driver >= 12.6 (every cloud A40/A6000/
+    #     A100 in 2026). OpenVLA's modeling code is torch-version-agnostic
+    #     (built on 2.2); the upper bound is an API window, not a CUDA one.
     #   • transformers — OpenVLA's modeling code targets the 4.40–4.49
     #     window; 4.50 dropped APIs it still uses.
     #   • timm 0.9.x — OpenVLA's prismatic-vlm hard-checks this range.
@@ -57,6 +62,12 @@ SPEC = AdapterSpec(
         "emboviz-wire",
         "emboviz-openvla",
     ),
+    # Pin torch to the cu126 PyTorch index (driver >= 12.6 — every cloud GPU
+    # in 2026) via the stable UV_EXTRA_INDEX_URL: uv ranks the extra index
+    # above default PyPI, so torch resolves from cu126, the rest from PyPI.
+    # NOT the preview --torch-backend flag. install_venv applies it at install
+    # time; core stays torch-blind.
+    runtime_env_vars={"UV_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu126"},
     default_actor_kwargs={
         "hf_repo":             "openvla/openvla-7b",
         "unnorm_key":          "bridge_orig",

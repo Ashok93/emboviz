@@ -5,8 +5,12 @@ which checkpoint, the dataset mapping, the memorization target, which episodes,
 and where to write the report. No CLI flag soup.
 
 ```bash
-uv run emboviz analyze --config configs/pi0-libero.yaml
+uv run emboviz analyze --config configs/pi0.yaml
 ```
+
+There is one base config per model — `openvla`, `oft`, `pi0`, `gr00t`, `act`,
+`smolvla` — each runnable as-is and meant to be copied and pointed at your own
+checkpoint and dataset.
 
 ## Bring your own model + dataset
 
@@ -20,7 +24,7 @@ Copy the template closest to your setup and edit three things:
    Everything else (dims, per-dim names, fps) is read from the data.
 
 ```bash
-cp configs/pi0-libero.yaml configs/my-run.yaml
+cp configs/pi0.yaml configs/my-run.yaml
 $EDITOR configs/my-run.yaml
 uv run emboviz analyze --config configs/my-run.yaml
 ```

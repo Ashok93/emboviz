@@ -25,11 +25,11 @@ SPEC = AdapterSpec(
     name="lama",
     server_module="emboviz_lama.server",
     runtime_pip=(
-        # Cap the torch upper bound: the latest torch (2.12) ships a CUDA-13
-        # wheel that needs a newer NVIDIA driver than common CUDA hosts have,
-        # so it silently falls back to CPU. The <2.11 window (torch 2.10,
-        # CUDA 12.8) matches what lerobot pins and works on current drivers.
-        # LaMa runs on CPU too, but we want the GPU when one is present.
+        # Upper-bound the torch version to exclude the cu13-only 2.12
+        # wheel. The CUDA *build* is pinned to cu126 via runtime_env_vars
+        # below (driver >= 12.6), so the GPU is used on every common cloud
+        # host instead of silently falling back to CPU. LaMa runs on CPU
+        # too, but we want the GPU when one is present.
         "torch>=2.2,<2.11",
         # We fetch the pinned TorchScript checkpoint from the HF Hub.
         "huggingface-hub>=0.24",
@@ -44,6 +44,12 @@ SPEC = AdapterSpec(
         "emboviz-wire",
         "emboviz-lama",
     ),
+    # Pin torch to the cu126 PyTorch index (driver >= 12.6) via the stable
+    # UV_EXTRA_INDEX_URL (extra index ranks above default PyPI in uv, so
+    # torch resolves from cu126; other deps from PyPI). NOT the preview
+    # --torch-backend flag. install_venv applies runtime_env_vars to the
+    # install subprocess; core stays torch-blind.
+    runtime_env_vars={"UV_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu126"},
     default_actor_kwargs={
         "device": "auto",
         "preload": True,

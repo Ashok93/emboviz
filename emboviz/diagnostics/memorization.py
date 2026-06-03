@@ -31,16 +31,15 @@ Implementation principles (LITERATURE.md §1):
      the intervention didn't happen (e.g. fill ≈ target color); we
      refuse to emit a verdict.
 
-  4. **Per-camera detection and masking (all-or-skip).** Each camera in
-     the scene is queried independently via a probe scene that aliases the
-     camera as ``primary`` and sets ``scene.metadata['_emboviz_probe_camera']``
-     so annotation connectors can resolve the right per-camera entry. The
-     target is masked on every camera simultaneously in one perturbed
-     scene — but only if EVERY camera the model consumes yielded a confident
-     detection. If any camera lacks one, the target remains visible there,
-     so an unchanged action cannot be attributed to memorization; the frame
-     is reported as "couldn't test" and excluded from the trajectory verdict
-     rather than scored on a partial mask.
+  4. **Per-camera detection and masking.** Each camera is queried
+     independently via a probe scene that aliases the camera as ``primary``
+     and sets ``scene.metadata['_emboviz_probe_camera']`` so annotation
+     connectors can resolve the right per-camera entry. The target is masked
+     on every camera where it is found, in one perturbed scene. A frame is
+     scored only when it is located on the required cameras (``require_cameras``
+     — the primary scene view by default); otherwise it is reported as
+     "couldn't test" and excluded from the trajectory verdict rather than
+     scored on a partial mask. Any in-scope camera left unmasked is disclosed.
 
   5. **N-sample averaging for stochastic policies.** π0, GR00T,
      diffusion policies need K samples per prediction averaged before
@@ -261,8 +260,8 @@ def _mask_contrast(
 
 
 class MemorizationDiagnostic(Diagnostic):
-    """Mask the target across every camera; check whether the model still
-    executes a coherent action.
+    """Mask the target on the cameras that show it; check whether the model
+    still executes a coherent action.
 
     Args:
         target_detector: how to locate the target. REQUIRED — there is NO
@@ -295,6 +294,11 @@ class MemorizationDiagnostic(Diagnostic):
         grounded_threshold: anchored 0-1 score above which the model is
             "genuinely reading the scene."
         cameras: which cameras to operate on. None = every camera in the scene.
+        require_cameras: views that must carry a detection for a frame to be
+            scored. ``"primary"`` (default) gates on the main scene view;
+            ``"all"`` requires every camera; a list names explicit roles. The
+            target is masked on every camera where it is found, and any
+            in-scope view left unmasked is disclosed in the result.
         calibration: per-model anchors from
             ``emboviz.calibration.calibrate_model``. Required for
             anchored thresholds to mean the same thing across models;
@@ -312,6 +316,7 @@ class MemorizationDiagnostic(Diagnostic):
         noise_floor_score: float = 0.05,
         grounded_threshold: float = 0.30,
         cameras: Optional[list[str]] = None,
+        require_cameras: str | list[str] = "primary",
         calibration: Optional["ModelCalibration"] = None,
         inpainter: Optional[Inpainter] = None,
         mask_dilation_frac: float = DEFAULT_MASK_DILATION_FRAC,
@@ -358,6 +363,7 @@ class MemorizationDiagnostic(Diagnostic):
         self.noise_floor_score = noise_floor_score
         self.grounded_threshold = grounded_threshold
         self.cameras = cameras
+        self.require_cameras = require_cameras
         self.calibration = calibration
         self.name = "memorization_test"
         self.axis = "vision.memorization"
@@ -426,14 +432,28 @@ class MemorizationDiagnostic(Diagnostic):
             per_cam_mask[cam] = _dilate_mask(detection.mask, radius)
             per_cam_dilation[cam] = radius
 
-        # Memorization is only honest when the target is removed from EVERY
-        # camera the model consumes: masking it on a subset leaves it fully
-        # visible on the others, so an unchanged action proves nothing. A frame
-        # where any camera lacks a confident detection is therefore NOT scored —
-        # it is reported as "couldn't test" and excluded from the trajectory
-        # verdict, which is computed over the frames where removal was complete.
-        missing_cams = [c for c in cameras if c not in per_cam_original]
-        if missing_cams:
+        # Score a frame only when the target is located on the required
+        # cameras (``require_cameras``); mask it wherever it is found. The
+        # default "primary" falls back to strict-all if the scene exposes no
+        # camera by that role; an explicit value that names no scene camera is
+        # a configuration error, not a silent relaxation.
+        if self.require_cameras == "all":
+            required = list(cameras)
+        elif self.require_cameras == "primary":
+            required = ["primary"] if "primary" in cameras else list(cameras)
+        else:
+            names = ([self.require_cameras] if isinstance(self.require_cameras, str)
+                     else list(self.require_cameras))
+            required = [c for c in names if c in cameras]
+            if not required:
+                raise ValueError(
+                    f"memorization_require_cameras={self.require_cameras!r} names no "
+                    f"camera in the scene ({sorted(cameras)}); use 'all', 'primary', "
+                    "or a camera role the scene exposes."
+                )
+
+        missing_required = [c for c in required if c not in per_cam_original]
+        if missing_required:
             located = sorted(per_cam_original)
             if not located:
                 return self._not_applicable(
@@ -446,16 +466,18 @@ class MemorizationDiagnostic(Diagnostic):
                 )
             return self._not_applicable(
                 model, scene,
-                f"located the target on {located} but NOT on {missing_cams}: it "
-                f"stays visible to the model on {missing_cams}, so an unchanged "
-                "action cannot be attributed to memorization. Memorization is "
-                "scored only on frames where the target is removed from every "
-                "camera the model sees. Lower analysis.detector_score_threshold "
-                "to catch it on the remaining camera(s), or this frame genuinely "
-                "does not show the target on all views.",
+                f"located the target on {located} but NOT on required "
+                f"camera(s) {sorted(missing_required)}: with the target still "
+                "visible there, an unchanged action cannot be attributed to "
+                "memorization. Lower analysis.detector_score_threshold to catch "
+                "it, set analysis.memorization_require_cameras to the view(s) "
+                "that actually show the target, or this frame does not show it "
+                "on the required view(s).",
             )
 
         detected_cams = sorted(per_cam_original)
+        # In-scope cameras without a detection — left unmasked, disclosed below.
+        unmasked_cams = sorted(c for c in cameras if c not in per_cam_original)
         labels = sorted({per_cam_detection[c].label for c in detected_cams})
         confs = {c: round(per_cam_detection[c].confidence, 3) for c in detected_cams}
 
@@ -576,6 +598,21 @@ class MemorizationDiagnostic(Diagnostic):
             f"camera '{detected_cams[0]}'" if len(detected_cams) == 1
             else f"cameras {detected_cams}"
         )
+        # Per-camera detection + masking breakdown, for debugging the blended
+        # verdict (which masks every detected camera and reads one Δaction).
+        per_camera: dict[str, dict] = {}
+        for cam in cameras:
+            det = per_cam_detection.get(cam)
+            entry: dict = {"masked": cam in per_cam_original}
+            if det is not None:
+                entry["confidence"] = round(float(det.confidence), 3)
+                entry["label"] = det.label
+            if cam in per_cam_original:
+                entry["dilation_px"] = per_cam_dilation[cam]
+                entry["mean_contrast"] = round(float(np.mean(
+                    [r["per_cam_contrast"][cam] for r in per_fill_results.values()]
+                )), 4)
+            per_camera[cam] = entry
         raw_numbers = {
             "min_delta_normalized":   min_delta,
             "max_delta_normalized":   max_delta,
@@ -584,6 +621,8 @@ class MemorizationDiagnostic(Diagnostic):
             "signal_threshold":       signal_threshold,
             "ignored_threshold":      self.noise_floor_score,
             "grounded_threshold":     self.grounded_threshold,
+            "required_cameras":       list(required),
+            "per_camera":             per_camera,
             "fills":                  list(per_fill_results),
             "fill_ensemble": {
                 "fills_used":       list(per_fill_results),
@@ -727,6 +766,14 @@ class MemorizationDiagnostic(Diagnostic):
                 ),
                 raw_numbers=raw_numbers,
             )
+        # Disclose any in-scope camera left unmasked: if the target stays
+        # visible to the model there, the verdict understates memorization.
+        if unmasked_cams:
+            finding = replace(finding, next_step=(
+                f"{finding.next_step} Masked on {detected_cams}, not on "
+                f"{unmasked_cams} (target not located there); set "
+                "analysis.memorization_require_cameras='all' to require every view."
+            ))
         # Legacy single-string explanation for backward compat with code
         # paths that still read DiagnosticResult.explanation.
         verdict = f"{finding.observed} {finding.meaning} {finding.next_step}"

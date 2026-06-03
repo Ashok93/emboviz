@@ -119,12 +119,13 @@ PerFrameModalityResponse = dict[int, dict[str, float]]
 
 _DOC_MEMORIZATION = """## Memorization — is the model looking at the target?
 
-We locate the manipulated target on every camera, mask it (channel-mean +
-Gaussian-blur fills; LaMa inpaint when enabled), and measure how much the
-model's action changes. A frame is scored only when the target is removed
-from EVERY camera the model sees: if it can't be located on one camera it
-stays visible there, so that frame is marked "couldn't test" rather than
-scored on a partial mask.
+We locate the manipulated target, mask it (channel-mean + Gaussian-blur
+fills; LaMa inpaint when enabled), and measure how much the model's action
+changes. A frame is scored when the target is found on the required cameras
+(the primary scene view by default; set via
+analysis.memorization_require_cameras). It is masked on every camera where it
+is found; a frame missing it on a required camera is marked "couldn't test"
+rather than scored on a partial mask.
 
 **How to read this tab**
 
