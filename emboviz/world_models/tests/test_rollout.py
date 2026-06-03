@@ -19,10 +19,12 @@ from emboviz_wire.types import Observations, Scene, Trajectory
 from emboviz_wire.world_model_protocol import WorldModel, WorldModelCapability
 
 from emboviz.world_models.rollout import (
+    analyze_trust,
     rollout_episode,
     summarize,
     trust_report,
 )
+from emboviz.world_models.viz import save_frame_comparison
 
 
 def _solid(level: int, h: int = 16, w: int = 16) -> np.ndarray:
@@ -151,12 +153,27 @@ def test_summarize_static_prior_is_refused() -> None:
     assert "REFUSED" in summarize(report)
 
 
+def test_analyze_trust_exposes_frames_and_renders() -> None:
+    import tempfile
+    from pathlib import Path
+
+    analysis = analyze_trust(_MockColorWM(), _episode(8), frame_start=0, n_actions=7)
+    # The rollout trajectories are exposed, same length, ready to render.
+    assert len(analysis.predicted.frames) == len(analysis.aligned_real.frames) == 7
+    assert analysis.report["trust_horizon"] == 7
+    out = Path(tempfile.mkdtemp())
+    n = save_frame_comparison(analysis.predicted, analysis.aligned_real, analysis.report, out)
+    pngs = sorted(out.glob("compare_*.png"))
+    assert n == 7 and len(pngs) == 7
+
+
 def _run_all() -> None:
     test_prepare_actions_default_extracts_expert_action()
     test_prepare_actions_default_missing_raises()
     test_rollout_alignment_lengths_match()
     test_trust_report_real_actions_fully_trusted()
     test_summarize_static_prior_is_refused()
+    test_analyze_trust_exposes_frames_and_renders()
     print("OK: all world-model rollout checks passed")
 
 

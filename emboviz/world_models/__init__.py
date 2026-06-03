@@ -20,10 +20,13 @@ from emboviz.world_models.trust import (
     frame_divergence,
 )
 from emboviz.world_models.rollout import (
+    TrustAnalysis,
+    analyze_trust,
     rollout_episode,
     summarize,
     trust_report,
 )
+from emboviz.world_models.viz import save_frame_comparison, save_trust_curve
 
 __all__ = [
     # trust
@@ -33,7 +36,12 @@ __all__ = [
     "compute_trust_curve",
     "frame_divergence",
     # rollout orchestration
+    "TrustAnalysis",
+    "analyze_trust",
     "rollout_episode",
     "summarize",
     "trust_report",
+    # rendering
+    "save_frame_comparison",
+    "save_trust_curve",
 ]

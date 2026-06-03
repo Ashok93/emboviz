@@ -32,30 +32,8 @@ from pathlib import Path
 from emboviz.config import load_run_config
 from emboviz.datasets.manifest import build_source
 from emboviz.adapters import connect_world_model
-from emboviz.world_models.rollout import summarize, trust_report
-
-
-def _save_plot(report: dict, path: Path) -> None:
-    """Render the trust curve (divergence vs horizon) with the noise-floor band."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(report["horizons"], report["divergence"], marker="o", label="prediction vs reality")
-    ax.axhline(report["noise_floor"], ls="--", color="green", label="noise floor")
-    ax.axhline(report["trust_band"], ls="--", color="orange", label="trust band")
-    th = report["trust_horizon"]
-    if th < len(report["horizons"]):
-        ax.axvline(th, color="red", label=f"trust horizon = {th}")
-    ax.set_xlabel("rollout horizon (frame)")
-    ax.set_ylabel(f"{report['metric']} divergence")
-    ax.set_title(f"World-model trust — {report['world_model']} / ep {report['episode_id']}")
-    ax.legend(loc="upper left", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
+from emboviz.world_models.rollout import analyze_trust, summarize
+from emboviz.world_models.viz import save_frame_comparison, save_trust_curve
 
 
 def main() -> None:
@@ -93,7 +71,7 @@ def main() -> None:
         "conditioning_camera": args.camera,
     })
 
-    report = trust_report(
+    analysis = analyze_trust(
         wm, real,
         frame_start=args.frame_start, n_actions=args.n_actions,
         camera=args.camera, metric=args.metric,
@@ -102,11 +80,19 @@ def main() -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "trust_report.json").write_text(json.dumps(report, indent=2))
-    _save_plot(report, out / "trust_curve.png")
+    (out / "trust_report.json").write_text(json.dumps(analysis.report, indent=2))
+    save_trust_curve(analysis.report, out / "trust_curve.png")
+    n_frames = save_frame_comparison(
+        analysis.predicted, analysis.aligned_real, analysis.report, out / "frames",
+    )
 
-    print("\n" + summarize(report))
-    print(f"\n[stage2] wrote {out}/trust_report.json and trust_curve.png")
+    print("\n" + summarize(analysis.report))
+    print(
+        f"\n[stage2] wrote {out}/:\n"
+        f"  trust_report.json   — the curve + verdict\n"
+        f"  trust_curve.png     — divergence vs horizon\n"
+        f"  frames/             — {n_frames} predicted|real side-by-side PNGs"
+    )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ real adapter unchanged.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -93,12 +94,50 @@ def trust_report(
     conditioning_offset: int = 1,
     shuffle_seed: int = 0,
 ) -> dict:
-    """Full Stage-2 trust analysis for one episode.
+    """Full Stage-2 trust analysis for one episode — the serializable report.
 
-    Rolls the real actions forward (the trust curve), then rolls a shuffled-action
-    control forward (the action-dependence check), both compared against the same
-    real frames. Returns the trust curve, the control verdict, and the headline
-    numbers a report/Rerun view would surface.
+    Thin wrapper over :func:`analyze_trust` returning only its JSON-able report
+    (the curve + verdict). Use :func:`analyze_trust` directly when you also need
+    the predicted/real frames (e.g. to render the side-by-side comparison).
+    """
+    return analyze_trust(
+        world_model, real,
+        frame_start=frame_start, n_actions=n_actions, camera=camera,
+        metric=metric, conditioning_offset=conditioning_offset,
+        shuffle_seed=shuffle_seed,
+    ).report
+
+
+@dataclass(frozen=True)
+class TrustAnalysis:
+    """The full result of a Stage-2 trust run.
+
+    ``report`` is the JSON-able summary (curve + verdict). ``predicted`` and
+    ``aligned_real`` are the real-action rollout and the matching real frames —
+    the same length, ready to render side by side. ``predicted_shuffled`` is the
+    action-dependence control rollout.
+    """
+
+    report: dict
+    predicted: Trajectory
+    aligned_real: Trajectory
+    predicted_shuffled: Trajectory
+
+
+def analyze_trust(
+    world_model: WorldModel,
+    real: Trajectory,
+    *,
+    frame_start: int = 0,
+    n_actions: Optional[int] = None,
+    camera: str = "primary",
+    metric: FrameMetric = "pixel_l2",
+    conditioning_offset: int = 1,
+    shuffle_seed: int = 0,
+) -> TrustAnalysis:
+    """Roll the real actions forward (the trust curve), then a shuffled-action
+    control (the action-dependence check), both compared against the same real
+    frames — and return the report plus the rollout trajectories for rendering.
     """
     # The world model owns how an episode maps to conditioning actions (raw
     # logged actions by default; a per-domain encoding for Cosmos).
@@ -130,7 +169,7 @@ def trust_report(
     )
     dependence = action_dependence(real_curve, shuffled_curve)
 
-    return {
+    report = {
         "episode_id": real.episode_id,
         "frame_start": frame_start,
         "n_actions": int(len(actions)),
@@ -145,6 +184,10 @@ def trust_report(
         "world_model": getattr(world_model, "model_id", "unknown"),
         "rollout_metadata": dict(predicted.metadata),
     }
+    return TrustAnalysis(
+        report=report, predicted=predicted, aligned_real=aligned_real,
+        predicted_shuffled=predicted_sh,
+    )
 
 
 def summarize(report: dict) -> str:
