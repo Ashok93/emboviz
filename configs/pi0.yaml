@@ -1,0 +1,56 @@
+# emboviz run config — Physical Intelligence π0 / π0.5.
+#
+#   emboviz analyze --config configs/pi0.yaml
+#
+# Runs out of the box on openpi's published pi0_libero. To diagnose YOUR
+# fine-tune, set model.kwargs.checkpoint_uri and point dataset.path at your
+# data. π0 attention needs a one-time conversion:
+#   uv run emboviz convert-pi0 pi0_libero
+
+model:
+  adapter: pi0
+  kwargs:
+    config_name: pi0_libero              # REQUIRED — selects checkpoint + platform (no silent default)
+    # checkpoint_uri: /path/to/your/pi0_finetune   # <-- your fine-tune; omit -> openpi's published pi0_libero
+
+dataset:
+  format: lerobot
+  path: lerobot/libero                   # <-- replace with YOUR dataset (HF repo id or local dir)
+
+  cameras:                               # π0's LIBERO platform requires roles {primary, wrist}
+    primary: observation.images.image
+    wrist:   observation.images.image2
+
+  state:
+    key: observation.state
+    convention: ee_pose
+
+  action:
+    key: action
+
+  gripper:
+    source: 7
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"                          # episode index to analyze
+  frame_start: 0
+  n_frames: -1                           # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                        # analyze every 5th frame
+
+  # memorization is omitted by default: it needs SAM 3, a GATED model that
+  # requires an HF token (`uv run hf auth login`). Add `memorization` to the
+  # list once your token is set.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the white mug"            # matches LIBERO ep0 ("put the white mug on the left plate ...")
+  detector: sam3                         # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/pi0

@@ -7,8 +7,8 @@ model (adapter + the user's checkpoint kwargs), the dataset mapping
 format can't encode), and the analysis parameters (episodes, memorization
 target, diagnostics, output). There is no CLI flag soup:
 
-    emboviz analyze --config configs/openvla-bridge.yaml
-    emboviz analyze --config openvla-bridge          # shipped template name
+    emboviz analyze --config configs/openvla.yaml
+    emboviz analyze --config openvla          # shipped template name
     emboviz analyze --config my-run.yaml --dry-run   # cost estimate only
 
 We produce, per episode:
@@ -167,8 +167,8 @@ def _resolve_diagnostics(diagnostics_spec: str) -> frozenset[str]:
 @click.command("analyze")
 @click.option("--config", "config_ref", required=True,
               help="Path to a run config YAML, or the name of a shipped "
-                   "template under configs/ (e.g. 'openvla-bridge', "
-                   "'pi0-libero'). The config declares the model, dataset "
+                   "template under configs/ (e.g. 'openvla', "
+                   "'pi0'). The config declares the model, dataset "
                    "mapping, and analysis parameters — everything for the run.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="Print the per-frame and per-episode forward-pass estimate "
@@ -184,11 +184,11 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
 
     \b
         # Shipped template (copy + edit it for your own checkpoint/data):
-        emboviz analyze --config configs/openvla-bridge.yaml
+        emboviz analyze --config configs/openvla.yaml
 
     \b
         # By template name:
-        emboviz analyze --config pi0-libero
+        emboviz analyze --config pi0
 
     \b
         # Size the GPU budget before a long run:

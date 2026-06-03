@@ -29,7 +29,7 @@ LaMa workers. Its isolated runtime venv builds automatically on the first
 ```bash
 uv run emboviz-gr00t serve &
 
-uv run emboviz analyze --config configs/gr00t-libero.yaml
+uv run emboviz analyze --config configs/gr00t.yaml
 ```
 
 Copy the template and set `model.kwargs.model_path` to your own fine-tune.

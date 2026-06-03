@@ -34,6 +34,20 @@ Short and full names are both accepted: `memorization`, `modality`,
 
 ---
 
+## System requirements
+
+emboviz loads your policy in its native runtime, so you need roughly the
+**same machine you'd run that model's inference on** — plus a bit of headroom
+for the SAM 3 detector and LaMa fill when you use the memorization diagnostic.
+
+| | |
+|---|---|
+| **GPU** | Enough VRAM to run your policy (~24 GB for a 7B VLA like OpenVLA / OFT; less for smaller policies) |
+| **CPU** | Any modern multi-core (video decoding is CPU-bound) |
+| **RAM** | 16 GB for a 7B VLA (enough to stage its weights); less for smaller policies |
+
+---
+
 ## Installation
 
 Emboviz is **not yet published to PyPI** — install it from a clone of this
@@ -71,21 +85,21 @@ gr00t`), and the model adapter. Each adapter is a thin shim; its heavy runtime
 (torch, transformers, openpi, …) is built into an isolated worker environment
 **automatically on first analysis**.
 
-> **Before your first run — SAM 3 is gated.** The memorization diagnostic uses
-> Meta's [SAM 3](https://huggingface.co/facebook/sam3) to locate the target
-> object, and SAM 3 is a **gated** model on the Hugging Face Hub. Accept its
-> license once, then authenticate so emboviz can download it:
+> **Memorization needs SAM 3 (gated).** The shipped configs run four
+> diagnostics by default — `[modality, sensitivity, attention, chunk]` — which
+> need no token. The **memorization** diagnostic is left out by default because
+> it uses Meta's [SAM 3](https://huggingface.co/facebook/sam3) to locate the
+> target object, and SAM 3 is a **gated** model on the Hugging Face Hub. To use
+> it, accept its license once, authenticate, then add `memorization` to your
+> config's `diagnostics:` list:
 >
 > ```bash
 > uv run hf auth login          # or: export HF_TOKEN=hf_xxx
 > ```
 >
-> Not ready for that? Drop `memorization` from your config's `diagnostics:`
-> list — everything else runs with no token:
->
 > ```yaml
 > analysis:
->   diagnostics: [modality, sensitivity, attention, chunk]
+>   diagnostics: [memorization, modality, sensitivity, attention, chunk]
 > ```
 
 > **π0 attention** needs a one-time PyTorch conversion of the checkpoint:
@@ -99,7 +113,7 @@ One run is one config file — model, dataset mapping, and analysis parameters i
 one place. Templates live in `configs/` (one per model on its canonical dataset).
 
 ```bash
-uv run emboviz analyze --config configs/openvla-bridge.yaml
+uv run emboviz analyze --config configs/openvla.yaml
 ```
 
 To analyze your own checkpoint and data, copy the closest template and edit it:
@@ -124,15 +138,20 @@ dataset:
 analysis:
   episodes: "537"                   # the episode to analyze
   frame_start: 0                    # first frame analyzed
-  n_frames: 4                       # frames per episode from frame_start; -1 = all (heavy)
-  frame_stride: 1                   # analyze every Nth frame
-  mask_query: "the cloth"           # object the memorization diagnostic masks (one phrase)
+  n_frames: -1                      # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                   # analyze every 5th frame
+
+  # memorization is omitted by default — it needs SAM 3 (see the gated-model
+  # note above). Add `memorization` once you've authenticated.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the cloth"           # the manipulated object to mask
   detector: sam3                    # sam3 | gd-sam
   # detector_score_threshold: 0.5   # optional; SAM 3's default. Lower to catch faint/small targets
   # detector_mask_threshold: 0.5    # optional; per-pixel mask cutoff (SAM 3's default). Lower = fuller object removal
   # memorization_require_cameras: primary  # primary (default) | all | [roles]; views that must show the target
   fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
-  diagnostics: all                  # or a list: [memorization, modality, sensitivity, attention, chunk]
 
 output: ./report/my-run
 ```

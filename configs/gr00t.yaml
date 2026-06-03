@@ -1,0 +1,67 @@
+# emboviz run config — NVIDIA GR00T-N1.7 (LIBERO fine-tune).
+#
+#   emboviz analyze --config configs/gr00t.yaml
+#
+# Uses the OFFICIAL LIBERO-finetuned checkpoint nvidia/GR00T-N1.7-LIBERO
+# (carries the LIBERO_PANDA embodiment head; the base GR00T-N1.7-3B does not).
+#
+# The GR00T-format dataset is a LeRobot v2.1 set + meta/modality.json. Prepare
+# it once, then point dataset.path at the local dir:
+#
+#   hf download --repo-type dataset \
+#     IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
+#     --local-dir ~/data/libero_spatial_no_noops_gr00t
+#   cp Isaac-GR00T/examples/LIBERO/modality.json \
+#     ~/data/libero_spatial_no_noops_gr00t/meta/
+
+model:
+  adapter: gr00t
+  kwargs:
+    model_path: nvidia/GR00T-N1.7-LIBERO          # <-- replace with YOUR checkpoint (HF repo id or local dir)
+    model_subfolder: libero_spatial               # this repo ships one checkpoint per suite in a subfolder
+    embodiment_tag: LIBERO_PANDA                  # state/action interpretation for LIBERO Panda
+    device: "cuda:0"
+    camera_mapping:                               # Scene camera role -> embodiment's declared video key
+      primary: image
+      wrist:   wrist_image
+
+dataset:
+  format: gr00t                                   # LeRobot v2.1 + meta/modality.json
+  path: ~/data/libero_spatial_no_noops_gr00t      # <-- replace with YOUR prepared local dir (needs meta/modality.json)
+
+  cameras:
+    primary: observation.images.image
+    wrist:   observation.images.wrist_image
+
+  state:
+    key: observation.state                        # [8]: eef pos(3) + axis-angle rot(3) + gripper(2)
+    convention: ee_pose
+
+  action:
+    key: action                                   # [7]: pos(3) + axis-angle(3) + gripper(1)
+
+  gripper:                                        # gripper INDEX comes from meta/modality.json;
+    kind: parallel_jaw                            # the config supplies only the physical kind/units/range
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"                                   # episode index to analyze
+  frame_start: 0
+  n_frames: -1                                    # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                                 # analyze every 5th frame
+
+  # memorization is omitted by default: it needs SAM 3, a GATED model that
+  # requires an HF token (`uv run hf auth login`). Add `memorization` to the
+  # list once your token is set.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the black bowl"                    # verify against ep0's actual instruction
+  detector: sam3                                  # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]            # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/gr00t

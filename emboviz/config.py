@@ -252,8 +252,8 @@ def _configs_dir() -> Path:
 
 def load_run_config(name_or_path: str) -> RunConfig:
     """Load + validate a RunConfig from a YAML file path OR a shipped
-    template name (e.g. ``"pi0-libero"`` resolves to
-    ``configs/pi0-libero.yaml``).
+    template name (e.g. ``"pi0"`` resolves to
+    ``configs/pi0.yaml``).
 
     Raises a clear error on unknown keys, bad enum values, or a missing
     file — never silently coerces.

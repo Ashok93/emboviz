@@ -26,7 +26,7 @@ LaMa workers. Its isolated runtime venv builds automatically on the first
 # Start the worker (stays warm between analyze runs):
 uv run emboviz-pi0 serve &
 
-uv run emboviz analyze --config configs/pi0-libero.yaml
+uv run emboviz analyze --config configs/pi0.yaml
 ```
 
 Copy the template and set `model.kwargs.checkpoint_uri` to your own fine-tune.

@@ -1,0 +1,54 @@
+# emboviz run config — OpenVLA-7B.
+#
+#   emboviz analyze --config configs/openvla.yaml
+#
+# Runs out of the box on OpenVLA-7B + BridgeData V2. To diagnose YOUR
+# fine-tune on YOUR data, replace model.kwargs.hf_repo and dataset.path
+# below, and fix the camera / state bindings to match your dataset.
+
+model:
+  adapter: openvla
+  kwargs:
+    hf_repo: openvla/openvla-7b          # <-- replace with YOUR checkpoint (HF repo id or local dir)
+    unnorm_key: bridge_orig              # action de-normalization stats key
+
+dataset:
+  format: lerobot
+  path: Jackie1/bridge_data_v2_convert_to_lerobot   # <-- replace with YOUR dataset (HF repo id or local dir)
+
+  cameras:                               # model camera role -> this dataset's image key
+    primary: observation.images.image    # OpenVLA uses a single exterior view
+
+  state:
+    key: observation.state
+    convention: ee_pose                  # joint_angles | ee_pose | ... (required; never guessed)
+
+  action:
+    key: action
+
+  gripper:                               # optional — omit to leave the gripper inside the state vector
+    source: 6
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+
+  instruction:
+    from: tasks
+
+analysis:
+  episodes: "0"                          # episode index to analyze
+  frame_start: 0
+  n_frames: -1                           # -1 = the whole episode; set a number to cap it
+  frame_stride: 5                        # analyze every 5th frame
+
+  # memorization is omitted by default: it needs SAM 3, a GATED model that
+  # requires an HF token (`uv run hf auth login`). Add `memorization` to the
+  # list once your token is set.
+  diagnostics: [modality, sensitivity, attention, chunk]
+
+  # Used only by the memorization diagnostic (when added above):
+  mask_query: "the spoon"                # the manipulated object to mask
+  detector: sam3                         # sam3 | gd-sam
+  fills: [channel_mean, gaussian_blur]   # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
+
+output: ./report/openvla

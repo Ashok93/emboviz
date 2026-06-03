@@ -24,7 +24,7 @@ LaMa workers. Its isolated runtime venv builds automatically on the first
 ## Use
 
 ```bash
-uv run emboviz analyze --config configs/oft-libero-spatial.yaml
+uv run emboviz analyze --config configs/oft.yaml
 ```
 
 Copy the template and set `model.kwargs.checkpoint` to your own fine-tune.
