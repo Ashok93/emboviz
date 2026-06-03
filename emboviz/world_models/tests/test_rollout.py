@@ -20,6 +20,7 @@ from emboviz_wire.world_model_protocol import WorldModel, WorldModelCapability
 
 from emboviz.world_models.rollout import (
     analyze_trust,
+    reanchored_rollout,
     rollout_episode,
     summarize,
     trust_report,
@@ -162,9 +163,49 @@ def test_analyze_trust_exposes_frames_and_renders() -> None:
     assert len(analysis.predicted.frames) == len(analysis.aligned_real.frames) == 7
     assert analysis.report["trust_horizon"] == 7
     out = Path(tempfile.mkdtemp())
-    n = save_frame_comparison(analysis.predicted, analysis.aligned_real, analysis.report, out)
+    n = save_frame_comparison(
+        analysis.predicted, analysis.aligned_real, analysis.report["divergence"], out,
+        camera=analysis.report["camera"], trust_band=analysis.report["trust_band"],
+    )
     pngs = sorted(out.glob("compare_*.png"))
     assert n == 7 and len(pngs) == 7
+
+
+# ── re-anchored (closed-loop) rollout ────────────────────────────────────────
+
+
+def test_reanchored_rollout_drops_tiny_tail_and_emits_segments() -> None:
+    # 12 frames -> 11 real actions. Re-anchor every 3, generate 8 per chunk.
+    # offsets 0,3,6 each leave >= min_chunk actions and keep 3 frames; the final
+    # offset 9 has only 2 actions left (< min_chunk=4) and is dropped, not sent.
+    segments: list[tuple[int, int, int]] = []
+
+    def on_segment(out_start, predicted, real_frames) -> None:
+        segments.append((out_start, len(predicted), len(real_frames)))
+
+    predicted, aligned_real = reanchored_rollout(
+        _MockColorWM(), _episode(12),
+        frame_start=0, n_actions=11, reanchor_every=3,
+        gen_chunk=8, min_chunk=4, on_segment=on_segment,
+    )
+    # 3 kept segments of 3 frames; the 2-frame tail at offset 9 is dropped.
+    assert [s[0] for s in segments] == [0, 3, 6]
+    assert all(n_pred == n_real == 3 for _, n_pred, n_real in segments)
+    assert len(predicted.frames) == len(aligned_real.frames) == 9
+    assert predicted.metadata["reanchor_every"] == 3
+
+
+def test_reanchored_rollout_reproduces_real_after_each_anchor() -> None:
+    # The mock renders 'action colour'; real-order actions reproduce the real
+    # future exactly, so a re-anchored rollout tracks reality with zero drift.
+    predicted, aligned_real = reanchored_rollout(
+        _MockColorWM(), _episode(12),
+        frame_start=0, n_actions=9, reanchor_every=3, gen_chunk=8, min_chunk=4,
+    )
+    for p, r in zip(predicted.frames, aligned_real.frames):
+        pi = np.asarray(p.observations.images["primary"].data)
+        ri = np.asarray(r.observations.images["primary"].data)
+        assert int(pi[0, 0, 0]) == int(ri[0, 0, 0])
 
 
 def _run_all() -> None:
@@ -174,6 +215,8 @@ def _run_all() -> None:
     test_trust_report_real_actions_fully_trusted()
     test_summarize_static_prior_is_refused()
     test_analyze_trust_exposes_frames_and_renders()
+    test_reanchored_rollout_drops_tiny_tail_and_emits_segments()
+    test_reanchored_rollout_reproduces_real_after_each_anchor()
     print("OK: all world-model rollout checks passed")
 
 

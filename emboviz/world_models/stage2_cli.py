@@ -12,7 +12,7 @@ Run (host side; needs the reader + world-model workers reachable)::
         --world-model cosmos3 \
         --server-url https://<podid>-8000.proxy.runpod.net \
         --domain droid_lerobot --action-dim 10 \
-        --n-actions 16 --out report/cosmos_trust
+        --n-actions 16 --out outputs/cosmos_trust
 
 The dataset (camera mapping, state/action keys, …) comes from the run config's
 ``dataset`` section — the same file the analyze CLI uses — so the episode is
@@ -50,7 +50,7 @@ def main() -> None:
     p.add_argument("--camera", default="primary")
     p.add_argument("--metric", default="pixel_l2", choices=["pixel_l2", "ssim"])
     p.add_argument("--conditioning-offset", type=int, default=1)
-    p.add_argument("--out", default="report/cosmos_trust")
+    p.add_argument("--out", default="outputs/cosmos_trust")
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
@@ -83,7 +83,9 @@ def main() -> None:
     (out / "trust_report.json").write_text(json.dumps(analysis.report, indent=2))
     save_trust_curve(analysis.report, out / "trust_curve.png")
     n_frames = save_frame_comparison(
-        analysis.predicted, analysis.aligned_real, analysis.report, out / "frames",
+        analysis.predicted, analysis.aligned_real, analysis.report["divergence"],
+        out / "frames", camera=analysis.report["camera"],
+        trust_band=analysis.report["trust_band"],
     )
 
     print("\n" + summarize(analysis.report))

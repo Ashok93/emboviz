@@ -30,7 +30,7 @@ real adapter unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -80,6 +80,91 @@ def rollout_episode(
     predicted = world_model.rollout(conditioning, actions)
     start = frame_start + conditioning_offset
     aligned_real = _subtrajectory(real, start, start + len(predicted.frames))
+    return predicted, aligned_real
+
+
+def reanchored_rollout(
+    world_model: WorldModel,
+    real: Trajectory,
+    *,
+    frame_start: int = 0,
+    n_actions: int,
+    reanchor_every: int,
+    gen_chunk: int = 16,
+    min_chunk: int = 4,
+    conditioning_offset: int = 1,
+    progress: Optional[Callable[[int, int], None]] = None,
+    on_segment: Optional[Callable[[int, list, list], None]] = None,
+) -> tuple[Trajectory, Trajectory]:
+    """Roll the real actions forward, re-anchoring to the REAL frame every
+    ``reanchor_every`` steps so prediction error never compounds past that
+    horizon (the closed-loop / re-anchoring scheme: predict K, snap back to the
+    real frame, predict K more, …).
+
+    Each segment conditions on the real frame at its start and generates a
+    ``gen_chunk``-frame chunk (the world model's stable granularity), of which
+    the first ``reanchor_every`` frames are kept before re-anchoring. Returns
+    ``(predicted, aligned_real)`` — the stitched re-anchored prediction and the
+    matching real frames, the same length, ready for :func:`compute_trust_curve`.
+
+    Cheap on the wire: actions are encoded once for the whole window, then sliced
+    per segment; only one conditioning frame + its actions cross per generation.
+
+    ``on_segment(out_start, predicted_frames, real_frames)`` is called after each
+    segment with its newly generated frames and their real counterparts, so a
+    caller can persist results incrementally (a long run must never buffer
+    everything and lose it on a late failure). A final remainder shorter than
+    ``min_chunk`` actions is skipped — the model collapses tiny chunks to no
+    generated frames — dropping at most ``reanchor_every - 1`` trailing frames.
+    """
+    if reanchor_every < 1:
+        raise ValueError(f"reanchor_every must be >= 1, got {reanchor_every}")
+    # One encode for the whole window (actions are framewise; slice per segment).
+    all_actions = np.asarray(
+        world_model.prepare_actions(real, frame_start=frame_start, n_actions=None),
+        dtype=np.float32,
+    )
+    if len(all_actions) < n_actions:
+        n_actions = len(all_actions)
+
+    cam = world_model.conditioning_camera
+    n_segments = -(-n_actions // reanchor_every)  # ceil
+    predicted_frames: list = []
+    offset = 0
+    seg_idx = 0
+    while offset < n_actions:
+        keep = min(reanchor_every, n_actions - offset)
+        chunk = all_actions[offset: offset + gen_chunk]
+        if len(chunk) < min_chunk:
+            # The world model's temporal compression collapses a tiny chunk (a
+            # 1-2 action chunk returns no generated frames), so a short final
+            # remainder is dropped rather than sent. At most reanchor_every-1
+            # trailing frames are skipped; nothing already produced is affected.
+            break
+        seg = world_model.rollout(real.frames[frame_start + offset], chunk)
+        kept = seg.frames[:keep]
+        out_start = len(predicted_frames)
+        predicted_frames.extend(kept)
+        seg_idx += 1
+        # Hand the new frames (+ their real counterparts) to the caller so it can
+        # persist them NOW — a long re-anchored run must never buffer everything
+        # and lose it all on a late failure.
+        if on_segment is not None:
+            lo = frame_start + conditioning_offset + out_start
+            on_segment(out_start, kept, real.frames[lo: lo + len(kept)])
+        if progress is not None:
+            progress(seg_idx, n_segments)
+        offset += keep
+
+    predicted = Trajectory(
+        frames=predicted_frames,
+        frame_indices=list(range(len(predicted_frames))),
+        fps=real.fps, episode_id="cosmos-reanchored",
+        source=f"reanchored:{getattr(world_model, 'model_id', 'wm')}",
+        metadata={"reanchor_every": reanchor_every, "camera": cam},
+    )
+    start = frame_start + conditioning_offset
+    aligned_real = _subtrajectory(real, start, start + len(predicted_frames))
     return predicted, aligned_real
 
 

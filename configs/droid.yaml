@@ -3,7 +3,7 @@
 #   uv run python -m emboviz.world_models.stage2_cli \
 #     --config configs/droid.yaml --episode 0 \
 #     --world-model cosmos3 --server-url https://<podid>-8000.proxy.runpod.net \
-#     --domain droid_lerobot --action-dim 10 --n-actions 16 --out report/cosmos_trust
+#     --domain droid_lerobot --action-dim 10 --n-actions 16 --out outputs/cosmos_trust
 #
 # Loads a real DROID episode with the clean lerobot reader (runs on the Mac, no
 # GPU). The Cosmos rollout + trust math then run against it. Keys are taken from
@@ -56,7 +56,7 @@ analysis:
   frame_stride: 1                           # consecutive frames — pose deltas need the native cadence
   diagnostics: [attention]                  # unused by the trust driver; a valid value is required
 
-output: ./report/cosmos_trust
+output: ./outputs/cosmos_trust
 
 # Runtime note (confirm on the first pod run, not a config field): Cosmos's DROID
 # view_point is `concat_view` (wrist + two exteriors stitched). The trust

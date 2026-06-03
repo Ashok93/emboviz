@@ -22,6 +22,7 @@ from emboviz.world_models.trust import (
 from emboviz.world_models.rollout import (
     TrustAnalysis,
     analyze_trust,
+    reanchored_rollout,
     rollout_episode,
     summarize,
     trust_report,
@@ -38,6 +39,7 @@ __all__ = [
     # rollout orchestration
     "TrustAnalysis",
     "analyze_trust",
+    "reanchored_rollout",
     "rollout_episode",
     "summarize",
     "trust_report",
