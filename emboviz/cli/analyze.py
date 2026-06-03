@@ -200,9 +200,24 @@ def analyze_cmd(config_ref: str, dry_run: bool, keep_warm: bool) -> None:
     # ``serve``-started worker is left alone). ``--keep-warm`` opts out.
     if not keep_warm:
         import atexit
+        import os
+        import signal
 
         from emboviz.adapters.lifecycle import teardown_spawned_workers
         atexit.register(teardown_spawned_workers)
+
+        # Ctrl-C must stop the run immediately. The default SIGINT path is
+        # unreliable here: the per-frame model call blocks in a C-level zmq
+        # poll that swallows the EINTR, so the KeyboardInterrupt never
+        # propagates to ``atexit``. Handle SIGINT explicitly — stop the
+        # workers, then hard-exit so nothing downstream can intercept or
+        # retry past it. A second Ctrl-C during teardown escalates to the
+        # force-kill handler that ``teardown_spawned_workers`` installs.
+        def _on_sigint(signum, frame):
+            teardown_spawned_workers()
+            os._exit(130)  # 128 + SIGINT
+
+        signal.signal(signal.SIGINT, _on_sigint)
 
     from emboviz._internal.multi_episode import (
         EpisodeReport,
