@@ -115,16 +115,24 @@ def make_gripper_extractor(
     they were trained on); the gripper value is pulled from the declared
     dim. ``gripper.source`` is an int index or a per-dim name resolved
     against ``state_names``. No gripper → ``(state, None)``.
+
+    A gripper declared by a SEPARATE feature key (``gripper.key``) is not
+    sliced from the state at all — the reader reads it from its own column —
+    so this extractor leaves the state whole and yields no gripper value.
     """
     if gripper is None:
         return lambda s: (s, None)
     src = gripper.get("source")
     if src is None:
+        if gripper.get("key"):
+            # Separate-feature gripper: the reader supplies it from its own
+            # column; the state vector is returned unsplit.
+            return lambda s: (s, None)
         raise ValueError(
-            "dataset.gripper is set but dataset.gripper.source is missing. "
-            "This reader needs the gripper's index (or per-dim name) within "
-            "the state vector. (Only the 'gr00t' reader derives it from "
-            "meta/modality.json; every other format requires gripper.source.)"
+            "dataset.gripper is set but neither dataset.gripper.source nor "
+            "dataset.gripper.key is given. Provide the gripper's index within "
+            "the state vector (`source`) OR a separate gripper feature key "
+            "(`key`). (Only the 'gr00t' reader derives it from meta/modality.json.)"
         )
     if isinstance(src, str):
         if not state_names or src not in state_names:

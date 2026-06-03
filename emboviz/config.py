@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Valid values mirror emboviz_wire's StateConvention / GripperKind /
 # GripperUnits literals. We re-declare them here (rather than import the
@@ -74,12 +74,17 @@ class ActionCfg(_Strict):
 
 
 class GripperCfg(_Strict):
-    # index (or per-dim name) of the gripper within the state vector.
-    # Optional: the ``gr00t`` reader derives it from the dataset's own
-    # meta/modality.json (its single source of truth), so a gr00t config
-    # omits it. The lerobot / hdf5 / rlds readers require it and raise
-    # clearly if it is absent.
+    # Where the gripper scalar comes from. Provide exactly one of:
+    #   • ``source`` — index (or per-dim name) of the gripper WITHIN the state
+    #     vector (datasets that pack the gripper into observation.state).
+    #   • ``key``    — a SEPARATE dataset feature key carrying the gripper on its
+    #     own (e.g. DROID's ``observation.state.gripper_position``), used when
+    #     the state vector declared by ``state.key`` does not contain it.
+    # Both omitted is valid only for the ``gr00t`` reader, which derives the
+    # gripper index from the dataset's own meta/modality.json. Every other
+    # reader requires one and raises clearly if neither is given.
     source: Optional[Union[int, str]] = None
+    key: Optional[str] = None
     kind: str = "parallel_jaw"
     units: str = "unit"
     range: tuple[float, float] = (0.0, 1.0)
@@ -97,6 +102,16 @@ class GripperCfg(_Strict):
         if v not in _GRIPPER_UNITS:
             raise ValueError(f"gripper.units={v!r} not in {sorted(_GRIPPER_UNITS)}")
         return v
+
+    @model_validator(mode="after")
+    def _check_source_xor_key(self) -> "GripperCfg":
+        if self.source is not None and self.key is not None:
+            raise ValueError(
+                "dataset.gripper: set EITHER `source` (the gripper's index within "
+                "the state vector) OR `key` (a separate gripper feature key), not "
+                "both — they are two different ways to locate the same scalar."
+            )
+        return self
 
 
 class InstructionCfg(_Strict):
