@@ -42,7 +42,7 @@ analysis:
   diagnostics: [attention]                   # unused by the dream driver; a valid value is required
 
   cosmos_stress:
-    server_url: https://749lbbtj73gntj-8000.proxy.runpod.net
+    server_url: https://364azkwn9mq2qx-8000.proxy.runpod.net
     domain: droid_lerobot
     action_dim: 10
     policy_adapter: pi0
@@ -51,9 +51,18 @@ analysis:
     robot: franka_panda                      # forward kinematics: joints -> panda_link8 pose
     camera_map: {primary: exterior_left, wrist_left: wrist}   # π0 roles -> concat regions
     concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
-    perturbations: []                        # baseline: unperturbed
-    n_loop_steps: 1                          # one π0 chunk for the first run (fast)
-    n_actions: 10                            # π0_droid action_horizon = 10 (its full chunk)
+    concat_resolution: [360, 640]            # wrist panel H×W -> 540×640 concat, the
+                                             # Cosmos DROID training scale (droid_plus_lerobot_640x360)
+    # First run: baseline (unperturbed). For the perturbed run, swap the object
+    # the policy must grasp — turn the marker into a spoon:
+    #   perturbations: ["replace the marker in the cup with a spoon"]
+    perturbations: []
+    # Short hops, more turns = a genuinely reactive closed loop: the policy
+    # re-plans every n_actions frames on a freshly dreamed frame, rather than
+    # committing to one big open-loop chunk. The world model is faithful for only
+    # a frame or two, so keep each hop short.
+    n_loop_steps: 5                          # closed-loop turns (policy re-plans each)
+    n_actions: 3                             # frames Cosmos dreams per turn (<= π0 horizon 10)
     lead_s: 0.5
     # reasoner_url omitted -> no verdict (this omni server returns images, not text)
 

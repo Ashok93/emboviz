@@ -54,6 +54,25 @@ def test_build_then_split_round_trips_geometry() -> None:
     assert regions["exterior_right"].shape == (6, 8, 3)
 
 
+def test_concat_wrist_size_sets_training_resolution() -> None:
+    from emboviz_cosmos3.concat_view import DROID_TRAIN_WRIST_HW
+
+    wrist = np.full((180, 320, 3), 100, np.uint8)     # our native DROID camera size
+    left = np.full((180, 320, 3), 50, np.uint8)
+    right = np.full((180, 320, 3), 200, np.uint8)
+
+    # wrist_size upscales to the Cosmos DROID training scale -> 540x640 concat.
+    concat = build_concat_view(wrist, left, right, wrist_size=DROID_TRAIN_WRIST_HW)
+    assert concat.shape == (540, 640, 3)              # 360 wrist + 180 bottom, width 640
+    regions = split_concat_view(concat)
+    assert regions["wrist"].shape == (360, 640, 3)
+    assert regions["exterior_left"].shape == (180, 320, 3)
+    assert regions["exterior_right"].shape == (180, 320, 3)
+
+    # Without wrist_size the concat stays at the cameras' native scale.
+    assert build_concat_view(wrist, left, right).shape == (270, 320, 3)
+
+
 def test_split_rejects_bad_shape() -> None:
     try:
         split_concat_view(np.zeros((10, 10), np.uint8))
@@ -172,6 +191,7 @@ def test_stepper_rejects_bad_region_and_missing_chunk() -> None:
 
 def _run_all() -> None:
     test_build_then_split_round_trips_geometry()
+    test_concat_wrist_size_sets_training_resolution()
     test_split_rejects_bad_shape()
     test_stepper_feeds_policy_and_advances_state()
     test_joint_stepper_tracks_joints_and_feeds_joint_state()

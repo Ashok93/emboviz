@@ -15,19 +15,37 @@ for an even wrist height, the resolutions Cosmos uses), and the bottom third hol
 The closed-loop stress test needs this because the world model dreams the stitched
 frame, but the policy under test consumes its individual cameras. This is a pure
 geometric split (numpy only) — no torch, no GPU.
+
+Resolution matters. Cosmos generates at the conditioning frame's pixel size, and
+the DROID world model was trained on ``droid_plus_lerobot_640x360`` — **640x360
+(W x H) per camera**, i.e. a ``360`` px-tall wrist giving a ``540 x 640`` concat.
+Feeding a smaller concat puts the model off-distribution and the dream blurs. The
+wrist sets the concat size (it is the top panel and the exteriors are scaled to
+``h_w//2``), so ``build_concat_view``'s ``wrist_size`` resizes the wrist to the
+training resolution; the exteriors then land at their trained ``(h_w//2, w_w//2)``
+bottom-tile size automatically.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
 ConcatRegion = Literal["wrist", "exterior_left", "exterior_right"]
 
+#: Wrist-panel size (H, W) the Cosmos DROID domain was trained on: the
+#: ``droid_plus_lerobot_640x360`` dataset is 640x360 (W x H) per camera, so the
+#: wrist is 360x640 and the resulting concat is 540x640. Pass as ``wrist_size``.
+DROID_TRAIN_WRIST_HW: tuple[int, int] = (360, 640)
+
 
 def build_concat_view(
-    wrist: np.ndarray, exterior_left: np.ndarray, exterior_right: np.ndarray
+    wrist: np.ndarray,
+    exterior_left: np.ndarray,
+    exterior_right: np.ndarray,
+    *,
+    wrist_size: Optional[tuple[int, int]] = None,
 ) -> np.ndarray:
     """Stitch three camera frames into a DROID ``concat_view``.
 
@@ -35,10 +53,21 @@ def build_concat_view(
     ``_load_concat_video``: the wrist frame sets the size ``(h_w, w_w)``; the two
     exteriors are bilinearly resized to ``(h_w//2, w_w//2)`` and placed side by
     side beneath it. Returns ``(h_w + h_w//2, w_w, 3)`` uint8 RGB.
+
+    ``wrist_size`` ``(H, W)`` resizes the wrist before stitching, which sets the
+    whole concat resolution to ``(H + H//2, W)`` — pass
+    :data:`DROID_TRAIN_WRIST_HW` to render at the world model's training scale.
+    ``None`` keeps the wrist's native size.
     """
     w = _as_rgb_u8(wrist, "wrist")
     left = _as_rgb_u8(exterior_left, "exterior_left")
     right = _as_rgb_u8(exterior_right, "exterior_right")
+
+    if wrist_size is not None:
+        th, tw = int(wrist_size[0]), int(wrist_size[1])
+        if th < 2 or tw < 2:
+            raise ValueError(f"wrist_size must be >= (2, 2) (H, W), got {wrist_size}.")
+        w = _resize(w, th, tw)
 
     h_w, w_w = int(w.shape[0]), int(w.shape[1])
     half_h, half_w = h_w // 2, w_w // 2
@@ -95,4 +124,4 @@ def split_concat_view(concat_image: np.ndarray) -> dict[ConcatRegion, np.ndarray
     }
 
 
-__all__ = ["ConcatRegion", "split_concat_view"]
+__all__ = ["ConcatRegion", "DROID_TRAIN_WRIST_HW", "build_concat_view", "split_concat_view"]

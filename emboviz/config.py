@@ -191,6 +191,11 @@ class CosmosStressCfg(_Strict):
     concat_cameras: dict[str, str] = Field(
         default_factory=lambda: {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"}
     )
+    # Wrist-panel size (H, W) the seed concat is built at — sets the world model's
+    # conditioning resolution. The Cosmos DROID domain trained on 640x360 (W x H)
+    # per camera (a 360 px wrist -> 540x640 concat); feeding less puts the model
+    # off-distribution and the dream blurs. None keeps the cameras' native size.
+    concat_resolution: Optional[tuple[int, int]] = None
     perturbations: list[str] = Field(default_factory=list)  # edit instructions; empty -> no perturbation
     n_loop_steps: int = 2                         # closed-loop turns (small — drifts after the first turn or two)
     n_actions: int = 16                           # rollout frames per turn (one Cosmos chunk)
@@ -238,6 +243,15 @@ class CosmosStressCfg(_Strict):
     def _check_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
+        return v
+
+    @field_validator("concat_resolution")
+    @classmethod
+    def _check_concat_resolution(cls, v: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
+        if v is not None and (len(v) != 2 or v[0] < 2 or v[1] < 2):
+            raise ValueError(
+                f"cosmos_stress.concat_resolution must be (H, W) with each >= 2, got {v}."
+            )
         return v
 
     @model_validator(mode="after")

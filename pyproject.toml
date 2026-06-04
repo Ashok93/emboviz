@@ -44,6 +44,11 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "Pillow>=10.0",
+    # World-model viz (emboviz/world_models/viz.py) encodes/decodes MP4 in the
+    # host process — the dream/stress CLIs save dream videos here, not in a
+    # worker. PyAV carries the bundled ffmpeg libraries imageio's writer uses.
+    "imageio>=2.34",
+    "av>=12",
     "tqdm>=4.66",
     "click>=8.1",
     "pydantic>=2.7",

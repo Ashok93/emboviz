@@ -60,14 +60,17 @@ def closed_loop_rollout(
     *,
     n_steps: int,
     conditioning_camera: str = "primary",
+    instruction: Optional[str] = None,
     on_step: Optional[Callable[[int, Trajectory], None]] = None,
 ) -> DreamRollout:
     """Run the policy ⇄ world-model loop for ``n_steps`` turns from ``seed_image``.
 
     ``seed_image`` is the conditioning frame for the world model (e.g. a DROID
-    ``concat_view``), already perturbed. Returns a :class:`DreamRollout`. Raises if
-    ``step_fn`` yields no usable actions or the world model returns no frames —
-    never silently truncates the loop.
+    ``concat_view``), already perturbed. ``instruction`` is the task text the world
+    model conditions on each turn — required by language-conditioned world models
+    (Cosmos rejects an empty prompt), so pass the seed episode's instruction.
+    Returns a :class:`DreamRollout`. Raises if ``step_fn`` yields no usable actions
+    or the world model returns no frames — never silently truncates the loop.
     """
     seed = np.asarray(seed_image, dtype=np.uint8)
     if seed.ndim != 3 or seed.shape[-1] != 3:
@@ -89,7 +92,8 @@ def closed_loop_rollout(
         scene = Scene(
             observations=Observations(
                 images={conditioning_camera: RGBImage(data=image, camera_id=conditioning_camera)}
-            )
+            ),
+            instruction=instruction,
         )
         predicted = world_model.rollout(scene, actions)
         if not predicted.frames:

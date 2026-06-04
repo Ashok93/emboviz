@@ -120,6 +120,7 @@ def main() -> None:
             _img(frame, cs.concat_cameras["wrist"]),
             _img(frame, cs.concat_cameras["exterior_left"]),
             _img(frame, cs.concat_cameras["exterior_right"]),
+            wrist_size=cs.concat_resolution,
         )
 
     def stepper_for(seed_index: int) -> PolicyDreamStepper:
@@ -178,6 +179,7 @@ def main() -> None:
             dream = closed_loop_rollout(
                 wm, seed, stepper_for(seed_index),
                 n_steps=cs.n_loop_steps, conditioning_camera=cs.conditioning_camera,
+                instruction=real.frames[seed_index].instruction,
                 on_step=on_step,
             )
 
