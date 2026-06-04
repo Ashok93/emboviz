@@ -49,6 +49,44 @@ def _scene_image(scene, camera: str) -> np.ndarray:
     return np.asarray(scene.observations.images[camera].data, dtype=np.uint8)
 
 
+def frames_to_arrays(traj_or_list, camera: str) -> list[np.ndarray]:
+    """Extract per-frame ``(H, W, 3)`` uint8 arrays for ``camera`` from a
+    Trajectory or Scene list."""
+    return [_scene_image(s, camera) for s in _frames_of(traj_or_list)]
+
+
+def save_video(frames: list[np.ndarray], path: Path, *, fps: float = 10.0) -> int:
+    """Write ``frames`` (each ``(H, W, 3)`` uint8 RGB) to an MP4 at ``path``.
+
+    Returns the number of frames written. Requires uniform frame shape across the
+    list (a world model that rescales mid-rollout is a real inconsistency, raised
+    rather than silently letterboxed). Odd height/width are trimmed by one pixel
+    so the H.264 ``yuv420p`` encoder (which needs even dimensions) accepts them.
+    """
+    import imageio.v3 as iio
+
+    arrs = [np.ascontiguousarray(np.asarray(f, dtype=np.uint8)) for f in frames]
+    if not arrs:
+        raise ValueError("save_video: no frames to write.")
+    shapes = {a.shape for a in arrs}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"save_video: frames have differing shapes {sorted(shapes)}; cannot encode one video."
+        )
+    h, w = arrs[0].shape[:2]
+    h2, w2 = h - (h % 2), w - (w % 2)
+    if (h2, w2) != (h, w):
+        arrs = [a[:h2, :w2] for a in arrs]
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(
+        path, np.stack(arrs), plugin="pyav", codec="libx264",
+        fps=int(round(max(1.0, fps))), out_pixel_format="yuv420p",
+    )
+    return len(arrs)
+
+
 def _resize_to_height(img: np.ndarray, height: int):
     from PIL import Image
 
@@ -88,25 +126,30 @@ def save_frame_comparison(
 
     gap, bar = 8, 22
     for i in range(n):
-        left = _resize_to_height(_scene_image(pf[i], camera), panel_height)
-        right = _resize_to_height(_scene_image(rf[i], camera), panel_height)
+        # Left = real episode (the reference), right = predicted (Cosmos).
+        left = _resize_to_height(_scene_image(rf[i], camera), panel_height)
+        right = _resize_to_height(_scene_image(pf[i], camera), panel_height)
         w = left.width + gap + right.width
         canvas = Image.new("RGB", (w, panel_height + bar), (16, 16, 16))
         canvas.paste(left, (0, bar))
         canvas.paste(right, (left.width + gap, bar))
 
         div = float(divergences[i])
-        trusted = trust_band is not None and div <= trust_band
         d = ImageDraw.Draw(canvas)
-        d.text((4, 4), "predicted (Cosmos)", fill=(180, 180, 180))
-        d.text((left.width + gap + 4, 4), "real episode", fill=(180, 180, 180))
-        band_txt = f" (band {trust_band:.3f})" if trust_band is not None else ""
-        verdict = "TRUSTED" if trusted else "DRIFT"
-        color = (90, 200, 120) if trusted else (220, 90, 90)
-        d.text(
-            (w - 230, 4),
-            f"frame {start_index + i}  div={div:.3f}{band_txt}  {verdict}",
-            fill=color,
-        )
+        d.text((4, 4), "real episode", fill=(180, 180, 180))
+        d.text((left.width + gap + 4, 4), "predicted (Cosmos)", fill=(180, 180, 180))
+        # The TRUSTED/DRIFT verdict is only meaningful against a calibrated band
+        # (the recorded-action faithfulness path). Without one, just report the
+        # divergence — no fabricated verdict.
+        if trust_band is not None:
+            trusted = div <= trust_band
+            label = f"frame {start_index + i}  div={div:.3f} (band {trust_band:.3f})  " + (
+                "TRUSTED" if trusted else "DRIFT"
+            )
+            color = (90, 200, 120) if trusted else (220, 90, 90)
+        else:
+            label = f"frame {start_index + i}  div={div:.3f}"
+            color = (200, 200, 200)
+        d.text((w - 260, 4), label, fill=color)
         canvas.save(out_dir / f"compare_{start_index + i:03d}.png")
     return n

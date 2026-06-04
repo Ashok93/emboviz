@@ -70,3 +70,48 @@ world model.
 - `--lead-s` seconds before each keyframe to seed (default 0.5 — the pre-grasp
   approach, where a perturbation actually changes what the policy should do).
 - `--metric pixel_l2 | ssim` divergence metric.
+
+---
+
+# 3. The closed-loop simulator — run the policy *inside* Cosmos (the product)
+
+This is the real thing: at each keyframe, **perturb** the seed scene with an
+editing instruction, then **fly the user's policy inside Cosmos** step by step
+(policy acts → Cosmos renders → policy reacts → …) and ask the reasoner what
+happened. The simulator is Cosmos; the policy is under test. Output is the dream
+video + a verdict — **no divergence** (a perturbed scene never happened, so there
+is nothing real to compare against).
+
+Everything is config-driven via `analysis.cosmos_stress` (see `configs/droid.yaml`):
+set `server_url`, `policy_adapter`, `action_convention`, `camera_map`, the
+`perturbations` list, and (optionally) `reasoner_url`. Then:
+
+```bash
+uv run emboviz stop
+uv run python -m emboviz.world_models.dream_cli \
+    --config configs/droid.yaml --episode 0 \
+    --out outputs/cosmos_dream
+```
+
+Output per clip — `outputs/cosmos_dream/clip_<frame>_<kind>__<perturbation>/`:
+- `seed.png`      — the perturbed conditioning frame (cup→duck etc.),
+- `step_NN.mp4`   — each closed-loop turn, saved incrementally,
+- `dream.mp4`     — the full dream (the shareable clip),
+- `verdict.json`  — Cosmos Reason's answer ("grasped / missed and how"),
+plus a top-level `summary.json`.
+
+### Two confirm-on-server items (only the live pod settles these)
+1. **The image-edit endpoint.** The edit call is isolated in
+   `emboviz_cosmos3/perturb.py` behind `endpoint_path` (default the documented
+   vLLM-Omni image-edit chat endpoint). If Cosmos 3 registers `image2image`
+   elsewhere, it's a one-line change — confirm with `curl {server}/v1/models`.
+2. **The policy's `action_convention`.** The bridge math is verified
+   (`absolute_xyz_euler` reproduces the gold encoder bit-for-bit), but *which*
+   convention a checkpoint emits (`absolute_xyz_euler` vs `delta_xyz_euler_base`)
+   is confirmed against the real policy. If the dream looks like the arm flies
+   off immediately, the convention is wrong — flip it in the config.
+
+### Honest limit
+The dream drifts after the first turn or two (each turn builds on the last dream),
+so keep `n_loop_steps` at 2–3. It's strongest in the first ~second around the
+grasp — which is exactly where the failure shows.

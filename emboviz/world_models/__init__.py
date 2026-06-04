@@ -33,12 +33,21 @@ from emboviz.world_models.keyframes import (
     critical_windows,
     detect_keyframes,
 )
+from emboviz.world_models.simulate import (
+    DreamRollout,
+    closed_loop_rollout,
+)
 from emboviz.world_models.stress import (
     StressClip,
     recorded_action_source,
     stress_test,
 )
-from emboviz.world_models.viz import save_frame_comparison, save_trust_curve
+from emboviz.world_models.viz import (
+    frames_to_arrays,
+    save_frame_comparison,
+    save_trust_curve,
+    save_video,
+)
 
 __all__ = [
     # trust
@@ -62,7 +71,12 @@ __all__ = [
     "detect_keyframes",
     "recorded_action_source",
     "stress_test",
+    # closed-loop simulator
+    "DreamRollout",
+    "closed_loop_rollout",
     # rendering
+    "frames_to_arrays",
     "save_frame_comparison",
     "save_trust_curve",
+    "save_video",
 ]

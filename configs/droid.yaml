@@ -56,6 +56,30 @@ analysis:
   frame_stride: 1                           # consecutive frames — pose deltas need the native cadence
   diagnostics: [attention]                  # unused by the trust driver; a valid value is required
 
+  # Critical-moment closed-loop stress test — the Cosmos simulator.
+  # Driven by:  uv run python -m emboviz.world_models.dream_cli --config configs/droid.yaml
+  # Finds the episode's keyframes, perturbs each seed frame, then flies the
+  # policy inside Cosmos and asks the reasoner what happened.
+  cosmos_stress:
+    server_url: https://<podid>-8000.proxy.runpod.net   # vLLM-Omni Cosmos server (forward dynamics + edit)
+    domain: droid_lerobot
+    action_dim: 10
+    policy_adapter: pi0                       # the policy under test
+    action_convention: delta_xyz_euler_base   # how the policy's action chunk is read — CONFIRM vs the checkpoint
+    camera_map:                               # policy camera role -> concat-view region
+      primary: exterior_left
+      wrist: wrist
+    # concat_cameras maps each concat region to the episode camera role used to
+    # build the stitched seed (defaults shown; matches this config's `cameras`).
+    concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
+    perturbations:                            # one clip per instruction; empty -> unperturbed control
+      - "rotate the cup 90 degrees so the handle faces away from the gripper"
+      - "replace the cup with a rubber duck"
+    n_loop_steps: 2                           # closed-loop turns (the dream drifts after the first turn or two)
+    n_actions: 16                             # frames per turn (one Cosmos chunk)
+    lead_s: 0.5                               # seconds before each keyframe to seed
+    reasoner_url: https://<podid>-8000.proxy.runpod.net   # Cosmos Reason server for the verdict; omit to skip
+
 output: ./outputs/cosmos_trust
 
 # Runtime note (confirm on the first pod run, not a config field): Cosmos's DROID

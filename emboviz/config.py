@@ -151,6 +151,97 @@ class DatasetCfg(_Strict):
         return v
 
 
+_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
+_CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
+
+
+class CosmosStressCfg(_Strict):
+    """Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+
+    Find the episode's decisive instants, optionally perturb each seed frame
+    ("rotate the cup 90 degrees", "replace the cup with a rubber duck"), then run
+    the user's policy inside Cosmos step by step and judge the outcome with the
+    reasoner. With no ``policy_adapter`` the loop is driven by the episode's own
+    recorded actions (the faithfulness baseline).
+    """
+
+    server_url: str                               # vLLM-Omni Cosmos server (forward dynamics + edit)
+    domain: str = "droid_lerobot"
+    action_dim: int = 10
+    # Policy under test. None -> recorded-action faithfulness baseline (no policy).
+    policy_adapter: Optional[str] = None
+    action_convention: Optional[str] = None       # required when policy_adapter is set
+    # policy camera role -> concat region (e.g. {"primary": "exterior_left", "wrist": "wrist"})
+    camera_map: dict[str, str] = Field(default_factory=dict)
+    # concat region -> the episode's camera role used to build the stitched seed
+    concat_cameras: dict[str, str] = Field(
+        default_factory=lambda: {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"}
+    )
+    perturbations: list[str] = Field(default_factory=list)  # edit instructions; empty -> no perturbation
+    n_loop_steps: int = 2                         # closed-loop turns (small — drifts after the first turn or two)
+    n_actions: int = 16                           # rollout frames per turn (one Cosmos chunk)
+    lead_s: float = 0.5                           # seconds before each keyframe to seed
+    conditioning_camera: str = "primary"
+    state_convention: str = "ee_pose"
+    reasoner_url: Optional[str] = None            # reasoner server; None -> no verdict
+    reasoner_question: str = (
+        "Did the robot successfully grasp and lift the target object? "
+        "Answer in one sentence, and if it failed, say exactly how."
+    )
+
+    @field_validator("action_convention")
+    @classmethod
+    def _check_convention(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _ACTION_CONVENTIONS:
+            raise ValueError(
+                f"cosmos_stress.action_convention={v!r} not in {sorted(_ACTION_CONVENTIONS)}."
+            )
+        return v
+
+    @field_validator("camera_map")
+    @classmethod
+    def _check_camera_map(cls, v: dict[str, str]) -> dict[str, str]:
+        bad = {r for r in v.values() if r not in _CONCAT_REGIONS}
+        if bad:
+            raise ValueError(
+                f"cosmos_stress.camera_map regions {sorted(bad)} invalid; "
+                f"valid regions: {sorted(_CONCAT_REGIONS)}."
+            )
+        return v
+
+    @field_validator("concat_cameras")
+    @classmethod
+    def _check_concat_cameras(cls, v: dict[str, str]) -> dict[str, str]:
+        if set(v) != _CONCAT_REGIONS:
+            raise ValueError(
+                f"cosmos_stress.concat_cameras must map exactly {sorted(_CONCAT_REGIONS)} "
+                f"to episode camera roles; got keys {sorted(v)}."
+            )
+        return v
+
+    @field_validator("n_loop_steps", "n_actions")
+    @classmethod
+    def _check_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
+        return v
+
+    @model_validator(mode="after")
+    def _check_policy_requirements(self) -> "CosmosStressCfg":
+        if self.policy_adapter is not None:
+            if self.action_convention is None:
+                raise ValueError(
+                    "cosmos_stress.policy_adapter is set, so action_convention is required "
+                    f"(one of {sorted(_ACTION_CONVENTIONS)})."
+                )
+            if not self.camera_map:
+                raise ValueError(
+                    "cosmos_stress.policy_adapter is set, so camera_map is required "
+                    "(policy camera role -> concat region)."
+                )
+        return self
+
+
 class AnalysisCfg(_Strict):
     episodes: str = "0"                           # "7" / "0,3,7" / "0-5" / "all"
     frame_start: int = 0
@@ -184,6 +275,9 @@ class AnalysisCfg(_Strict):
     modality_pool_seed: int = 0
     modality_pool_cache_dir: Optional[str] = None # optional on-disk cache for the SHAP-marginal pool
     show_imitation: bool = False
+    # Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+    # Optional; only consumed by the stress driver, not the standard diagnostics.
+    cosmos_stress: Optional[CosmosStressCfg] = None
 
     @field_validator("detector")
     @classmethod
