@@ -151,7 +151,12 @@ class DatasetCfg(_Strict):
         return v
 
 
-_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
+# Cartesian conventions track an end-effector pose; joint conventions track a
+# joint vector and forward-kinematics it (so they require a robot). Kept in sync
+# with emboviz_cosmos3.bridge — core does not import the adapter.
+_CARTESIAN_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
+_JOINT_ACTION_CONVENTIONS = {"droid_joint_delta"}
+_ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
 _CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
 
 
@@ -170,7 +175,16 @@ class CosmosStressCfg(_Strict):
     action_dim: int = 10
     # Policy under test. None -> recorded-action faithfulness baseline (no policy).
     policy_adapter: Optional[str] = None
+    policy_kwargs: dict[str, Any] = Field(default_factory=dict)  # adapter constructor kwargs (e.g. {config_name: pi0_droid})
     action_convention: Optional[str] = None       # required when policy_adapter is set
+    # Robot for joint-space action conventions (forward kinematics: joints -> EE
+    # pose). Give EITHER a preconfigured catalog name (``robot: franka_panda``) OR
+    # a custom URDF triple (``robot_urdf`` + ``robot_ee_frame`` + ``robot_joint_names``).
+    # Required for joint conventions, forbidden for cartesian ones.
+    robot: Optional[str] = None
+    robot_urdf: Optional[str] = None
+    robot_ee_frame: Optional[str] = None
+    robot_joint_names: Optional[list[str]] = None
     # policy camera role -> concat region (e.g. {"primary": "exterior_left", "wrist": "wrist"})
     camera_map: dict[str, str] = Field(default_factory=dict)
     # concat region -> the episode's camera role used to build the stitched seed
@@ -239,7 +253,42 @@ class CosmosStressCfg(_Strict):
                     "cosmos_stress.policy_adapter is set, so camera_map is required "
                     "(policy camera role -> concat region)."
                 )
+        self._check_robot()
         return self
+
+    def _check_robot(self) -> None:
+        has_custom = any(
+            x is not None for x in (self.robot_urdf, self.robot_ee_frame, self.robot_joint_names)
+        )
+        is_joint = self.action_convention in _JOINT_ACTION_CONVENTIONS
+
+        if is_joint:
+            if self.robot is None and not has_custom:
+                raise ValueError(
+                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    "joint-space, so a robot is required for forward kinematics. Set "
+                    "`robot` (a preconfigured name, e.g. franka_panda) or the custom "
+                    "triple robot_urdf + robot_ee_frame + robot_joint_names."
+                )
+            if self.robot is not None and has_custom:
+                raise ValueError(
+                    "cosmos_stress: set EITHER `robot` (preconfigured) OR the custom "
+                    "robot_urdf/robot_ee_frame/robot_joint_names triple, not both."
+                )
+            if has_custom and not (
+                self.robot_urdf and self.robot_ee_frame and self.robot_joint_names
+            ):
+                raise ValueError(
+                    "cosmos_stress: a custom robot needs all of robot_urdf, "
+                    "robot_ee_frame, and robot_joint_names."
+                )
+        else:
+            if self.robot is not None or has_custom:
+                raise ValueError(
+                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    "cartesian and tracks the end-effector pose directly; remove the "
+                    "robot / robot_urdf settings (they apply only to joint conventions)."
+                )
 
 
 class AnalysisCfg(_Strict):

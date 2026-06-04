@@ -109,6 +109,13 @@ smolvla = ["emboviz-smolvla>=0.3"]
 # server — the worker shim here is a GPU-free HTTP client.
 cosmos3 = ["emboviz-cosmos3>=0.1"]
 
+# ────────── Robot kinematics ──────────
+# Robot-agnostic forward kinematics (joints -> end-effector pose), Pinocchio-
+# backed. Runs in-process in the driver (no isolated worker, no torch conflict).
+# Needed to fly a joint-space policy (π0-DROID) inside a Cartesian-conditioned
+# world model: install alongside cosmos3 for the closed-loop DROID stress test.
+robot = ["emboviz-robot>=0.1"]
+
 all = [
     "emboviz-openvla>=0.3",
     "emboviz-oft>=0.3",
@@ -117,6 +124,7 @@ all = [
     "emboviz-act>=0.3",
     "emboviz-smolvla>=0.3",
     "emboviz-cosmos3>=0.1",
+    "emboviz-robot>=0.1",
 ]
 
 # ────────── Optional heavy dataset family ──────────
@@ -173,6 +181,7 @@ emboviz-gr00t        = { path = "adapters/emboviz-gr00t",        editable = true
 emboviz-act          = { path = "adapters/emboviz-act",          editable = true }
 emboviz-smolvla      = { path = "adapters/emboviz-smolvla",      editable = true }
 emboviz-cosmos3      = { path = "adapters/emboviz-cosmos3",      editable = true }
+emboviz-robot        = { path = "adapters/emboviz-robot",        editable = true }
 
 [build-system]
 requires = ["hatchling"]

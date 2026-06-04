@@ -1,0 +1,60 @@
+# π0-DROID flown inside Cosmos — the closed-loop stress test on DROID episode 312
+# ("Pick the marker from the cup and put it on the table").
+#
+# π0-DROID is joint-space: it reads observation/joint_position (7) and emits joint
+# deltas + an absolute gripper (action_horizon = 10). The bridge tracks the joint
+# vector, forward-kinematics it to the panda_link8 pose (robot: franka_panda), and
+# encodes that as Cosmos droid_lerobot conditioning.
+#
+#   uv sync --extra cosmos3 --extra robot
+#   uv run python -m emboviz.world_models.dream_cli --config configs/droid_pi0.yaml --episode 312
+
+model:
+  adapter: mock                              # the dream driver doesn't run this; a valid value is required
+
+dataset:
+  format: lerobot
+  path: DAVIAN-Robotics/droid_v3
+  cameras:
+    primary: observation.images.exterior_1_left
+    exterior_2: observation.images.exterior_2_left
+    wrist: observation.images.wrist_left
+  state:
+    key: observation.state.joint_position       # 7 Franka joint angles (radians) — π0's state
+    convention: joint_angles
+  action:
+    key: action.original
+  gripper:
+    key: observation.state.gripper_position     # proprioceptive gripper, [0,1] (0=open)
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+  instruction:
+    from: tasks
+  extra:
+    revision: main                           # droid_v3 has no version tag
+
+analysis:
+  episodes: "312"
+  frame_start: 0
+  n_frames: -1
+  frame_stride: 1
+  diagnostics: [attention]                   # unused by the dream driver; a valid value is required
+
+  cosmos_stress:
+    server_url: https://749lbbtj73gntj-8000.proxy.runpod.net
+    domain: droid_lerobot
+    action_dim: 10
+    policy_adapter: pi0
+    policy_kwargs: {config_name: pi0_droid}
+    action_convention: droid_joint_delta     # π0-DROID: [joint_delta(7), gripper(1)]
+    robot: franka_panda                      # forward kinematics: joints -> panda_link8 pose
+    camera_map: {primary: exterior_left, wrist_left: wrist}   # π0 roles -> concat regions
+    concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
+    perturbations: []                        # baseline: unperturbed
+    n_loop_steps: 1                          # one π0 chunk for the first run (fast)
+    n_actions: 10                            # π0_droid action_horizon = 10 (its full chunk)
+    lead_s: 0.5
+    # reasoner_url omitted -> no verdict (this omni server returns images, not text)
+
+output: ./outputs/cosmos_dream_312

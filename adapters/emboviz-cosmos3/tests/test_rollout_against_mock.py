@@ -238,6 +238,66 @@ def test_worldmodel_handler_roundtrip() -> None:
         assert traj.metadata["world_model"] == "cosmos3-nano"
 
 
+def test_closed_loop_joint_dream_end_to_end() -> None:
+    """The whole π0-DROID closed loop offline: real Franka forward kinematics +
+    a mock joint-space policy + the mock Cosmos server. Exercises every link the
+    real run uses except the GPU policy and the GPU world model — concat split,
+    joint tracking, FK, droid_lerobot encoding, the autoregressive request, and
+    Trajectory assembly.
+    """
+    from emboviz_robot import load_kinematics
+    from emboviz_wire.types import ActionResult, Scene
+
+    from emboviz.world_models.simulate import closed_loop_rollout
+    from emboviz_cosmos3.bridge import JointStateTracker
+    from emboviz_cosmos3.concat_view import build_concat_view
+    from emboviz_cosmos3.dream_step import PolicyDreamStepper
+
+    kin = load_kinematics("franka_panda")
+    seed_joints = np.array([0.09, -0.28, 0.24, -2.08, -0.16, 1.57, -0.01], dtype=np.float32)
+
+    seen = {}
+
+    def mock_pi0(scene: Scene) -> ActionResult:
+        seen["state_dim"] = int(np.asarray(scene.observations.state.values).size)
+        seen["convention"] = scene.observations.state.convention
+        seen["instruction"] = scene.instruction
+        seen["cameras"] = sorted(scene.observations.images)
+        chunk = np.zeros((10, 8), dtype=np.float32)   # [joint_delta(7), gripper(1)]
+        chunk[:, 1] = 0.005                            # small +joint1 each step
+        chunk[:, 7] = 0.4                              # absolute gripper
+        return ActionResult(action=chunk[0], action_chunk=chunk)
+
+    stepper = PolicyDreamStepper(
+        mock_pi0,
+        tracker=JointStateTracker(seed_joints, 0.0, kin),
+        camera_map={"primary": "exterior_left", "wrist_left": "wrist"},
+        instruction="pick the marker from the cup",
+        n_actions=10,
+    )
+
+    seed_concat = build_concat_view(
+        np.zeros((12, 16, 3), np.uint8),
+        np.full((8, 10, 3), 60, np.uint8),
+        np.full((8, 10, 3), 180, np.uint8),
+    )
+
+    with _MockCosmos() as mock:
+        model = Cosmos3WorldModel(
+            server_url=f"http://127.0.0.1:{mock.port}",
+            domain_name="droid_lerobot", action_dim=10, action_chunk_size=16,
+        )
+        dream = closed_loop_rollout(model, seed_concat, stepper, n_steps=1)
+
+    assert len(dream.trajectory.frames) == 10          # 10 actions -> 10 dream frames
+    assert mock.requested_chunk_sizes == [10]          # one chunk of the full π0 horizon
+    assert seen["state_dim"] == 7 and seen["convention"] == "joint_angles"
+    assert seen["cameras"] == ["primary", "wrist_left"]
+    assert seen["instruction"] == "pick the marker from the cup"
+    # The tracked joint vector advanced by +0.005 * 10 on joint1.
+    assert np.isclose(stepper.tracker.joints[1], seed_joints[1] + 0.05, atol=1e-4)
+
+
 def _run_all() -> None:
     test_rollout_shapes_and_chunking()
     test_num_frames_truncates_actions()
@@ -245,6 +305,7 @@ def _run_all() -> None:
     test_validate_rejects_wrong_action_dim()
     test_missing_conditioning_camera_rejected()
     test_worldmodel_handler_roundtrip()
+    test_closed_loop_joint_dream_end_to_end()
     print("OK: all cosmos3 rollout-against-mock checks passed")
 
 

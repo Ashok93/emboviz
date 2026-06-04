@@ -84,6 +84,8 @@ def main() -> None:
 
     # Adapter-side pieces (Cosmos-specific) — lazily imported on this driver path.
     from emboviz.adapters import connect
+    from emboviz.config import _JOINT_ACTION_CONVENTIONS
+    from emboviz_cosmos3.bridge import make_state_tracker
     from emboviz_cosmos3.concat_view import build_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
     from emboviz_cosmos3.perturb import CosmosImageEditor
@@ -94,8 +96,23 @@ def main() -> None:
         from emboviz_cosmos3.reason import CosmosReasoner
         reasoner = CosmosReasoner(cs.reasoner_url)
 
-    print(f"[dream] connecting policy '{cs.policy_adapter}' ...")
-    policy = connect(cs.policy_adapter)
+    print(f"[dream] connecting policy '{cs.policy_adapter}' (kwargs: {cs.policy_kwargs or '{}'}) ...")
+    policy = connect(cs.policy_adapter, actor_kwargs=cs.policy_kwargs or None)
+
+    # Joint-space conventions need forward kinematics (joints -> EE pose); build
+    # the robot once. Cartesian conventions track the pose directly (kinematics
+    # stays None). emboviz-robot is imported only on this branch.
+    kinematics = None
+    if cs.action_convention in _JOINT_ACTION_CONVENTIONS:
+        from emboviz_robot import load_kinematics
+        if cs.robot is not None:
+            print(f"[dream] forward kinematics: preconfigured robot '{cs.robot}'")
+            kinematics = load_kinematics(cs.robot)
+        else:
+            print(f"[dream] forward kinematics: custom URDF {cs.robot_urdf}")
+            kinematics = load_kinematics(
+                urdf=cs.robot_urdf, ee_frame=cs.robot_ee_frame, joint_names=cs.robot_joint_names
+            )
 
     def seed_concat(seed_index: int) -> np.ndarray:
         frame = real.frames[seed_index]
@@ -110,16 +127,23 @@ def main() -> None:
         if frame.observations.state is None or frame.observations.gripper is None:
             raise SystemExit(
                 f"seed frame {seed_index} lacks state/gripper needed to anchor the "
-                "policy's actions. Map cartesian state + gripper in the config."
+                "policy's actions. Map the policy's state (joint_position for a "
+                "joint convention, cartesian_position for a cartesian one) + gripper "
+                "in the config."
             )
+        tracker = make_state_tracker(
+            np.asarray(frame.observations.state.values, dtype=np.float32),
+            float(frame.observations.gripper.value),
+            action_convention=cs.action_convention,
+            state_convention=cs.state_convention,
+            kinematics=kinematics,
+        )
         return PolicyDreamStepper(
             policy.client.predict,
-            action_convention=cs.action_convention,
+            tracker=tracker,
             camera_map=cs.camera_map,
-            seed_state=np.asarray(frame.observations.state.values, dtype=np.float32),
-            seed_gripper=float(frame.observations.gripper.value),
+            instruction=frame.instruction,
             n_actions=cs.n_actions,
-            state_convention=cs.state_convention,
         )
 
     instructions = list(cs.perturbations) if cs.perturbations else [None]
