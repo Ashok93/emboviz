@@ -107,6 +107,36 @@ def _gripper(episode: Trajectory, idx: int) -> float:
     return float(gripper.value)
 
 
+def encode_droid_states(state_xyz_euler: np.ndarray, gripper: np.ndarray) -> np.ndarray:
+    """Encode a cartesian-state sequence into Cosmos ``droid_lerobot`` actions.
+
+    ``state_xyz_euler`` is ``(T+1, 6)`` end-effector poses ``[x, y, z, roll, pitch,
+    yaw]`` (the DROID ``cartesian_position`` convention); ``gripper`` is ``(T,)``
+    in ``[0, 1]`` aligned with the first ``T`` states. Returns ``(T, 10)`` actions
+    ``[pos_delta(3), rot6d_delta(6), gripper]`` quantile-normalized — the exact
+    representation ``DROIDLeRobotDataset._build_raw_action`` produces, so it is the
+    single encoder shared by the recorded-episode path and the policy bridge.
+    """
+    state = np.asarray(state_xyz_euler, dtype=np.float32)
+    if state.ndim != 2 or state.shape[1] < 6:
+        raise ValueError(f"state must be (T+1, >=6) [xyz, euler]; got {state.shape}.")
+    grip = np.asarray(gripper, dtype=np.float32).reshape(-1)
+    if grip.shape[0] != state.shape[0] - 1:
+        raise ValueError(
+            f"gripper length {grip.shape[0]} must be states-1 ({state.shape[0] - 1})."
+        )
+
+    poses_abs = build_abs_pose_from_components(state[:, 0:3], state[:, 3:6], "euler_xyz")
+    poses_abs[:, :3, :3] = poses_abs[:, :3, :3] @ _DROID_TO_OPENCV
+    poses_rel = pose_abs_to_rel(
+        poses_abs, rotation_format="rot6d", pose_convention="backward_framewise"
+    )  # (T, 9)
+
+    action = np.concatenate([poses_rel, (1.0 - grip).reshape(-1, 1)], axis=-1)  # (T, 10)
+    stats = load_action_stats(str(_DROID_STATS_PATH))
+    return normalize_action(action, "quantile", stats).astype(np.float32)
+
+
 def _prepare_droid_lerobot(
     episode: Trajectory, frame_start: int, n_actions: int
 ) -> np.ndarray:
@@ -119,20 +149,8 @@ def _prepare_droid_lerobot(
         )
 
     state = np.stack([_state_xyz_euler(episode, i) for i in range(lo, hi)])  # (n+1, 6)
-    poses_abs = build_abs_pose_from_components(state[:, 0:3], state[:, 3:6], "euler_xyz")
-    poses_abs[:, :3, :3] = poses_abs[:, :3, :3] @ _DROID_TO_OPENCV
-    poses_rel = pose_abs_to_rel(
-        poses_abs, rotation_format="rot6d", pose_convention="backward_framewise"
-    )  # (n, 9)
-
-    gripper = np.array(
-        [_gripper(episode, i) for i in range(lo, lo + n_actions)], dtype=np.float32
-    ).reshape(-1, 1)
-    gripper = 1.0 - gripper
-
-    action = np.concatenate([poses_rel, gripper], axis=-1)  # (n, 10)
-    stats = load_action_stats(str(_DROID_STATS_PATH))
-    return normalize_action(action, "quantile", stats).astype(np.float32)
+    gripper = np.array([_gripper(episode, i) for i in range(lo, lo + n_actions)], dtype=np.float32)
+    return encode_droid_states(state, gripper)
 
 
 _BUILDERS: dict[str, Callable[[Trajectory, int, int], np.ndarray]] = {

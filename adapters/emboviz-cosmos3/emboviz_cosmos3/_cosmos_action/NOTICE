@@ -1,0 +1,13 @@
+This directory vendors source from NVIDIA's cosmos-framework
+(https://github.com/NVIDIA/cosmos-framework), licensed under OpenMDW-1.1
+(see LICENSE.OpenMDW). The files retain their original NVIDIA SPDX headers.
+
+Vendored (numpy/scipy only; torch in/out wrapping removed, algorithm unchanged):
+  - pose_utils.py            <- cosmos_framework/data/vfm/action/pose_utils.py
+  - action_normalization.py  <- cosmos_framework/data/vfm/action/action_normalization.py
+  - droid_lerobot_normalization.json  (DROID action quantile stats)
+
+OpenMDW-1.1 grants use/modification/distribution without restriction; the only
+obligation when redistributing is to retain a copy of the license (LICENSE.OpenMDW)
+and the origin/copyright notices, which this NOTICE and the per-file SPDX headers
+satisfy.

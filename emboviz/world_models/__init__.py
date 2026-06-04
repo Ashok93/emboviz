@@ -27,6 +27,17 @@ from emboviz.world_models.rollout import (
     summarize,
     trust_report,
 )
+from emboviz.world_models.keyframes import (
+    CriticalWindow,
+    Keyframe,
+    critical_windows,
+    detect_keyframes,
+)
+from emboviz.world_models.stress import (
+    StressClip,
+    recorded_action_source,
+    stress_test,
+)
 from emboviz.world_models.viz import save_frame_comparison, save_trust_curve
 
 __all__ = [
@@ -43,6 +54,14 @@ __all__ = [
     "rollout_episode",
     "summarize",
     "trust_report",
+    # critical-moment keyframes + stress test
+    "CriticalWindow",
+    "Keyframe",
+    "StressClip",
+    "critical_windows",
+    "detect_keyframes",
+    "recorded_action_source",
+    "stress_test",
     # rendering
     "save_frame_comparison",
     "save_trust_curve",

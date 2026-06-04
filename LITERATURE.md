@@ -1165,3 +1165,37 @@ is normalized against two model-specific anchors:
 ### Structured representations
 - Zhou, Y. et al. 2019. **On the Continuity of Rotation
   Representations in Neural Networks**, CVPR (arXiv:1812.07035).
+
+---
+
+## 8. Critical-moment keyframe detection (world-model stress test)
+
+### Question being answered
+*Where in a recorded episode are the instants that decide the task?* The
+world-model stress test seeds short rollouts at these moments (a grasp, a
+release, a settle); a quarter-second of approach + grasp is inside the world
+model's faithful horizon, a whole task is not.
+
+### Method
+A frame is a **keyframe** when either (a) the gripper changes open/closed state,
+or (b) the end-effector comes to rest — a per-second translation/rotation
+velocity below a small threshold, held for a minimum streak. This is the
+standard keyframe heuristic shared by keyframe-based manipulation policies.
+Thresholds (translation 5 mm/s, rotation 1.5°/s, gripper 1% command change,
+min-streak 3) follow NVIDIA's cosmos-framework idle-frame detector
+(`compute_idle_frames`, `data/vfm/action/pose_utils.py`). Implemented
+world-model-agnostically in `emboviz/world_models/keyframes.py` (numpy only,
+reads the wire `Trajectory`); the Cosmos-specific action encoding stays in the
+adapter.
+
+### Citations
+- Shridhar, M., Manuelli, L. & Fox, D. 2022. **Perceiver-Actor (PerAct): A
+  Multi-Task Transformer for Robotic Manipulation**, CoRL (arXiv:2209.05451) —
+  keyframe extraction from gripper-state change + near-zero joint velocity.
+- James, S. & Davison, A. 2022. **Q-attention / Coarse-to-Fine ARM**
+  (arXiv:2105.06411) — the keyframe (next-best-pose) formulation.
+- Goyal, A. et al. 2023. **RVT: Robotic View Transformer** (arXiv:2306.14896) —
+  reuses the PerAct keyframe scheme.
+- NVIDIA 2026. **Cosmos 3 / cosmos-framework** (OpenMDW-1.1) — `compute_idle_frames`
+  thresholds (velocity-based, fps-scaled, min-streak), the reference our defaults
+  mirror.
