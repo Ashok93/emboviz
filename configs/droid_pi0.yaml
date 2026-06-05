@@ -42,27 +42,43 @@ analysis:
   diagnostics: [attention]                   # unused by the dream driver; a valid value is required
 
   cosmos_stress:
-    server_url: https://364azkwn9mq2qx-8000.proxy.runpod.net
+    server_url: https://cmvzw2tow4f9fc-8000.proxy.runpod.net
     domain: droid_lerobot
     action_dim: 10
     policy_adapter: pi0
     policy_kwargs: {config_name: pi0_droid}
-    action_convention: droid_joint_delta     # π0-DROID: [joint_delta(7), gripper(1)]
+    action_convention: droid_joint_velocity  # π0-DROID emits joint velocities (rad/s), not deltas
+    control_hz: 15                            # DROID control rate; joints advance by velocity*(1/15)/step
     robot: franka_panda                      # forward kinematics: joints -> panda_link8 pose
     camera_map: {primary: exterior_left, wrist_left: wrist}   # π0 roles -> concat regions
+    rerun_camera: wrist                      # concat region shown in the dream .rrd
+                                             # (wrist = the full-res grasp view)
     concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
     concat_resolution: [360, 640]            # wrist panel H×W -> 540×640 concat, the
                                              # Cosmos DROID training scale (droid_plus_lerobot_640x360)
-    # First run: baseline (unperturbed). For the perturbed run, swap the object
-    # the policy must grasp — turn the marker into a spoon:
+    # Baseline (unperturbed): empty list -> the loop runs the recorded scene with
+    # no edit. For the perturbed run, list an edit instruction, e.g.:
     #   perturbations: ["replace the marker in the cup with a spoon"]
     perturbations: []
-    # Short hops, more turns = a genuinely reactive closed loop: the policy
-    # re-plans every n_actions frames on a freshly dreamed frame, rather than
-    # committing to one big open-loop chunk. The world model is faithful for only
-    # a frame or two, so keep each hop short.
-    n_loop_steps: 5                          # closed-loop turns (policy re-plans each)
-    n_actions: 3                             # frames Cosmos dreams per turn (<= π0 horizon 10)
+    # Maximally reactive loop: the policy re-plans as often as possible, so the
+    # policy (not the dream) drives the trajectory. Cosmos's video VAE compresses
+    # time 4x, so a dream call emits frames only in quanta of 4 (num_frames =
+    # 1 + 4N); 4 is the hard floor for the *prediction* horizon. We dream those 4
+    # but COMMIT only the first one (execute_steps=1, receding horizon): the policy
+    # re-plans on the next dreamed frame, and the committed frame is the least-
+    # drifted one. Add turns (n_loop_steps) to cover the decisive window.
+    # "Just right" balance vs the world model's autoregressive drift: each Cosmos
+    # call generates a long COHERENT chunk (no intra-call drift), and we re-feed
+    # (photocopy) only between calls — drift grows with n_loop_steps, which the
+    # probe showed stays clean through ~3 re-conditioning cycles.
+    # Full-episode closed loop, the proper FD chunk pattern (NVIDIA's robotics
+    # recipe): π0 plans a chunk → Cosmos dreams the whole chunk → take the LAST
+    # frame → π0 re-plans → repeat. π0 drives every action; Cosmos only renders.
+    # 8 is the biggest VAE-on-grid chunk within π0-droid's 10-action horizon
+    # (16 is the trained size, but the policy caps us; π0.5-droid would give 12).
+    n_actions: 8                             # π0's chunk dreamed per call (1+4N on-grid)
+    execute_steps: 8                         # commit the WHOLE chunk → re-feed the last frame
+    n_loop_steps: 17                         # ~17 chunks x 8 ≈ 136 frames ≈ the full episode (134)
     lead_s: 0.5
     # reasoner_url omitted -> no verdict (this omni server returns images, not text)
 

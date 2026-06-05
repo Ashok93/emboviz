@@ -263,14 +263,16 @@ def test_closed_loop_joint_dream_end_to_end() -> None:
         seen["convention"] = scene.observations.state.convention
         seen["instruction"] = scene.instruction
         seen["cameras"] = sorted(scene.observations.images)
-        chunk = np.zeros((10, 8), dtype=np.float32)   # [joint_delta(7), gripper(1)]
-        chunk[:, 1] = 0.005                            # small +joint1 each step
+        chunk = np.zeros((10, 8), dtype=np.float32)   # [joint_velocity(7), gripper(1)]
+        chunk[:, 1] = 0.005                            # small joint1 increment each step
         chunk[:, 7] = 0.4                              # absolute gripper
         return ActionResult(action=chunk[0], action_chunk=chunk)
 
     stepper = PolicyDreamStepper(
         mock_pi0,
-        tracker=JointStateTracker(seed_joints, 0.0, kin),
+        # control_hz=1 -> dt=1: this end-to-end plumbing test reads the chunk as
+        # per-step increments (velocity*dt scaling is covered in test_joint_bridge).
+        tracker=JointStateTracker(seed_joints, 0.0, kin, control_hz=1.0),
         camera_map={"primary": "exterior_left", "wrist_left": "wrist"},
         instruction="pick the marker from the cup",
         n_actions=10,

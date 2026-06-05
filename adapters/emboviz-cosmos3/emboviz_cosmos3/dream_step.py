@@ -50,8 +50,17 @@ class PolicyDreamStepper:
         conditioned policies (π0 raises on an empty instruction); pass the seed
         episode's instruction.
     n_actions
-        Steps to take from the policy's chunk per loop turn (the world model then
-        renders this many frames). Must not exceed the policy's chunk length.
+        Prediction horizon: rows taken from the policy's chunk and encoded as
+        conditioning, so the world model renders this many frames per turn. Must
+        not exceed the policy's chunk length.
+    execute_steps
+        Execution horizon: how many of those dreamed frames the policy commits to
+        before re-planning (receding horizon). Defaults to ``n_actions`` (commit
+        the whole chunk). ``1`` is the most reactive — the policy re-plans on the
+        next dreamed frame. Must satisfy ``1 <= execute_steps <= n_actions``. The
+        loop must commit the same number of frames (see
+        :func:`emboviz.world_models.simulate.closed_loop_rollout`) so the tracked
+        state stays aligned with the conditioning frame.
     """
 
     def __init__(
@@ -62,6 +71,7 @@ class PolicyDreamStepper:
         camera_map: dict[str, ConcatRegion],
         instruction: Optional[str] = None,
         n_actions: int = 16,
+        execute_steps: Optional[int] = None,
     ):
         if not camera_map:
             raise ValueError("PolicyDreamStepper: camera_map must map at least one policy camera.")
@@ -73,13 +83,24 @@ class PolicyDreamStepper:
             )
         if int(n_actions) < 1:
             raise ValueError(f"PolicyDreamStepper: n_actions must be >= 1, got {n_actions}.")
+        if execute_steps is not None and not 1 <= int(execute_steps) <= int(n_actions):
+            raise ValueError(
+                f"PolicyDreamStepper: execute_steps must satisfy 1 <= execute_steps <= "
+                f"n_actions ({int(n_actions)}); got {execute_steps}."
+            )
 
         self._predict_fn = predict_fn
         self._tracker = tracker
         self._camera_map = dict(camera_map)
         self._instruction = instruction
         self._n_actions = int(n_actions)
+        self._execute_steps = None if execute_steps is None else int(execute_steps)
         self.steps_taken = 0
+
+    @property
+    def execute_steps(self) -> int:
+        """Resolved execution horizon (``n_actions`` when unset)."""
+        return self._n_actions if self._execute_steps is None else self._execute_steps
 
     @property
     def tracker(self) -> StateTracker:
@@ -115,7 +136,7 @@ class PolicyDreamStepper:
                 f"n_actions={self._n_actions}."
             )
 
-        cosmos_actions = self._tracker.to_cosmos(chunk, self._n_actions)
+        cosmos_actions = self._tracker.to_cosmos(chunk, self._n_actions, self._execute_steps)
         self.steps_taken += 1
         return cosmos_actions
 

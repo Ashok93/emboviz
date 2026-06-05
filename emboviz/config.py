@@ -155,7 +155,7 @@ class DatasetCfg(_Strict):
 # joint vector and forward-kinematics it (so they require a robot). Kept in sync
 # with emboviz_cosmos3.bridge — core does not import the adapter.
 _CARTESIAN_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
-_JOINT_ACTION_CONVENTIONS = {"droid_joint_delta"}
+_JOINT_ACTION_CONVENTIONS = {"droid_joint_velocity"}
 _ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
 _CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
 
@@ -198,9 +198,22 @@ class CosmosStressCfg(_Strict):
     concat_resolution: Optional[tuple[int, int]] = None
     perturbations: list[str] = Field(default_factory=list)  # edit instructions; empty -> no perturbation
     n_loop_steps: int = 2                         # closed-loop turns (small — drifts after the first turn or two)
-    n_actions: int = 16                           # rollout frames per turn (one Cosmos chunk)
+    n_actions: int = 16                           # prediction horizon: frames dreamed per turn (one Cosmos chunk)
+    # Execution horizon: dreamed frames committed before the policy re-plans
+    # (receding horizon). None -> commit the whole chunk. 1 is most reactive: the
+    # policy re-decides on the next dreamed frame, so the policy (not the dream)
+    # drives the rollout. Must satisfy 1 <= execute_steps <= n_actions.
+    execute_steps: Optional[int] = None
     lead_s: float = 0.5                           # seconds before each keyframe to seed
+    # Policy control rate (Hz) for joint-velocity conventions: joint configs advance
+    # by velocity * (1/control_hz) per step. π0-DROID runs at 15 Hz (openpi
+    # DROID_CONTROL_FREQUENCY). Unused by cartesian conventions.
+    control_hz: float = 15.0
     conditioning_camera: str = "primary"
+    # Concat region rendered in the dream side-by-side (.rrd). The DROID concat
+    # puts the wrist on top at full resolution (the view that shows the gripper-
+    # object contact during a grasp), so it is the default; one of _CONCAT_REGIONS.
+    rerun_camera: str = "wrist"
     state_convention: str = "ee_pose"
     reasoner_url: Optional[str] = None            # reasoner server; None -> no verdict
     reasoner_question: str = (
@@ -245,6 +258,16 @@ class CosmosStressCfg(_Strict):
             raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
         return v
 
+    @field_validator("rerun_camera")
+    @classmethod
+    def _check_rerun_camera(cls, v: str) -> str:
+        if v not in _CONCAT_REGIONS:
+            raise ValueError(
+                f"cosmos_stress.rerun_camera={v!r} not a concat region "
+                f"({sorted(_CONCAT_REGIONS)})."
+            )
+        return v
+
     @field_validator("concat_resolution")
     @classmethod
     def _check_concat_resolution(cls, v: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
@@ -253,6 +276,22 @@ class CosmosStressCfg(_Strict):
                 f"cosmos_stress.concat_resolution must be (H, W) with each >= 2, got {v}."
             )
         return v
+
+    @field_validator("control_hz")
+    @classmethod
+    def _check_control_hz(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"cosmos_stress.control_hz must be > 0, got {v}.")
+        return v
+
+    @model_validator(mode="after")
+    def _check_execute_steps(self) -> "CosmosStressCfg":
+        if self.execute_steps is not None and not 1 <= self.execute_steps <= self.n_actions:
+            raise ValueError(
+                "cosmos_stress.execute_steps must satisfy 1 <= execute_steps <= "
+                f"n_actions ({self.n_actions}); got {self.execute_steps}."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_policy_requirements(self) -> "CosmosStressCfg":

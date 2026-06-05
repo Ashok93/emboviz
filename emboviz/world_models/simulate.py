@@ -53,6 +53,23 @@ def _conditioning_image_of(scene: Scene, camera: str) -> np.ndarray:
     return np.asarray(scene.observations.images[camera].data, dtype=np.uint8)
 
 
+def _commit_frames(predicted: Trajectory, commit: int) -> Trajectory:
+    """Return the first ``commit`` frames of a dreamed turn as a new Trajectory.
+
+    The world model dreams the whole prediction horizon, but a receding-horizon
+    loop commits only the leading ``commit`` frames before the policy re-plans.
+    The remaining frames are speculative and dropped from the evaluated rollout.
+    """
+    return Trajectory(
+        frames=predicted.frames[:commit],
+        frame_indices=predicted.frame_indices[:commit],
+        fps=predicted.fps,
+        episode_id=predicted.episode_id,
+        source=predicted.source,
+        metadata={**predicted.metadata, "committed": commit, "dreamed": len(predicted.frames)},
+    )
+
+
 def closed_loop_rollout(
     world_model: WorldModel,
     seed_image: np.ndarray,
@@ -61,6 +78,7 @@ def closed_loop_rollout(
     n_steps: int,
     conditioning_camera: str = "primary",
     instruction: Optional[str] = None,
+    execute_steps: Optional[int] = None,
     on_step: Optional[Callable[[int, Trajectory], None]] = None,
 ) -> DreamRollout:
     """Run the policy ⇄ world-model loop for ``n_steps`` turns from ``seed_image``.
@@ -69,6 +87,15 @@ def closed_loop_rollout(
     ``concat_view``), already perturbed. ``instruction`` is the task text the world
     model conditions on each turn — required by language-conditioned world models
     (Cosmos rejects an empty prompt), so pass the seed episode's instruction.
+
+    ``execute_steps`` is the execution horizon: each turn the world model dreams
+    the full chunk ``step_fn`` conditions on, but the loop commits only the leading
+    ``execute_steps`` frames and re-plans from there (receding horizon). ``None``
+    commits every dreamed frame. ``step_fn`` must advance its own tracked state by
+    the same number (the :class:`~emboviz_cosmos3.dream_step.PolicyDreamStepper`
+    does, via its ``execute_steps``), so proprioception stays aligned with the
+    committed conditioning frame.
+
     Returns a :class:`DreamRollout`. Raises if ``step_fn`` yields no usable actions
     or the world model returns no frames — never silently truncates the loop.
     """
@@ -77,6 +104,8 @@ def closed_loop_rollout(
         raise ValueError(f"seed_image must be (H, W, 3) uint8 RGB, got shape {seed.shape}.")
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}.")
+    if execute_steps is not None and int(execute_steps) < 1:
+        raise ValueError(f"execute_steps must be >= 1, got {execute_steps}.")
 
     image = seed
     steps: list[Trajectory] = []
@@ -99,12 +128,25 @@ def closed_loop_rollout(
         if not predicted.frames:
             raise RuntimeError(f"world model returned no frames at step {step}.")
 
-        steps.append(predicted)
-        all_frames.extend(predicted.frames)
-        if on_step is not None:
-            on_step(step, predicted)
+        commit = len(predicted.frames) if execute_steps is None else int(execute_steps)
+        if commit > len(predicted.frames):
+            raise RuntimeError(
+                f"execute_steps={execute_steps} exceeds the {len(predicted.frames)} "
+                f"frames the world model dreamed at step {step}; the policy cannot "
+                "commit more frames than were dreamed."
+            )
+        committed = _commit_frames(predicted, commit)
 
-        image = _conditioning_image_of(predicted.frames[-1], conditioning_camera)
+        steps.append(committed)
+        all_frames.extend(committed.frames)
+        if on_step is not None:
+            on_step(step, committed)
+
+        # Re-feed the LAST committed frame at whatever resolution the world model
+        # returned it (Cosmos rounds height to a multiple of 16; NVIDIA's robotics
+        # FD cookbook lets the conditioning ride at that size rather than resizing
+        # back — re-resizing each turn only adds interpolation blur).
+        image = _conditioning_image_of(committed.frames[commit - 1], conditioning_camera)
 
     trajectory = Trajectory(
         frames=all_frames,

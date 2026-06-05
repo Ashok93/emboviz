@@ -1,11 +1,13 @@
 """End-to-end joint-bridge test with REAL forward kinematics (needs pinocchio).
 
-Validates the ``droid_joint_delta`` path against physical DROID data: feeding the
-bridge the joint *deltas* between consecutive episode-312 frames must (a) recover
+Validates the ``droid_joint_velocity`` path against physical DROID data. The FK
+mechanics are checked with ``dt=1`` (feeding the joint *position deltas* between
+consecutive episode-312 frames, which are already per-step): they must (a) recover
 the recorded joint configurations and (b) forward-kinematics them to the recorded
 ``cartesian_position`` — the exact poses the Cosmos DROID encoder conditions on.
-This ties ``integrate_joint_chunk`` + ``JointStateTracker`` to ground truth, not
-just to internal consistency.
+A separate test locks the velocity×dt scaling (the real policy emits rad/s, not
+deltas). This ties ``integrate_joint_chunk`` + ``JointStateTracker`` to ground
+truth, not just to internal consistency.
 
 Run::
 
@@ -59,7 +61,9 @@ def test_integrate_joint_chunk_reproduces_recorded_states() -> None:
     gripper = np.full((len(deltas), 1), 0.0, dtype=np.float32)
     chunk = np.concatenate([deltas, gripper], axis=1)   # (5, 8)
 
-    joint_states, cartesian_states, grippers = integrate_joint_chunk(seed, chunk, kin)
+    # dt=1: the chunk holds per-step position deltas (logged joint diffs), so the
+    # integrator must recover the recorded configs exactly (FK-mechanics check).
+    joint_states, cartesian_states, grippers = integrate_joint_chunk(seed, chunk, kin, dt=1.0)
 
     # Integrated joint configs recover the recorded ones.
     assert np.allclose(joint_states, joints, atol=1e-6)
@@ -74,9 +78,11 @@ def test_integrate_joint_chunk_reproduces_recorded_states() -> None:
 
 def test_joint_tracker_to_cosmos_and_factory() -> None:
     kin = load_kinematics("franka_panda")
+    # control_hz=1 -> dt=1 so the recorded per-step position deltas recover the
+    # logged configs (the velocity scaling is locked in its own test below).
     tracker = make_state_tracker(
         np.array(_JOINTS[0]), 0.0,
-        action_convention="droid_joint_delta", kinematics=kin,
+        action_convention="droid_joint_velocity", kinematics=kin, control_hz=1.0,
     )
     assert isinstance(tracker, JointStateTracker)
     assert tracker.proprioception().convention == "joint_angles"
@@ -97,7 +103,7 @@ def test_joint_path_matches_recorded_cartesian_encoder() -> None:
     grip = np.full(len(deltas), 0.3, dtype=np.float32)
     chunk = np.concatenate([deltas, grip[:, None]], axis=1)
 
-    _, cartesian_states, grippers = integrate_joint_chunk(joints[0], chunk, kin)
+    _, cartesian_states, grippers = integrate_joint_chunk(joints[0], chunk, kin, dt=1.0)
     via_joints = encode_droid_states(cartesian_states, grippers)
 
     # The cartesian path on the dataset's own recorded cartesian_position.
@@ -105,9 +111,35 @@ def test_joint_path_matches_recorded_cartesian_encoder() -> None:
     assert np.allclose(via_joints, via_cartesian, atol=1e-3), np.abs(via_joints - via_cartesian).max()
 
 
+def test_joint_velocity_scaled_by_control_dt() -> None:
+    """Regression for the dream-collapse bug: π0-DROID emits joint VELOCITIES
+    (rad/s), so each config advances by velocity * (1/control_hz), NOT by the raw
+    velocity. A constant 1 rad/s over the chunk at 15 Hz moves 1/15 rad per step;
+    integrating without dt (the old behavior) moved 15x further -> off-distribution
+    conditioning -> Cosmos garbage."""
+    kin = load_kinematics("franka_panda")
+    seed = np.array(_JOINTS[0])
+    vel = np.zeros((4, 8), np.float32)
+    vel[:, :7] = 1.0                                   # 1 rad/s on every joint
+    js15, _, _ = integrate_joint_chunk(seed, vel, kin, dt=1.0 / 15.0)
+    for k in range(1, 5):                              # seed + k*(1/15)
+        assert np.allclose(js15[k], seed + k * (1.0 / 15.0), atol=1e-6)
+    # The un-scaled integration (the bug) moves 15x further on the first step.
+    js1, _, _ = integrate_joint_chunk(seed, vel, kin, dt=1.0)
+    assert np.allclose(js1[1], seed + 1.0, atol=1e-6)
+    assert not np.allclose(js15[1], js1[1])            # the dt factor matters
+    # dt must be positive.
+    try:
+        integrate_joint_chunk(seed, vel, kin, dt=0.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for dt=0")
+
+
 def test_factory_rejects_mismatched_robot_and_convention() -> None:
     for kwargs in (
-        dict(action_convention="droid_joint_delta", kinematics=None),
+        dict(action_convention="droid_joint_velocity", kinematics=None),
         dict(action_convention="absolute_xyz_euler", kinematics=load_kinematics("franka_panda")),
     ):
         try:
@@ -122,6 +154,7 @@ def _run_all() -> None:
     test_integrate_joint_chunk_reproduces_recorded_states()
     test_joint_tracker_to_cosmos_and_factory()
     test_joint_path_matches_recorded_cartesian_encoder()
+    test_joint_velocity_scaled_by_control_dt()
     test_factory_rejects_mismatched_robot_and_convention()
     print("OK: all joint-bridge (real FK) checks passed")
 

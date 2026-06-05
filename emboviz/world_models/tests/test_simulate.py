@@ -78,6 +78,66 @@ def test_loop_carries_frame_forward_and_accumulates() -> None:
     assert np.array_equal(out.seed_image, seed)
 
 
+class _IndexedWM(_MockWM):
+    """Like ``_MockWM`` but stamps each frame's *index within the turn* into the
+    green channel, so a test can tell which dreamed frame the loop committed and
+    carried forward."""
+
+    def rollout(self, init, actions, *, num_frames=None) -> Trajectory:
+        self._step += 1
+        color = min(self._step * 40, 240)
+        n = len(np.asarray(actions))
+        frames = []
+        for j in range(n):
+            px = np.zeros((6, 6, 3), np.uint8)
+            px[:, :, 0] = color   # red: turn
+            px[:, :, 1] = j       # green: frame index within the turn
+            frames.append(Scene(observations=Observations(
+                images={"primary": RGBImage(data=px, camera_id="primary")})))
+        return Trajectory(frames=frames, frame_indices=list(range(n)), fps=10.0, episode_id="p", source="mock")
+
+
+def test_execute_steps_commits_prefix_and_carries_committed_frame() -> None:
+    carried_green: list[int] = []
+    committed_lengths: list[int] = []
+
+    def step_fn(image: np.ndarray) -> np.ndarray:
+        carried_green.append(int(image[0, 0, 1]))   # frame-in-turn index carried forward
+        return np.zeros((4, 1), dtype=np.float32)    # dream 4 frames per turn
+
+    def on_step(i, traj):
+        committed_lengths.append(len(traj.frames))
+
+    seed = np.zeros((6, 6, 3), np.uint8)
+    out = closed_loop_rollout(
+        _IndexedWM(), seed, step_fn, n_steps=3, execute_steps=2, on_step=on_step
+    )
+
+    # Dream 4 per turn, commit 2 -> 3 turns x 2 = 6 frames in the evaluated rollout.
+    assert len(out.trajectory.frames) == 6
+    assert committed_lengths == [2, 2, 2]
+    # Each committed turn keeps the prefix frames[:2] -> green indices 0,1.
+    for turn in out.steps:
+        assert [int(f.observations.images["primary"].data[0, 0, 1]) for f in turn.frames] == [0, 1]
+        assert turn.metadata["committed"] == 2 and turn.metadata["dreamed"] == 4
+    # Turn 0 sees the seed (green 0); turns 1,2 are conditioned on the *committed*
+    # frame frames[1] of the previous turn (green index 1), not the last dreamed frame.
+    assert carried_green == [0, 1, 1]
+
+
+def test_execute_steps_cannot_exceed_dreamed_frames() -> None:
+    try:
+        closed_loop_rollout(
+            _MockWM(), np.zeros((6, 6, 3), np.uint8),
+            lambda im: np.zeros((2, 1), np.float32),   # only 2 frames dreamed
+            n_steps=1, execute_steps=3,                # but asked to commit 3
+        )
+    except RuntimeError as e:
+        assert "exceeds" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError when execute_steps exceeds dreamed frames")
+
+
 def test_rejects_empty_actions_and_bad_seed() -> None:
     try:
         closed_loop_rollout(_MockWM(), np.zeros((4, 4, 3), np.uint8),
@@ -98,6 +158,8 @@ def test_rejects_empty_actions_and_bad_seed() -> None:
 
 def _run_all() -> None:
     test_loop_carries_frame_forward_and_accumulates()
+    test_execute_steps_commits_prefix_and_carries_committed_frame()
+    test_execute_steps_cannot_exceed_dreamed_frames()
     test_rejects_empty_actions_and_bad_seed()
     print("OK: all closed-loop simulator checks passed")
 

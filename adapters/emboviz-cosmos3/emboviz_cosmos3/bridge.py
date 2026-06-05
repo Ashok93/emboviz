@@ -23,15 +23,19 @@ Cartesian (7-D rows ``[..., gripper]``, gripper in ``[0, 1]``):
     each row is a base-frame pose delta; position adds, rotation pre-multiplies
     (``R_next = dR @ R_cur``).
 
-Joint (``[joint_delta(n), gripper(1)]`` rows; gripper absolute in ``[0, 1]``):
+Joint (``[joint_velocity(n), gripper(1)]`` rows; gripper absolute in ``[0, 1]``):
 
-  * ``"droid_joint_delta"`` — the π0-DROID action space: 7 joint-position deltas
-    (radians, added to the current joint configuration) plus an absolute gripper.
-    The tracked state is the joint vector itself (what the policy reads as
-    ``observation/joint_position``); forward kinematics maps each joint
-    configuration to the ``panda_link8`` pose the DROID encoder expects. Requires
-    an injected ``kinematics`` object (a :class:`emboviz_robot.RobotKinematics`),
-    so this module never imports the kinematics engine — the driver wires it.
+  * ``"droid_joint_velocity"`` — the π0-DROID action space: 7 joint *velocities*
+    (rad/s) integrated at the control rate (``dt = 1/control_hz``, 15 Hz for DROID)
+    plus an absolute gripper. π0-DROID is trained and deployed on joint velocities,
+    NOT position deltas (openpi: ``RobotEnv(action_space="joint_velocity")``,
+    ``DROID_CONTROL_FREQUENCY = 15``); integrating them without the ``dt`` factor
+    inflates every motion ~15x. The tracked state is the joint vector itself (what
+    the policy reads as ``observation/joint_position``); forward kinematics maps
+    each joint configuration to the ``panda_link8`` pose the DROID encoder expects.
+    Requires an injected ``kinematics`` object (a
+    :class:`emboviz_robot.RobotKinematics`), so this module never imports the
+    kinematics engine — the driver wires it.
 
 Other conventions raise — add them explicitly rather than approximating.
 """
@@ -50,9 +54,9 @@ from emboviz_wire.types import Scene, Trajectory
 from emboviz_cosmos3._cosmos_action import convert_rotation
 from emboviz_cosmos3.domains import encode_droid_states
 
-ActionConvention = Literal["absolute_xyz_euler", "delta_xyz_euler_base", "droid_joint_delta"]
+ActionConvention = Literal["absolute_xyz_euler", "delta_xyz_euler_base", "droid_joint_velocity"]
 _CARTESIAN_CONVENTIONS = frozenset({"absolute_xyz_euler", "delta_xyz_euler_base"})
-_JOINT_CONVENTIONS = frozenset({"droid_joint_delta"})
+_JOINT_CONVENTIONS = frozenset({"droid_joint_velocity"})
 _POLICY_ROW_DIM = 7  # cartesian rows: [pose/delta (6), gripper (1)]
 
 
@@ -131,40 +135,52 @@ def integrate_joint_chunk(
     seed_joints: np.ndarray,
     chunk: np.ndarray,
     kinematics: Kinematics,
+    *,
+    dt: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Integrate a joint-delta action chunk into joint and Cartesian sequences.
+    """Integrate a joint-velocity action chunk into joint and Cartesian sequences.
 
-    ``chunk`` is ``(T, n_joints + 1)`` rows ``[joint_delta(n), gripper(1)]`` — the
-    ``droid_joint_delta`` convention. Each joint configuration is the running sum
-    of deltas from ``seed_joints`` (π0-DROID's ``use_delta_joint_actions``: the 7
-    joint outputs are deltas added to the current ``joint_position``); the gripper
-    column is absolute. Forward kinematics maps each configuration to the
-    end-effector pose, returned as ``[xyz, euler_xyz]`` in the DROID
-    ``cartesian_position`` convention (extrinsic-XYZ euler, matching
+    ``chunk`` is ``(T, n_joints + 1)`` rows ``[joint_velocity(n), gripper(1)]`` —
+    the ``droid_joint_velocity`` convention. π0-DROID is trained and deployed on
+    joint *velocities* (rad/s) applied at a fixed control rate, not on position
+    deltas: openpi's DROID runtime sets ``RobotEnv(action_space="joint_velocity")``
+    and steps at ``DROID_CONTROL_FREQUENCY = 15`` Hz. Each joint configuration
+    therefore advances by ``velocity * dt`` (zero-order hold over one control step),
+    with ``dt = 1 / control_hz``. Omitting ``dt`` (treating velocities as position
+    deltas) inflates every motion by ``control_hz`` (~15x) and was the cause of the
+    off-distribution, saturated conditioning that collapsed the dream. The gripper
+    column is absolute position (unscaled). Forward kinematics maps each
+    configuration to the end-effector pose, returned as ``[xyz, euler_xyz]`` in the
+    DROID ``cartesian_position`` convention (extrinsic-XYZ euler, matching
     ``encode_droid_states``).
+
+    ``dt = 1`` integrates raw position deltas instead — used by the recorded-state
+    validation, which feeds logged joint-position differences (already per-step).
 
     Returns ``(joint_states (T+1, n), cartesian_states (T+1, 6), grippers (T,))``
     where row 0 of each state array is the seed.
     """
+    if dt <= 0:
+        raise ValueError(f"integrate_joint_chunk: dt must be > 0, got {dt}.")
     n = int(kinematics.n_joints)
     seed = np.asarray(seed_joints, dtype=np.float64).reshape(-1)
     if seed.shape[0] != n:
         raise ValueError(
-            f"droid_joint_delta seed must be the {n}-joint configuration, got "
+            f"droid_joint_velocity seed must be the {n}-joint configuration, got "
             f"{seed.shape[0]}-D."
         )
     rows = np.asarray(chunk, dtype=np.float64)
     if rows.ndim != 2 or rows.shape[1] != n + 1:
         raise ValueError(
-            f"droid_joint_delta action chunk must be (T, {n + 1}) "
-            f"[joint_delta({n}), gripper(1)]; got {rows.shape}."
+            f"droid_joint_velocity action chunk must be (T, {n + 1}) "
+            f"[joint_velocity({n}), gripper(1)]; got {rows.shape}."
         )
 
     grippers = rows[:, n].astype(np.float32)
     joint_states = [seed.copy()]
     cur = seed.copy()
     for row in rows:
-        cur = cur + row[:n]
+        cur = cur + dt * row[:n]
         joint_states.append(cur.copy())
 
     cartesian = []
@@ -249,6 +265,26 @@ def _matrix_to_euler(matrix: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_execute_steps(n_actions: int, execute_steps: Optional[int]) -> int:
+    """Validate the execution horizon against the prediction horizon.
+
+    ``n_actions`` is the prediction horizon — the rows encoded as Cosmos
+    conditioning, hence the frames dreamed this turn. ``execute_steps`` is the
+    execution horizon — how many of those the policy commits to before the loop
+    re-plans (receding horizon). ``None`` commits the whole chunk (the prediction
+    and execution horizons coincide). Must satisfy ``1 <= execute_steps <= n_actions``.
+    """
+    if execute_steps is None:
+        return int(n_actions)
+    execute_steps = int(execute_steps)
+    if not 1 <= execute_steps <= int(n_actions):
+        raise ValueError(
+            f"execute_steps must satisfy 1 <= execute_steps <= n_actions "
+            f"({int(n_actions)}); got {execute_steps}."
+        )
+    return execute_steps
+
+
 class StateTracker(ABC):
     """Tracks the policy's proprioceptive state across closed-loop turns."""
 
@@ -262,9 +298,20 @@ class StateTracker(ABC):
         """The proprioception to feed the policy this turn."""
 
     @abstractmethod
-    def to_cosmos(self, chunk: np.ndarray, n_actions: int) -> np.ndarray:
+    def to_cosmos(
+        self, chunk: np.ndarray, n_actions: int, execute_steps: Optional[int] = None
+    ) -> np.ndarray:
         """Encode the first ``n_actions`` rows as ``(n_actions, 10)`` Cosmos
-        conditioning and advance the tracked state to where they led."""
+        conditioning, and advance the tracked state by ``execute_steps`` rows.
+
+        ``n_actions`` (prediction horizon) sets how many frames the world model
+        dreams this turn; the full ``(n_actions, 10)`` is always returned so the
+        dream is conditioned on the whole predicted chunk. ``execute_steps``
+        (execution horizon, defaults to ``n_actions``) is how far the tracked
+        state actually moves before the policy re-plans — so the proprioception
+        the policy reads next turn matches the dreamed frame the loop commits to
+        (receding horizon). The two must stay aligned: advancing the state past
+        the committed frame would desync proprioception from pixels."""
 
     def gripper_state(self) -> GripperState:
         return GripperState(value=self.gripper)
@@ -306,11 +353,14 @@ class CartesianStateTracker(StateTracker):
     def proprioception(self) -> Proprioception:
         return Proprioception(values=self._state.copy(), convention=self._state_convention)
 
-    def to_cosmos(self, chunk: np.ndarray, n_actions: int) -> np.ndarray:
+    def to_cosmos(
+        self, chunk: np.ndarray, n_actions: int, execute_steps: Optional[int] = None
+    ) -> np.ndarray:
+        commit = _resolve_execute_steps(n_actions, execute_steps)
         states, grippers = integrate_policy_chunk(self._state, chunk[:n_actions], self._convention)
-        cosmos = encode_droid_states(states, grippers)
-        self._state = states[-1].astype(np.float32)
-        self._gripper = float(grippers[-1])
+        cosmos = encode_droid_states(states, grippers)         # full prediction-horizon conditioning
+        self._state = states[commit].astype(np.float32)        # advance only by the committed steps
+        self._gripper = float(grippers[commit - 1])
         return cosmos
 
 
@@ -319,19 +369,27 @@ class JointStateTracker(StateTracker):
 
     The policy reads the joint vector as ``observation/joint_position``; the
     injected ``kinematics`` maps each configuration to the ``panda_link8`` pose
-    the DROID encoder conditions on.
+    the DROID encoder conditions on. The policy emits joint *velocities* (rad/s),
+    integrated at the control timestep ``dt = 1 / control_hz`` — π0-DROID runs at
+    ``control_hz = 15``. One Cosmos frame is one control step.
     """
 
-    def __init__(self, seed_joints: np.ndarray, seed_gripper: float, kinematics: Kinematics):
+    def __init__(
+        self, seed_joints: np.ndarray, seed_gripper: float, kinematics: Kinematics,
+        *, control_hz: float = 15.0,
+    ):
         joints = np.asarray(seed_joints, dtype=np.float32).reshape(-1)
         if joints.shape[0] != int(kinematics.n_joints):
             raise ValueError(
                 f"JointStateTracker: seed_joints must be the {kinematics.n_joints}-joint "
                 f"configuration, got {joints.shape[0]}-D."
             )
+        if control_hz <= 0:
+            raise ValueError(f"JointStateTracker: control_hz must be > 0, got {control_hz}.")
         self._joints = joints.copy()
         self._gripper = float(seed_gripper)
         self._kinematics = kinematics
+        self._dt = 1.0 / float(control_hz)
 
     @property
     def joints(self) -> np.ndarray:
@@ -344,13 +402,16 @@ class JointStateTracker(StateTracker):
     def proprioception(self) -> Proprioception:
         return Proprioception(values=self._joints.copy(), convention="joint_angles")
 
-    def to_cosmos(self, chunk: np.ndarray, n_actions: int) -> np.ndarray:
+    def to_cosmos(
+        self, chunk: np.ndarray, n_actions: int, execute_steps: Optional[int] = None
+    ) -> np.ndarray:
+        commit = _resolve_execute_steps(n_actions, execute_steps)
         joint_states, cartesian_states, grippers = integrate_joint_chunk(
-            self._joints, chunk[:n_actions], self._kinematics
+            self._joints, chunk[:n_actions], self._kinematics, dt=self._dt
         )
-        cosmos = encode_droid_states(cartesian_states, grippers)
-        self._joints = joint_states[-1].astype(np.float32)
-        self._gripper = float(grippers[-1])
+        cosmos = encode_droid_states(cartesian_states, grippers)   # full prediction-horizon conditioning
+        self._joints = joint_states[commit].astype(np.float32)     # advance only by the committed steps
+        self._gripper = float(grippers[commit - 1])
         return cosmos
 
 
@@ -361,11 +422,14 @@ def make_state_tracker(
     action_convention: ActionConvention,
     state_convention: str = "ee_pose",
     kinematics: Optional[Kinematics] = None,
+    control_hz: float = 15.0,
 ) -> StateTracker:
     """Build the tracker matching ``action_convention``.
 
-    Joint conventions require an injected ``kinematics``; cartesian conventions
-    must not receive one. The mismatch is rejected, never silently resolved.
+    Joint conventions require an injected ``kinematics`` and integrate joint
+    velocities at ``control_hz`` (the policy's control rate, 15 Hz for π0-DROID);
+    cartesian conventions must not receive a robot. The mismatch is rejected,
+    never silently resolved.
     """
     if action_convention in _JOINT_CONVENTIONS:
         if kinematics is None:
@@ -375,7 +439,7 @@ def make_state_tracker(
                 "urdf/ee_frame/joint_names so forward kinematics can map joints to the "
                 "end-effector pose Cosmos conditions on."
             )
-        return JointStateTracker(seed_state, seed_gripper, kinematics)
+        return JointStateTracker(seed_state, seed_gripper, kinematics, control_hz=control_hz)
     if kinematics is not None:
         raise ValueError(
             f"action_convention {action_convention!r} is cartesian but a robot/"

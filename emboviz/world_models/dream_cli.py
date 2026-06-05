@@ -34,7 +34,8 @@ from emboviz.config import load_run_config
 from emboviz.datasets.manifest import build_source
 from emboviz.world_models.keyframes import detect_keyframes
 from emboviz.world_models.simulate import closed_loop_rollout
-from emboviz.world_models.viz import frames_to_arrays, save_video
+from emboviz.world_models.dream_rerun import export_dream_rerun
+from emboviz.world_models.viz import frames_to_arrays
 
 
 def _slug(text: str) -> str:
@@ -55,7 +56,14 @@ def main() -> None:
     p.add_argument("--config", required=True)
     p.add_argument("--episode", type=int, default=None)
     p.add_argument("--out", default="outputs/cosmos_dream")
+    p.add_argument(
+        "--max-clips", type=int, default=None,
+        help="Stop after this many clips are produced (a cheap smoke run before "
+             "the full keyframe sweep). Default: all keyframes x perturbations.",
+    )
     args = p.parse_args()
+    if args.max_clips is not None and args.max_clips < 1:
+        raise SystemExit(f"--max-clips must be >= 1, got {args.max_clips}.")
 
     cfg = load_run_config(args.config)
     cs = cfg.analysis.cosmos_stress
@@ -86,7 +94,7 @@ def main() -> None:
     from emboviz.adapters import connect
     from emboviz.config import _JOINT_ACTION_CONVENTIONS
     from emboviz_cosmos3.bridge import make_state_tracker
-    from emboviz_cosmos3.concat_view import build_concat_view
+    from emboviz_cosmos3.concat_view import build_concat_view, split_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
     from emboviz_cosmos3.perturb import CosmosImageEditor
 
@@ -138,6 +146,7 @@ def main() -> None:
             action_convention=cs.action_convention,
             state_convention=cs.state_convention,
             kinematics=kinematics,
+            control_hz=cs.control_hz,
         )
         return PolicyDreamStepper(
             policy.client.predict,
@@ -145,6 +154,7 @@ def main() -> None:
             camera_map=cs.camera_map,
             instruction=frame.instruction,
             n_actions=cs.n_actions,
+            execute_steps=cs.execute_steps,
         )
 
     instructions = list(cs.perturbations) if cs.perturbations else [None]
@@ -166,35 +176,60 @@ def main() -> None:
             if instruction:
                 print(f"  [edit] frame {kf.index}: {instruction!r}")
                 seed = editor.edit(seed, instruction)
-            from PIL import Image
-            Image.fromarray(seed, mode="RGB").save(clip_dir / "seed.png")
 
-            def on_step(i: int, traj, _dir=clip_dir) -> None:
-                arrs = frames_to_arrays(traj, cs.conditioning_camera)
-                save_video(arrs, _dir / f"step_{i:02d}.mp4", fps=real.fps)
-                print(f"    step {i}: {len(arrs)} frames (saved)", flush=True)
+            def on_step(i: int, traj) -> None:
+                print(f"    step {i}: {len(traj.frames)} frame(s) committed", flush=True)
 
+            commit = cs.execute_steps if cs.execute_steps is not None else cs.n_actions
             print(f"  [dream] frame {kf.index} ({kf.kind}) / {tag}: "
-                  f"{cs.n_loop_steps} turns x {cs.n_actions} ...")
+                  f"{cs.n_loop_steps} turns x dream {cs.n_actions}, commit {commit} ...")
             dream = closed_loop_rollout(
                 wm, seed, stepper_for(seed_index),
                 n_steps=cs.n_loop_steps, conditioning_camera=cs.conditioning_camera,
                 instruction=real.frames[seed_index].instruction,
+                execute_steps=cs.execute_steps,
                 on_step=on_step,
             )
 
-            arrs = frames_to_arrays(dream.trajectory, cs.conditioning_camera)
-            save_video(arrs, clip_dir / "dream.mp4", fps=real.fps)
+            # The dream frames are the full concat; split out the configured region
+            # (cs.rerun_camera, the wrist by default) so the right panel shows that
+            # camera. The left panel is the SAME physical camera from the recorded
+            # episode (concat_cameras maps the region to its episode role), over the
+            # same time span, aligned frame-for-frame (one committed frame/timestep).
+            region = cs.rerun_camera
+            view_role = cs.concat_cameras[region]
+            dream_concat = frames_to_arrays(dream.trajectory, cs.conditioning_camera)
+            dream_view = [split_concat_view(f)[region] for f in dream_concat]
+            original_window = [
+                real.frames[seed_index + i]
+                for i in range(len(dream_view))
+                if seed_index + i < len(real.frames)
+            ]
+            original_view = frames_to_arrays(original_window, view_role)
+
+            rrd_path = export_dream_rerun(
+                clip_dir / "dream.rrd",
+                original_frames=original_view,
+                dream_frames=dream_view,
+                seed_concat=seed,
+                instruction=real.frames[seed_index].instruction,
+                perturbation=instruction,
+                fps=real.fps,
+                policy_name=cs.policy_adapter,
+                camera=view_role,
+                recording_id=f"dream_{episode}_{kf.index:04d}_{tag}",
+            )
+            print(f"    saved {rrd_path}")
 
             verdict = None
             if reasoner is not None:
-                verdict = reasoner.judge(arrs, cs.reasoner_question)
+                verdict = reasoner.judge(dream_concat, cs.reasoner_question)
                 print(f"    verdict: {verdict}")
 
             record = {
                 "keyframe_index": kf.index, "kind": kf.kind, "seed_index": seed_index,
                 "perturbation": instruction, "n_loop_steps": cs.n_loop_steps,
-                "n_actions": cs.n_actions, "n_frames": len(arrs),
+                "n_actions": cs.n_actions, "execute_steps": commit, "n_frames": len(dream_view),
                 "reasoner_question": cs.reasoner_question, "verdict": verdict,
             }
             (clip_dir / "verdict.json").write_text(json.dumps(record, indent=2))
@@ -202,6 +237,13 @@ def main() -> None:
             (out / "summary.json").write_text(json.dumps(
                 {"episode": episode, "policy": cs.policy_adapter, "clips": summary}, indent=2
             ))
+
+            if args.max_clips is not None and len(summary) >= args.max_clips:
+                print(f"[dream] reached --max-clips {args.max_clips}; stopping early.")
+                break
+        else:
+            continue   # inner loop finished without hitting the cap → next keyframe
+        break          # inner loop broke on the cap → stop the keyframe sweep too
 
     print(f"\n[dream] DONE: {len(summary)} clips -> {out}/")
 
