@@ -36,7 +36,7 @@ def _validate_rgb(arr: np.ndarray, what: str) -> np.ndarray:
 
 def _header_markdown(
     *, policy_name: str, instruction: Optional[str], perturbation: Optional[str],
-    camera: str, fps: float, n_dream: int,
+    cameras: list[str], fps: float, n_dream: int,
 ) -> str:
     lines = [
         f"# Cosmos dream — `{policy_name}` in the loop",
@@ -48,17 +48,18 @@ def _header_markdown(
         lines += [
             f"**Perturbation (counterfactual):** {perturbation}",
             "",
-            "> The **right** panel is a scene that never physically happened — Cosmos "
+            "> The **right** column is a scene that never physically happened — Cosmos "
             f'edited the seed ("{perturbation}") and then simulated the policy acting '
-            "in the result. The **left** panel is the real recorded episode (unedited).",
+            "in the result. The **left** column is the real recorded episode (unedited).",
             "",
         ]
     lines += [
-        "**How to read:** scrub the timeline — both panels advance together.",
+        "**How to read:** scrub the timeline — every panel advances together.",
         "",
-        f"- **Left** — the original recorded episode (`{camera}`), ground truth.",
-        f"- **Right** — Cosmos simulating the consequences of the policy's actions "
-        f"(`{camera}`), one reactive re-plan per frame, {fps:g} fps, {n_dream} frames.",
+        f"- **Left** of each row — the original recorded episode, ground truth.",
+        f"- **Right** of each row — Cosmos simulating the policy's actions, "
+        f"{fps:g} fps, {n_dream} frames.",
+        f"- One row per camera: {', '.join(f'`{c}`' for c in cameras)}.",
         "",
         "The **conditioning seed** below is the full concat (wrist on top, the two "
         "exterior cameras tiled beneath) the world model was actually given.",
@@ -69,35 +70,41 @@ def _header_markdown(
 def export_dream_rerun(
     out_path: Path,
     *,
-    original_frames: list[np.ndarray],
-    dream_frames: list[np.ndarray],
+    original_views: dict[str, list[np.ndarray]],
+    dream_views: dict[str, list[np.ndarray]],
     seed_concat: np.ndarray,
     instruction: Optional[str],
     perturbation: Optional[str],
     fps: float,
     policy_name: str,
-    camera: str,
     application_id: str = "emboviz-dream",
     recording_id: Optional[str] = None,
 ) -> Path:
-    """Write one clip's side-by-side comparison to ``out_path`` (a ``.rrd``).
+    """Write one clip's multi-camera side-by-side comparison to ``out_path``.
 
-    ``original_frames`` (left) and ``dream_frames`` (right) are per-frame
-    ``(H, W, 3)`` uint8 arrays of the **same camera**, aligned frame-for-frame on
-    the timeline; the two lists may differ in length (the recorded episode can run
-    out before the dream does) and the panels need not share a resolution. Both
-    must be non-empty. ``seed_concat`` is the full concat frame the world model
-    conditioned on (already perturbed when ``perturbation`` is set), shown as a
-    static reference. Raises on empty inputs or malformed frames — never writes a
-    half-empty comparison.
+    ``original_views`` (left) and ``dream_views`` (right) map a camera name to its
+    per-frame ``(H, W, 3)`` uint8 arrays, aligned frame-for-frame on a shared
+    timeline. Both dicts must cover the same camera names and be non-empty; for
+    each camera the two lists may differ in length (the recorded episode can run
+    out before the dream does) and need not share a resolution. The viewer shows
+    one row per camera — original on the left, dream on the right. ``seed_concat``
+    is the full concat frame the world model conditioned on (already perturbed when
+    ``perturbation`` is set), shown as a static reference. Raises on empty inputs or
+    malformed frames — never writes a half-empty comparison.
     """
-    if not dream_frames:
-        raise ValueError("export_dream_rerun: dream_frames is empty — nothing to show.")
-    if not original_frames:
+    if not dream_views or not original_views:
+        raise ValueError("export_dream_rerun: original_views/dream_views must be non-empty.")
+    cameras = list(dream_views.keys())
+    if set(cameras) != set(original_views.keys()):
         raise ValueError(
-            "export_dream_rerun: original_frames is empty; the seed came from a real "
-            "frame, so the recorded window cannot be empty."
+            f"export_dream_rerun: camera sets differ — dream {sorted(dream_views)} "
+            f"vs original {sorted(original_views)}."
         )
+    for cam in cameras:
+        if not dream_views[cam]:
+            raise ValueError(f"export_dream_rerun: dream_views[{cam!r}] is empty.")
+        if not original_views[cam]:
+            raise ValueError(f"export_dream_rerun: original_views[{cam!r}] is empty.")
 
     try:
         import rerun as rr
@@ -115,8 +122,8 @@ def export_dream_rerun(
         )
 
     seed = _validate_rgb(seed_concat, "seed_concat")
-    left = [_validate_rgb(f, "original frame") for f in original_frames]
-    right = [_validate_rgb(f, "dream frame") for f in dream_frames]
+    left = {c: [_validate_rgb(f, f"original {c} frame") for f in original_views[c]] for c in cameras}
+    right = {c: [_validate_rgb(f, f"dream {c} frame") for f in dream_views[c]] for c in cameras}
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +132,7 @@ def export_dream_rerun(
         recording_id=recording_id or out_path.stem,
     )
     rate = fps if fps > 0 else 10.0
+    n_dream = max(len(right[c]) for c in cameras)
 
     def _set_time(i: int) -> None:
         rr.set_time("frame_time", duration=i / rate, recording=rec)
@@ -136,7 +144,7 @@ def export_dream_rerun(
         rr.TextDocument(
             _header_markdown(
                 policy_name=policy_name, instruction=instruction,
-                perturbation=perturbation, camera=camera, fps=rate, n_dream=len(right),
+                perturbation=perturbation, cameras=cameras, fps=rate, n_dream=n_dream,
             ),
             media_type=rr.MediaType.MARKDOWN,
         ),
@@ -148,25 +156,31 @@ def export_dream_rerun(
     # original is logged only while real frames remain (Rerun holds the last
     # value, so a shorter real episode freezes on its final true frame rather
     # than inventing pixels).
-    for i in range(len(right)):
+    for i in range(n_dream):
         _set_time(i)
-        rr.log("compare/dream/rgb", rr.Image(right[i]), recording=rec)
-        if i < len(left):
-            rr.log("compare/original/rgb", rr.Image(left[i]), recording=rec)
+        for cam in cameras:
+            if i < len(right[cam]):
+                rr.log(f"compare/{cam}/dream/rgb", rr.Image(right[cam][i]), recording=rec)
+            if i < len(left[cam]):
+                rr.log(f"compare/{cam}/original/rgb", rr.Image(left[cam][i]), recording=rec)
 
     counterfactual = " (counterfactual)" if perturbation else ""
+    camera_rows = [
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin=f"compare/{cam}/original", name=f"Original — {cam}"),
+            rrb.Spatial2DView(
+                origin=f"compare/{cam}/dream",
+                name=f"Dream ({policy_name}) — {cam}{counterfactual}",
+            ),
+        )
+        for cam in cameras
+    ]
     blueprint = rrb.Blueprint(
         rrb.Vertical(
             rrb.TextDocumentView(origin="header", name="About this clip"),
-            rrb.Horizontal(
-                rrb.Spatial2DView(origin="compare/original", name=f"Original episode — {camera}"),
-                rrb.Spatial2DView(
-                    origin="compare/dream",
-                    name=f"Cosmos dream ({policy_name}) — {camera}{counterfactual}",
-                ),
-            ),
+            *camera_rows,
             rrb.Spatial2DView(origin="seed", name="Conditioning seed (concat)"),
-            row_shares=[2, 7, 3],
+            row_shares=[2] + [6] * len(camera_rows) + [3],
         ),
         rrb.SelectionPanel(state="collapsed"),
         rrb.TimePanel(state="expanded"),

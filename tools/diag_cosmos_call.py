@@ -63,6 +63,7 @@ def main() -> None:
     wm = connect_world_model("cosmos3", world_model_kwargs={
         "server_url": cs.server_url, "domain_name": cs.domain,
         "action_dim": cs.action_dim, "conditioning_camera": cs.conditioning_camera,
+        "fps": int(round(cs.control_hz)), "guardrails": False,  # DROID is 15 Hz; no safety filter (NVIDIA robotics recipe)
     })
 
     seed = build_concat_view(

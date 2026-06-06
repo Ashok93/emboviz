@@ -32,7 +32,7 @@ import numpy as np
 from emboviz.adapters import connect_world_model
 from emboviz.config import load_run_config
 from emboviz.datasets.manifest import build_source
-from emboviz.world_models.keyframes import detect_keyframes
+from emboviz.world_models.keyframes import Keyframe, detect_keyframes
 from emboviz.world_models.simulate import closed_loop_rollout
 from emboviz.world_models.dream_rerun import export_dream_rerun
 from emboviz.world_models.viz import frames_to_arrays
@@ -61,6 +61,25 @@ def main() -> None:
         help="Stop after this many clips are produced (a cheap smoke run before "
              "the full keyframe sweep). Default: all keyframes x perturbations.",
     )
+    p.add_argument(
+        "--keyframe-kinds", default=None,
+        help="Comma-separated keyframe kinds to keep (e.g. 'gripper_change' for "
+             "the grasp/release only, skipping the many 'settle' keyframes). "
+             "Default: all kinds.",
+    )
+    p.add_argument(
+        "--near-frame", type=int, default=None,
+        help="Keep only the single keyframe nearest this frame index (applied "
+             "after --keyframe-kinds). Use to dream one decisive moment — e.g. "
+             "--keyframe-kinds gripper_change --near-frame 60 picks the grasp.",
+    )
+    p.add_argument(
+        "--seed-frames", default=None,
+        help="Comma-separated frame indices to dream, bypassing keyframe "
+             "detection — one clip per index, each seeded lead_s before it. Use "
+             "to tile a spread of moments across the whole task in ONE run "
+             "(workers load once), e.g. '20,40,61,80,100,120'.",
+    )
     args = p.parse_args()
     if args.max_clips is not None and args.max_clips < 1:
         raise SystemExit(f"--max-clips must be >= 1, got {args.max_clips}.")
@@ -85,9 +104,43 @@ def main() -> None:
     keyframes = detect_keyframes(real)
     print(f"[dream] {len(real.frames)} frames, fps {real.fps:g}; {len(keyframes)} keyframes")
 
+    # Optional keyframe selection: dream a chosen set of moments instead of
+    # sweeping every keyframe. --seed-frames overrides detection with an explicit
+    # list (one clip per frame); otherwise --keyframe-kinds filters by kind and
+    # --near-frame keeps the single nearest detected keyframe.
+    if args.seed_frames:
+        idxs = [int(x) for x in args.seed_frames.split(",") if x.strip()]
+        bad = [i for i in idxs if not 0 <= i < len(real.frames)]
+        if bad:
+            raise SystemExit(f"--seed-frames out of range {bad} (episode has {len(real.frames)} frames).")
+        keyframes = [Keyframe(i, "manual", 0.0, 0.0) for i in idxs]
+        print(f"[dream] --seed-frames: dreaming {len(keyframes)} explicit frames {idxs}")
+    else:
+        if args.keyframe_kinds:
+            kinds = {k.strip() for k in args.keyframe_kinds.split(",") if k.strip()}
+            keyframes = [kf for kf in keyframes if kf.kind in kinds]
+            print(f"[dream] kept {len(keyframes)} keyframes of kind(s) {sorted(kinds)}")
+        if args.near_frame is not None:
+            if not keyframes:
+                raise SystemExit("--near-frame: no keyframes left to choose from after --keyframe-kinds.")
+            chosen = min(keyframes, key=lambda kf: abs(kf.index - args.near_frame))
+            keyframes = [chosen]
+            print(f"[dream] --near-frame {args.near_frame}: dreaming keyframe "
+                  f"{chosen.index} ({chosen.kind})")
+    if not keyframes:
+        raise SystemExit("no keyframes selected — relax --keyframe-kinds / --near-frame / --seed-frames.")
+
+    # fps is the conditioning frame rate Cosmos reads — it MUST equal the rate at
+    # which the action deltas are sampled, or the model misreads the motion
+    # dynamics. For droid_lerobot the dataset is 15 Hz (one generated frame per
+    # control step), so fps = control_hz; the model only ever saw this domain at
+    # 15 fps and the adapter default (10) is off-distribution. guardrails=False
+    # matches NVIDIA's robotics forward-dynamics cookbook (run_fd_with_vllm.ipynb),
+    # which disables the safety filter for the autoregressive DROID rollout.
     wm = connect_world_model("cosmos3", world_model_kwargs={
         "server_url": cs.server_url, "domain_name": cs.domain,
         "action_dim": cs.action_dim, "conditioning_camera": cs.conditioning_camera,
+        "fps": int(round(cs.control_hz)), "guardrails": False,
     })
 
     # Adapter-side pieces (Cosmos-specific) — lazily imported on this driver path.
@@ -191,32 +244,34 @@ def main() -> None:
                 on_step=on_step,
             )
 
-            # The dream frames are the full concat; split out the configured region
-            # (cs.rerun_camera, the wrist by default) so the right panel shows that
-            # camera. The left panel is the SAME physical camera from the recorded
-            # episode (concat_cameras maps the region to its episode role), over the
-            # same time span, aligned frame-for-frame (one committed frame/timestep).
-            region = cs.rerun_camera
-            view_role = cs.concat_cameras[region]
+            # The dream frames are the full concat; split out ALL three regions so
+            # the viewer shows every camera. Each region's left panel is the SAME
+            # physical camera from the recorded episode (concat_cameras maps the
+            # region to its episode role), over the same time span, aligned frame-
+            # for-frame (one committed frame per timestep).
             dream_concat = frames_to_arrays(dream.trajectory, cs.conditioning_camera)
-            dream_view = [split_concat_view(f)[region] for f in dream_concat]
+            split = [split_concat_view(f) for f in dream_concat]
             original_window = [
                 real.frames[seed_index + i]
-                for i in range(len(dream_view))
+                for i in range(len(split))
                 if seed_index + i < len(real.frames)
             ]
-            original_view = frames_to_arrays(original_window, view_role)
+            dream_views: dict[str, list] = {}
+            original_views: dict[str, list] = {}
+            for region in ("wrist", "exterior_left", "exterior_right"):
+                view_role = cs.concat_cameras[region]
+                dream_views[region] = [s[region] for s in split]
+                original_views[region] = frames_to_arrays(original_window, view_role)
 
             rrd_path = export_dream_rerun(
                 clip_dir / "dream.rrd",
-                original_frames=original_view,
-                dream_frames=dream_view,
+                original_views=original_views,
+                dream_views=dream_views,
                 seed_concat=seed,
                 instruction=real.frames[seed_index].instruction,
                 perturbation=instruction,
                 fps=real.fps,
                 policy_name=cs.policy_adapter,
-                camera=view_role,
                 recording_id=f"dream_{episode}_{kf.index:04d}_{tag}",
             )
             print(f"    saved {rrd_path}")
@@ -229,7 +284,7 @@ def main() -> None:
             record = {
                 "keyframe_index": kf.index, "kind": kf.kind, "seed_index": seed_index,
                 "perturbation": instruction, "n_loop_steps": cs.n_loop_steps,
-                "n_actions": cs.n_actions, "execute_steps": commit, "n_frames": len(dream_view),
+                "n_actions": cs.n_actions, "execute_steps": commit, "n_frames": len(split),
                 "reasoner_question": cs.reasoner_question, "verdict": verdict,
             }
             (clip_dir / "verdict.json").write_text(json.dumps(record, indent=2))

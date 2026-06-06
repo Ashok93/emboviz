@@ -54,8 +54,9 @@ analysis:
     rerun_camera: wrist                      # concat region shown in the dream .rrd
                                              # (wrist = the full-res grasp view)
     concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
-    concat_resolution: [360, 640]            # wrist panel H×W -> 540×640 concat, the
-                                             # Cosmos DROID training scale (droid_plus_lerobot_640x360)
+    concat_resolution: [352, 640]            # wrist panel H×W -> 528×640 concat, a clean
+                                             # multiple of 16 so Cosmos does not round the
+                                             # height (540->528) and corrupt the re-fed frame
     # Baseline (unperturbed): empty list -> the loop runs the recorded scene with
     # no edit. For the perturbed run, list an edit instruction, e.g.:
     #   perturbations: ["replace the marker in the cup with a spoon"]
@@ -78,8 +79,12 @@ analysis:
     # (16 is the trained size, but the policy caps us; π0.5-droid would give 12).
     n_actions: 8                             # π0's chunk dreamed per call (1+4N on-grid)
     execute_steps: 8                         # commit the WHOLE chunk → re-feed the last frame
-    n_loop_steps: 17                         # ~17 chunks x 8 ≈ 136 frames ≈ the full episode (134)
-    lead_s: 0.5
+    # Dream ONE decisive moment, not the whole episode: seed just before a grasp
+    # keyframe so Cosmos's faithful window (~1-2 chunks) lands ON the grasp, then
+    # ride out the lift. 6 chunks x 8 = 48 frames ≈ 3.2 s at 15 fps. Select the
+    # grasp with: --keyframe-kinds gripper_change --near-frame <grasp frame>.
+    n_loop_steps: 6                          # ~48 frames ≈ 3.2 s clip
+    lead_s: 0.6                              # seed ~9 frames before the grasp keyframe
     # reasoner_url omitted -> no verdict (this omni server returns images, not text)
 
 output: ./outputs/cosmos_dream_312
