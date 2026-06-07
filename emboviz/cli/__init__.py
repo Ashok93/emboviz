@@ -7,6 +7,7 @@ Subcommands:
                                (graceful by default; --force to SIGKILL)
   emboviz list-models        — show installed model adapters
   emboviz list-datasets      — show installed dataset / recording adapters
+  emboviz list-world-models  — show installed world models (rollout substrate)
   emboviz version            — print version + Python info
   emboviz install-<adapter>  — materialise the runtime venv for a VLA
                                adapter. Currently shipped:
@@ -26,7 +27,12 @@ import click
 
 from emboviz.cli.analyze import analyze_cmd
 from emboviz.cli.convert_pi0 import convert_pi0_cmd
-from emboviz.cli.info import list_datasets_cmd, list_models_cmd, version_cmd
+from emboviz.cli.info import (
+    list_datasets_cmd,
+    list_models_cmd,
+    list_world_models_cmd,
+    version_cmd,
+)
 from emboviz.cli.install_adapter import register_install_commands
 from emboviz.cli.stop import stop_cmd
 
@@ -45,6 +51,7 @@ def main() -> None:
 main.add_command(analyze_cmd)
 main.add_command(list_models_cmd)
 main.add_command(list_datasets_cmd)
+main.add_command(list_world_models_cmd)
 main.add_command(version_cmd)
 main.add_command(convert_pi0_cmd)
 main.add_command(stop_cmd)

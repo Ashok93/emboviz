@@ -65,7 +65,7 @@ def build_source(
 
     if format == "lerobot":
         return _build_lerobot(path, cameras, state, action, gripper,
-                              instruction, n_episodes)
+                              instruction, extra, n_episodes)
     if format == "gr00t":
         return _build_gr00t(path, cameras, state, action, gripper,
                             instruction, n_episodes)
@@ -85,7 +85,7 @@ def build_source(
 
 # ── LeRobot — isolated reader worker ──────────────────────────────────
 
-def _build_lerobot(path, cameras, state, action, gripper, instruction, n_episodes):
+def _build_lerobot(path, cameras, state, action, gripper, instruction, extra, n_episodes):
     """Connect to the isolated ``emboviz-lerobot`` reader worker.
 
     Core does NOT read LeRobot data in-process (lerobot's transitive
@@ -105,6 +105,7 @@ def _build_lerobot(path, cameras, state, action, gripper, instruction, n_episode
         "action": action,
         "gripper": gripper,
         "instruction": instruction,
+        "extra": extra,
         "n_episodes": n_episodes,
     }
     return connect_reader("lerobot", reader_kwargs=reader_kwargs)

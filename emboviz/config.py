@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Valid values mirror emboviz_wire's StateConvention / GripperKind /
 # GripperUnits literals. We re-declare them here (rather than import the
@@ -74,12 +74,17 @@ class ActionCfg(_Strict):
 
 
 class GripperCfg(_Strict):
-    # index (or per-dim name) of the gripper within the state vector.
-    # Optional: the ``gr00t`` reader derives it from the dataset's own
-    # meta/modality.json (its single source of truth), so a gr00t config
-    # omits it. The lerobot / hdf5 / rlds readers require it and raise
-    # clearly if it is absent.
+    # Where the gripper scalar comes from. Provide exactly one of:
+    #   • ``source`` — index (or per-dim name) of the gripper WITHIN the state
+    #     vector (datasets that pack the gripper into observation.state).
+    #   • ``key``    — a SEPARATE dataset feature key carrying the gripper on its
+    #     own (e.g. DROID's ``observation.state.gripper_position``), used when
+    #     the state vector declared by ``state.key`` does not contain it.
+    # Both omitted is valid only for the ``gr00t`` reader, which derives the
+    # gripper index from the dataset's own meta/modality.json. Every other
+    # reader requires one and raises clearly if neither is given.
     source: Optional[Union[int, str]] = None
+    key: Optional[str] = None
     kind: str = "parallel_jaw"
     units: str = "unit"
     range: tuple[float, float] = (0.0, 1.0)
@@ -97,6 +102,16 @@ class GripperCfg(_Strict):
         if v not in _GRIPPER_UNITS:
             raise ValueError(f"gripper.units={v!r} not in {sorted(_GRIPPER_UNITS)}")
         return v
+
+    @model_validator(mode="after")
+    def _check_source_xor_key(self) -> "GripperCfg":
+        if self.source is not None and self.key is not None:
+            raise ValueError(
+                "dataset.gripper: set EITHER `source` (the gripper's index within "
+                "the state vector) OR `key` (a separate gripper feature key), not "
+                "both — they are two different ways to locate the same scalar."
+            )
+        return self
 
 
 class InstructionCfg(_Strict):
@@ -136,6 +151,273 @@ class DatasetCfg(_Strict):
         return v
 
 
+# Cartesian conventions track an end-effector pose; joint conventions track a
+# joint vector and forward-kinematics it (so they require a robot). Kept in sync
+# with emboviz_cosmos3.bridge — core does not import the adapter.
+_CARTESIAN_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
+_JOINT_ACTION_CONVENTIONS = {"droid_joint_velocity"}
+_ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
+_CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
+
+
+class SceneSwapCfg(_Strict):
+    """Masked counterfactual object swap for the closed-loop dream.
+
+    SAM 3 localizes ``mask_query`` independently in every concat camera; the
+    masked region is then either replaced with ``replace_query`` (Stable
+    Diffusion text-guided inpainting, the ``sd-inpaint`` adapter) or — when
+    ``replace_query`` is empty — removed (LaMa fills it with plausible
+    background). The dream is run from both the original seed and the edited seed
+    and shown side by side, so the policy's behaviour under the counterfactual is
+    judged against reality.
+
+    A camera with no confident detection keeps its ORIGINAL image: the policy
+    needs all concat cameras to drive the dream, so dropping a view is not an
+    option. This is not a silent fallback — the per-camera status (which views
+    were edited, which kept their original, and why) is recorded on the clip, so
+    a partial swap (e.g. wrist only) is never mistaken for a full one. When no
+    camera detects the target at all, the swap column is left empty and the clip
+    marks it as "not run".
+    """
+
+    mask_query: str                               # SAM 3 phrase: the object to locate (e.g. "the marker")
+    replace_query: str = ""                        # object to paint in its place (SD inpaint); empty -> remove (LaMa)
+    # Grow the detected mask by this many pixels before editing. A tight mask
+    # around a thin object leaves the inserter no room to paint a different shape
+    # (a spoon into a marker's silhouette); a margin gives it space. 0 = off.
+    mask_dilation: int = 0
+    # SD-inpaint insertion controls (used only when replace_query is set). SD
+    # inpainting defaults to harmonizing the masked region with its surroundings
+    # (erasing the object); a high guidance plus a negative prompt forbidding the
+    # empty background forces it to actually paint replace_query instead.
+    edit_guidance_scale: float = 7.5              # higher = obey replace_query harder
+    edit_negative_prompt: str = ""                # e.g. "empty cup, nothing" to prevent erasure
+    # Detection thresholds (SAM 3). Defaults are SAM 3's recommended 0.5/0.5. A
+    # target seen only from the close wrist view but missed by the distant
+    # exteriors is expected; lower these (or phrase mask_query more neutrally)
+    # rather than masking a region the detector is not confident about.
+    detector_score_threshold: float = 0.5         # min detection confidence to keep a detection
+    detector_mask_threshold: float = 0.5          # per-pixel mask-logit cutoff
+
+    @field_validator("mask_query")
+    @classmethod
+    def _check_mask_query(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                "cosmos_stress.scene_swap.mask_query must be a non-empty phrase "
+                "naming the object to locate (e.g. \"the marker\"). The swap "
+                "refuses to guess the target."
+            )
+        return v.strip()
+
+    @field_validator("detector_score_threshold", "detector_mask_threshold")
+    @classmethod
+    def _check_thresholds(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(
+                f"cosmos_stress.scene_swap detector thresholds must be in [0, 1], got {v}."
+            )
+        return v
+
+    @field_validator("mask_dilation")
+    @classmethod
+    def _check_dilation(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"cosmos_stress.scene_swap.mask_dilation must be >= 0, got {v}.")
+        return v
+
+
+class CosmosStressCfg(_Strict):
+    """Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+
+    Find the episode's decisive instants, optionally perturb each seed frame
+    ("rotate the cup 90 degrees", "replace the cup with a rubber duck"), then run
+    the user's policy inside Cosmos step by step and judge the outcome with the
+    reasoner. With no ``policy_adapter`` the loop is driven by the episode's own
+    recorded actions (the faithfulness baseline).
+
+    Two editing modes are mutually exclusive:
+
+      * ``perturbations`` — whole-frame instruction edits (one separate clip per
+        instruction). Unmasked: Cosmos may repaint the entire scene.
+      * ``scene_swap`` — masked counterfactual object swap (SAM 3 + masked edit /
+        LaMa removal), rendered as a baseline-vs-swap side-by-side in ONE clip.
+    """
+
+    server_url: str                               # vLLM-Omni Cosmos server (forward dynamics + edit)
+    domain: str = "droid_lerobot"
+    action_dim: int = 10
+    # Policy under test. None -> recorded-action faithfulness baseline (no policy).
+    policy_adapter: Optional[str] = None
+    policy_kwargs: dict[str, Any] = Field(default_factory=dict)  # adapter constructor kwargs (e.g. {config_name: pi0_droid})
+    action_convention: Optional[str] = None       # required when policy_adapter is set
+    # Robot for joint-space action conventions (forward kinematics: joints -> EE
+    # pose). Give EITHER a preconfigured catalog name (``robot: franka_panda``) OR
+    # a custom URDF triple (``robot_urdf`` + ``robot_ee_frame`` + ``robot_joint_names``).
+    # Required for joint conventions, forbidden for cartesian ones.
+    robot: Optional[str] = None
+    robot_urdf: Optional[str] = None
+    robot_ee_frame: Optional[str] = None
+    robot_joint_names: Optional[list[str]] = None
+    # policy camera role -> concat region (e.g. {"primary": "exterior_left", "wrist": "wrist"})
+    camera_map: dict[str, str] = Field(default_factory=dict)
+    # concat region -> the episode's camera role used to build the stitched seed
+    concat_cameras: dict[str, str] = Field(
+        default_factory=lambda: {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"}
+    )
+    # Wrist-panel size (H, W) the seed concat is built at — sets the world model's
+    # conditioning resolution. The Cosmos DROID domain trained on 640x360 (W x H)
+    # per camera (a 360 px wrist -> 540x640 concat); feeding less puts the model
+    # off-distribution and the dream blurs. None keeps the cameras' native size.
+    concat_resolution: Optional[tuple[int, int]] = None
+    perturbations: list[str] = Field(default_factory=list)  # whole-frame edit instructions; empty -> none
+    # Masked counterfactual object swap (baseline-vs-swap side-by-side). Mutually
+    # exclusive with ``perturbations``.
+    scene_swap: Optional[SceneSwapCfg] = None
+    n_loop_steps: int = 2                         # closed-loop turns (small — drifts after the first turn or two)
+    n_actions: int = 16                           # prediction horizon: frames dreamed per turn (one Cosmos chunk)
+    # Execution horizon: dreamed frames committed before the policy re-plans
+    # (receding horizon). None -> commit the whole chunk. 1 is most reactive: the
+    # policy re-decides on the next dreamed frame, so the policy (not the dream)
+    # drives the rollout. Must satisfy 1 <= execute_steps <= n_actions.
+    execute_steps: Optional[int] = None
+    lead_s: float = 0.5                           # seconds before each keyframe to seed
+    # Policy control rate (Hz) for joint-velocity conventions: joint configs advance
+    # by velocity * (1/control_hz) per step. π0-DROID runs at 15 Hz (openpi
+    # DROID_CONTROL_FREQUENCY). Unused by cartesian conventions.
+    control_hz: float = 15.0
+    conditioning_camera: str = "primary"
+    state_convention: str = "ee_pose"
+    reasoner_url: Optional[str] = None            # reasoner server; None -> no verdict
+    reasoner_question: str = (
+        "Did the robot successfully grasp and lift the target object? "
+        "Answer in one sentence, and if it failed, say exactly how."
+    )
+
+    @field_validator("action_convention")
+    @classmethod
+    def _check_convention(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _ACTION_CONVENTIONS:
+            raise ValueError(
+                f"cosmos_stress.action_convention={v!r} not in {sorted(_ACTION_CONVENTIONS)}."
+            )
+        return v
+
+    @field_validator("camera_map")
+    @classmethod
+    def _check_camera_map(cls, v: dict[str, str]) -> dict[str, str]:
+        bad = {r for r in v.values() if r not in _CONCAT_REGIONS}
+        if bad:
+            raise ValueError(
+                f"cosmos_stress.camera_map regions {sorted(bad)} invalid; "
+                f"valid regions: {sorted(_CONCAT_REGIONS)}."
+            )
+        return v
+
+    @field_validator("concat_cameras")
+    @classmethod
+    def _check_concat_cameras(cls, v: dict[str, str]) -> dict[str, str]:
+        if set(v) != _CONCAT_REGIONS:
+            raise ValueError(
+                f"cosmos_stress.concat_cameras must map exactly {sorted(_CONCAT_REGIONS)} "
+                f"to episode camera roles; got keys {sorted(v)}."
+            )
+        return v
+
+    @field_validator("n_loop_steps", "n_actions")
+    @classmethod
+    def _check_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
+        return v
+
+    @field_validator("concat_resolution")
+    @classmethod
+    def _check_concat_resolution(cls, v: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
+        if v is not None and (len(v) != 2 or v[0] < 2 or v[1] < 2):
+            raise ValueError(
+                f"cosmos_stress.concat_resolution must be (H, W) with each >= 2, got {v}."
+            )
+        return v
+
+    @field_validator("control_hz")
+    @classmethod
+    def _check_control_hz(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"cosmos_stress.control_hz must be > 0, got {v}.")
+        return v
+
+    @model_validator(mode="after")
+    def _check_execute_steps(self) -> "CosmosStressCfg":
+        if self.execute_steps is not None and not 1 <= self.execute_steps <= self.n_actions:
+            raise ValueError(
+                "cosmos_stress.execute_steps must satisfy 1 <= execute_steps <= "
+                f"n_actions ({self.n_actions}); got {self.execute_steps}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_edit_modes_exclusive(self) -> "CosmosStressCfg":
+        if self.scene_swap is not None and self.perturbations:
+            raise ValueError(
+                "cosmos_stress: set EITHER `perturbations` (whole-frame instruction "
+                "edits, one clip each) OR `scene_swap` (masked baseline-vs-swap "
+                "comparison), not both — they are different editing modes and "
+                "combining them is ambiguous."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_policy_requirements(self) -> "CosmosStressCfg":
+        if self.policy_adapter is not None:
+            if self.action_convention is None:
+                raise ValueError(
+                    "cosmos_stress.policy_adapter is set, so action_convention is required "
+                    f"(one of {sorted(_ACTION_CONVENTIONS)})."
+                )
+            if not self.camera_map:
+                raise ValueError(
+                    "cosmos_stress.policy_adapter is set, so camera_map is required "
+                    "(policy camera role -> concat region)."
+                )
+        self._check_robot()
+        return self
+
+    def _check_robot(self) -> None:
+        has_custom = any(
+            x is not None for x in (self.robot_urdf, self.robot_ee_frame, self.robot_joint_names)
+        )
+        is_joint = self.action_convention in _JOINT_ACTION_CONVENTIONS
+
+        if is_joint:
+            if self.robot is None and not has_custom:
+                raise ValueError(
+                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    "joint-space, so a robot is required for forward kinematics. Set "
+                    "`robot` (a preconfigured name, e.g. franka_panda) or the custom "
+                    "triple robot_urdf + robot_ee_frame + robot_joint_names."
+                )
+            if self.robot is not None and has_custom:
+                raise ValueError(
+                    "cosmos_stress: set EITHER `robot` (preconfigured) OR the custom "
+                    "robot_urdf/robot_ee_frame/robot_joint_names triple, not both."
+                )
+            if has_custom and not (
+                self.robot_urdf and self.robot_ee_frame and self.robot_joint_names
+            ):
+                raise ValueError(
+                    "cosmos_stress: a custom robot needs all of robot_urdf, "
+                    "robot_ee_frame, and robot_joint_names."
+                )
+        else:
+            if self.robot is not None or has_custom:
+                raise ValueError(
+                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    "cartesian and tracks the end-effector pose directly; remove the "
+                    "robot / robot_urdf settings (they apply only to joint conventions)."
+                )
+
+
 class AnalysisCfg(_Strict):
     episodes: str = "0"                           # "7" / "0,3,7" / "0-5" / "all"
     frame_start: int = 0
@@ -169,6 +451,9 @@ class AnalysisCfg(_Strict):
     modality_pool_seed: int = 0
     modality_pool_cache_dir: Optional[str] = None # optional on-disk cache for the SHAP-marginal pool
     show_imitation: bool = False
+    # Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+    # Optional; only consumed by the stress driver, not the standard diagnostics.
+    cosmos_stress: Optional[CosmosStressCfg] = None
 
     @field_validator("detector")
     @classmethod

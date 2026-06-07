@@ -75,4 +75,9 @@ analysis:
 - `dataset.cameras` — maps the model's logical roles (`primary`, `wrist_left`)
   to your dataset's actual camera keys.
 - `dataset.gripper` — optional. Omit it and the gripper value just stays inside
-  the state vector (no gripper-specific perturbation, nothing fabricated).
+  the state vector (no gripper-specific perturbation, nothing fabricated). When
+  set, declare where the gripper scalar comes from with **exactly one** of:
+  `source` (its index — or per-dim name — within the `state.key` vector), or
+  `key` (a *separate* dataset feature that carries the gripper on its own, e.g.
+  DROID's `action.gripper_position`). The `gr00t` reader needs neither — it
+  reads the index from the dataset's `meta/modality.json`.

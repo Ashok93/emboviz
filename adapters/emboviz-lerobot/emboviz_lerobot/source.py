@@ -82,6 +82,8 @@ class LeRobotEpisodeSource(EpisodeSource):
         state_key: Optional[str] = None,
         action_key: Optional[str] = None,
         gripper_extractor: GripperExtractor = _identity_state,
+        gripper_key: Optional[str] = None,
+        revision: Optional[str] = None,
         n_episodes: int = 1_000_000,
     ):
         if not image_keys:
@@ -91,7 +93,14 @@ class LeRobotEpisodeSource(EpisodeSource):
         self.image_keys = dict(image_keys)
         self.state_key = state_key
         self.action_key = action_key
+        # HF dataset revision (branch/tag/commit). LeRobot defaults to a
+        # version-TAG lookup, which untagged community datasets lack — set
+        # ``dataset.extra.revision: main`` to load from the default branch.
+        self.revision = revision
+        # The gripper comes from EITHER the state vector (via gripper_extractor)
+        # OR a separate feature column (gripper_key) — never both (config-checked).
         self.gripper_extractor = gripper_extractor
+        self.gripper_key = gripper_key
         self._n_episodes = n_episodes
         self.name = f"lerobot:{repo_id}"
         self._meta_dataset = None
@@ -273,7 +282,10 @@ class LeRobotEpisodeSource(EpisodeSource):
         try:
             if is_local:
                 return LeRobotDataset("local", root=self.repo_id, episodes=indices)
-            return LeRobotDataset(self.repo_id, episodes=indices, force_cache_sync=True)
+            return LeRobotDataset(
+                self.repo_id, episodes=indices, force_cache_sync=True,
+                revision=self.revision,
+            )
         except Exception as e:
             if not is_local:
                 raise
@@ -315,6 +327,7 @@ class LeRobotEpisodeSource(EpisodeSource):
         proprio: Optional[Proprioception] = None
         gripper: Optional[GripperState] = None
         raw_state = None
+        gripper_val: Optional[float] = None
         if self.state_key and self.state_key in sample:
             raw_state = sample[self.state_key].to(torch.float32).reshape(-1).numpy()
             proprio_vals, gripper_val = self.gripper_extractor(raw_state)
@@ -323,12 +336,19 @@ class LeRobotEpisodeSource(EpisodeSource):
                 else "joint_angles"
             )
             proprio = Proprioception(values=proprio_vals.copy(), convention=state_convention)
-            if gripper_val is not None and self.profile.gripper is not None:
-                gripper = GripperState(
-                    value=float(gripper_val),
-                    kind=self.profile.gripper.kind,
-                    units=self.profile.gripper.units,
-                )
+
+        # Separate-feature gripper: read the scalar from its own column. (The
+        # state-vector path leaves gripper_val None when gripper_key is set, so
+        # there is no double-source ambiguity — the config forbids both anyway.)
+        if self.gripper_key is not None and self.gripper_key in sample:
+            gripper_val = float(sample[self.gripper_key].to(torch.float32).reshape(-1)[0])
+
+        if gripper_val is not None and self.profile.gripper is not None:
+            gripper = GripperState(
+                value=float(gripper_val),
+                kind=self.profile.gripper.kind,
+                units=self.profile.gripper.units,
+            )
 
         obs = Observations(images=images, state=proprio, gripper=gripper)
 
@@ -457,10 +477,14 @@ def build_lerobot_source(
     action: Optional[dict] = None,
     gripper: Optional[dict] = None,
     instruction: Optional[dict] = None,
+    extra: Optional[dict] = None,
     n_episodes: Optional[int] = None,
 ) -> LeRobotEpisodeSource:
     """Build a configured :class:`LeRobotEpisodeSource` from a run config's
-    ``dataset`` section. Runs in the reader worker (has lerobot)."""
+    ``dataset`` section. Runs in the reader worker (has lerobot).
+
+    ``extra`` carries lerobot-specific reader knobs from ``dataset.extra`` —
+    currently ``revision`` (the HF dataset branch/tag/commit)."""
     if "primary" not in (cameras or {}):
         raise KeyError(
             "dataset.cameras must include a 'primary' role (the main "
@@ -491,6 +515,14 @@ def build_lerobot_source(
         action_dim = features[action_key]["shape"][0]
         action_names = parse_lerobot_names(features[action_key].get("names"))
 
+    # A gripper declared by a separate feature key must name a real feature.
+    gripper_key = gripper.get("key") if gripper else None
+    if gripper_key is not None and gripper_key not in features:
+        raise KeyError(
+            f"dataset.gripper.key={gripper_key!r} is not a feature in {path}'s "
+            f"info.json. Available: {sorted(features)}."
+        )
+
     profile = build_profile(
         name=info.get("robot_type") or path,
         cameras=cameras,
@@ -506,5 +538,7 @@ def build_lerobot_source(
         state_key=state_key,
         action_key=action_key,
         gripper_extractor=make_gripper_extractor(gripper, state_names),
+        gripper_key=gripper_key,
+        revision=(extra or {}).get("revision"),
         n_episodes=int(n_episodes or info.get("total_episodes", 1_000_000)),
     )

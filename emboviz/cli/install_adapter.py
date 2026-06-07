@@ -22,20 +22,28 @@ import sys
 
 import click
 
-from emboviz.adapters import find_adapter, find_reader, install_venv
+from emboviz.adapters import (
+    find_adapter,
+    find_reader,
+    find_world_model,
+    install_venv,
+)
 from emboviz.adapters.lifecycle import venv_python
 
 
 def _find_installable_spec(name: str):
-    """Resolve an install-able :class:`AdapterSpec` from EITHER the model-
-    adapter (``emboviz.adapters``) or the dataset-reader
-    (``emboviz.readers``) entry-point group. Both kinds build their
-    runtime venv identically; they differ only in the registry they
-    register under."""
-    try:
-        return find_adapter(name)
-    except KeyError:
-        return find_reader(name)
+    """Resolve an install-able :class:`AdapterSpec` from ANY of the three
+    entry-point groups: the model-adapter (``emboviz.adapters``), the
+    dataset-reader (``emboviz.readers``), or the world-model
+    (``emboviz.world_models``) group. All three build their runtime venv
+    identically; they differ only in the registry they register under."""
+    for finder in (find_adapter, find_reader, find_world_model):
+        try:
+            return finder(name)
+        except KeyError:
+            continue
+    # Re-raise the world-model finder's friendly "what IS installed" error.
+    return find_world_model(name)
 
 
 def _build_install_cmd(name: str, description: str) -> click.Command:
@@ -121,11 +129,16 @@ INSTALLABLE_ADAPTERS = {
     "act":      "ACT — Action Chunking Transformer (lerobot)",
     "smolvla":  "SmolVLA (lerobot)",
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
-    "lama":     "LaMa big-lama inpainting (on-manifold memorization fill)",
+    "lama":     "LaMa big-lama inpainting (on-manifold memorization fill; object removal)",
+    "sd-inpaint": "Stable Diffusion text-guided inpainting (object insertion; dream scene swap)",
     # Dataset readers register under the ``emboviz.readers`` group but
     # install into a runtime venv identically — same command, same flow.
     "lerobot":      "LeRobot dataset reader (isolated; reads LeRobot v3.0 datasets)",
     "reader-gr00t": "GR00T-format dataset reader (isolated; LeRobot v2.1 + modality.json)",
+    # World models register under the ``emboviz.world_models`` group; same
+    # venv / spawn flow. The cosmos3 worker is a GPU-free HTTP client to a
+    # separate vLLM-Omni server.
+    "cosmos3":      "NVIDIA Cosmos3-Nano world model (forward dynamics via vLLM-Omni)",
 }
 
 

@@ -53,4 +53,4 @@ analysis:
   detector: sam3                                # sam3 | gd-sam
   fills: [channel_mean, gaussian_blur]          # add lama_inpaint for the on-manifold fill (needs emboviz-lama)
 
-output: ./report/act
+output: ./outputs/act

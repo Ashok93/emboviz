@@ -13,7 +13,7 @@ import sys
 
 import click
 
-from emboviz.adapters import list_adapters
+from emboviz.adapters import list_adapters, list_world_models
 
 
 # Human-readable descriptions for each registered adapter alias. The
@@ -85,6 +85,39 @@ def list_models_cmd() -> None:
 
     click.echo()
     click.echo("Use: emboviz analyze --config <file>   (templates under configs/)")
+
+
+_WORLD_MODEL_DESCRIPTIONS: dict[str, str] = {
+    "cosmos3": "NVIDIA Cosmos3-Nano — action-conditioned forward dynamics via vLLM-Omni.",
+}
+
+
+@click.command("list-world-models")
+def list_world_models_cmd() -> None:
+    """Show the world models this install can drive.
+
+    World models predict future frames from a conditioning frame + actions
+    (the substrate for trust-calibration and rollout diagnostics). Like the
+    VLA adapters, each runs as an isolated worker; the heavy model lives in a
+    separate inference server.
+
+      ✓  the world-model shim is installed (its entry point is discoverable)
+      ·  not installed — shows the ``uv sync --extra <name>`` command to get it
+    """
+    installed = list_world_models()
+    click.echo("Available world models (ZMQ workers):")
+
+    all_known = sorted(set(_WORLD_MODEL_DESCRIPTIONS) | set(installed))
+    for name in all_known:
+        desc = _WORLD_MODEL_DESCRIPTIONS.get(name, "")
+        mark = "✓" if name in installed else "·"
+        if name in installed:
+            click.echo(f"  {mark} {name:<10} {desc}")
+        else:
+            click.echo(
+                f"  {mark} {name:<10} {desc}\n"
+                f"           install:  uv sync --extra {name}"
+            )
 
 
 @click.command("list-datasets")

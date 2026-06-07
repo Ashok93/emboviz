@@ -37,13 +37,19 @@ dependencies = [
     # detector + on-manifold fill and BOTH dataset-format readers always
     # present, so a first install is a single command.
     "emboviz-sam3>=0.3",          # SAM 3 target detector (memorization mask)
-    "emboviz-lama>=0.3",          # LaMa on-manifold inpainting fill
+    "emboviz-lama>=0.3",          # LaMa on-manifold inpainting fill (object removal)
+    "emboviz-sd-inpaint>=0.1",    # SD text-guided inpainting (object insertion, dream scene swap)
     "emboviz-lerobot>=0.3",       # LeRobot v3.0 dataset reader
     "emboviz-reader-gr00t>=0.3",  # GR00T-format reader (LeRobot v2.1 + modality.json)
     # plumbing — pure-Python or fast-imported data wrangling
     "numpy>=1.26",
     "scipy>=1.11",
     "Pillow>=10.0",
+    # World-model viz (emboviz/world_models/viz.py) encodes/decodes MP4 in the
+    # host process — the dream/stress CLIs save dream videos here, not in a
+    # worker. PyAV carries the bundled ffmpeg libraries imageio's writer uses.
+    "imageio>=2.34",
+    "av>=12",
     "tqdm>=4.66",
     "click>=8.1",
     "pydantic>=2.7",
@@ -101,6 +107,21 @@ pi0     = ["emboviz-pi0>=0.3"]
 gr00t   = ["emboviz-gr00t>=0.3"]
 act     = ["emboviz-act>=0.3"]
 smolvla = ["emboviz-smolvla>=0.3"]
+
+# ────────── World models ──────────
+# Generative world models (Scene + actions -> future frames), used as the
+# substrate for trust-calibration and rollout diagnostics. Same isolated-worker
+# pattern as the VLA adapters, but the heavy model runs in a separate vLLM-Omni
+# server — the worker shim here is a GPU-free HTTP client.
+cosmos3 = ["emboviz-cosmos3>=0.1"]
+
+# ────────── Robot kinematics ──────────
+# Robot-agnostic forward kinematics (joints -> end-effector pose), Pinocchio-
+# backed. Runs in-process in the driver (no isolated worker, no torch conflict).
+# Needed to fly a joint-space policy (π0-DROID) inside a Cartesian-conditioned
+# world model: install alongside cosmos3 for the closed-loop DROID stress test.
+robot = ["emboviz-robot>=0.1"]
+
 all = [
     "emboviz-openvla>=0.3",
     "emboviz-oft>=0.3",
@@ -108,6 +129,8 @@ all = [
     "emboviz-gr00t>=0.3",
     "emboviz-act>=0.3",
     "emboviz-smolvla>=0.3",
+    "emboviz-cosmos3>=0.1",
+    "emboviz-robot>=0.1",
 ]
 
 # ────────── Optional heavy dataset family ──────────
@@ -155,6 +178,7 @@ emboviz = "emboviz.cli:main"
 emboviz-wire         = { path = "adapters/emboviz-wire",         editable = true }
 emboviz-sam3         = { path = "adapters/emboviz-sam3",         editable = true }
 emboviz-lama         = { path = "adapters/emboviz-lama",         editable = true }
+emboviz-sd-inpaint   = { path = "adapters/emboviz-sd-inpaint",   editable = true }
 emboviz-lerobot      = { path = "adapters/emboviz-lerobot",      editable = true }
 emboviz-reader-gr00t = { path = "adapters/emboviz-reader-gr00t", editable = true }
 emboviz-openvla      = { path = "adapters/emboviz-openvla",      editable = true }
@@ -163,6 +187,8 @@ emboviz-pi0          = { path = "adapters/emboviz-pi0",          editable = true
 emboviz-gr00t        = { path = "adapters/emboviz-gr00t",        editable = true }
 emboviz-act          = { path = "adapters/emboviz-act",          editable = true }
 emboviz-smolvla      = { path = "adapters/emboviz-smolvla",      editable = true }
+emboviz-cosmos3      = { path = "adapters/emboviz-cosmos3",      editable = true }
+emboviz-robot        = { path = "adapters/emboviz-robot",        editable = true }
 
 [build-system]
 requires = ["hatchling"]

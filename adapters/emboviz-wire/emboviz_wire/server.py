@@ -279,6 +279,75 @@ class DatasetReaderHandler:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Standard world-model handler — every world-model adapter uses this.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class WorldModelHandler:
+    """Wire-method dispatcher for any :class:`emboviz_wire.world_model_
+    protocol.WorldModel` — the world-model analogue of :class:`VLAModelHandler`
+    and :class:`DatasetReaderHandler`.
+
+    Lives in the isolated world-model worker venv (the heavy generative
+    checkpoint + its inference stack). It is the boundary between msgpack
+    bytes and the typed Scene / Trajectory objects: it decodes the
+    conditioning Scene and action array, calls the model, and encodes the
+    predicted rollout as a Trajectory. World-model packages just write::
+
+        serve(lambda **kw: WorldModelHandler(Cosmos3Adapter(**kw)),
+              name="cosmos3")
+    """
+
+    def __init__(self, model):
+        self._m = model
+
+    @property
+    def methods(self) -> dict[str, Callable[[dict], Any]]:
+        return {
+            "static_metadata":    self._static_metadata,
+            "rollout":            self._rollout,
+            "prepare_actions":    self._prepare_actions,
+            "actions_from_video": self._actions_from_video,
+        }
+
+    def _static_metadata(self, _: dict) -> dict:
+        m = self._m
+        return {
+            "model_id":            str(m.model_id),
+            "capabilities":        int(m.capabilities.value),
+            "action_dim":          int(m.action_dim),
+            "supported_domains":   sorted(m.supported_domains),
+            "conditioning_camera": str(m.conditioning_camera),
+        }
+
+    def _rollout(self, args: dict) -> dict:
+        init = wire.decode_scene(args["init"])
+        actions = np.asarray(args["actions"])
+        num_frames = args.get("num_frames")
+        num_frames = None if num_frames is None else int(num_frames)
+        traj = self._m.rollout(init, actions, num_frames=num_frames)
+        return wire.encode_trajectory(traj)
+
+    def _prepare_actions(self, args: dict) -> np.ndarray:
+        episode = wire.decode_trajectory(args["episode"])
+        frame_start = int(args.get("frame_start", 0))
+        n_actions = args.get("n_actions")
+        n_actions = None if n_actions is None else int(n_actions)
+        return np.asarray(
+            self._m.prepare_actions(episode, frame_start=frame_start, n_actions=n_actions)
+        )
+
+    def _actions_from_video(self, args: dict) -> np.ndarray:
+        frames = wire.decode_trajectory(args["frames"])
+        return np.asarray(self._m.actions_from_video(frames))
+
+    def close(self) -> None:
+        close = getattr(self._m, "close", None)
+        if callable(close):
+            close()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Async ROUTER dispatch loop.
 # ─────────────────────────────────────────────────────────────────────
 

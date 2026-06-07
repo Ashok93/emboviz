@@ -1,0 +1,28 @@
+[project]
+name = "emboviz-cosmos3"
+version = "0.1.0"
+description = "NVIDIA Cosmos3-Nano world-model adapter for emboviz — action-conditioned forward dynamics via a vLLM-Omni server, run as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# THIN SHIM for the user's MAIN venv. Carries zero heavy deps — its job is
+# to advertise an AdapterSpec via the ``emboviz.world_models`` entry point
+# (so the world-model lifecycle knows what to install) and expose the
+# Cosmos3WorldModel class. The HTTP + video-decode stack (requests, imageio,
+# av, Pillow) lives in ``AdapterSpec.runtime_pip`` and installs into
+# ``~/.emboviz/venvs/cosmos3/``.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.world_models"]
+cosmos3 = "emboviz_cosmos3.spec:SPEC"
+
+[project.scripts]
+emboviz-cosmos3 = "emboviz_cosmos3.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

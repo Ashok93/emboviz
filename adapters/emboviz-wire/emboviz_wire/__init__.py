@@ -20,6 +20,7 @@ Contents:
   • ``handler`` / ``AdapterSpec``— the worker handler contract + adapter spec
   • ``types``                    — Scene / Observations / ActionResult / …
   • ``model_protocol``           — VLAModel / Capability / RequiredInputs
+  • ``world_model_protocol``     — WorldModel / WorldModelCapability
   • ``observations`` / ``profile`` / ``distances`` — the typed data model
 """
 
@@ -30,6 +31,7 @@ from emboviz_wire.server import (
     DatasetReaderHandler,
     ServiceHandler,
     VLAModelHandler,
+    WorldModelHandler,
     serve,
 )
 from emboviz_wire.client import (
@@ -37,6 +39,7 @@ from emboviz_wire.client import (
     RpcClient,
     ZMQAdapterClient,
     ZMQReaderClient,
+    ZMQWorldModelClient,
     default_endpoint,
 )
 from emboviz_wire.handler import AdapterSpec
@@ -62,6 +65,10 @@ from emboviz_wire.model_protocol import (
     NotSupported,
     RequiredInputs,
     VLAModel,
+)
+from emboviz_wire.world_model_protocol import (
+    WorldModel,
+    WorldModelCapability,
 )
 from emboviz_wire.observations import (
     ActionHistory,
@@ -92,9 +99,11 @@ __all__ = [
     "ServiceHandler",
     "VLAModelHandler",
     "DatasetReaderHandler",
+    "WorldModelHandler",
     "RpcClient",
     "ZMQAdapterClient",
     "ZMQReaderClient",
+    "ZMQWorldModelClient",
     "AdapterRpcError",
     "default_endpoint",
     "AdapterSpec",
@@ -122,6 +131,9 @@ __all__ = [
     "NotSupported",
     "RequiredInputs",
     "VLAModel",
+    # world-model protocol
+    "WorldModel",
+    "WorldModelCapability",
     # observations
     "ActionHistory",
     "DepthMap",

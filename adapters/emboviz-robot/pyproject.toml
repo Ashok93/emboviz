@@ -1,0 +1,25 @@
+[project]
+name = "emboviz-robot"
+version = "0.1.0"
+description = "Robot kinematics adapter for emboviz — robot-agnostic forward kinematics (joints -> end-effector pose) via Pinocchio, with canonical robot models resolved through robot_descriptions."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# Runs IN-PROCESS (no isolated worker venv): Pinocchio is a self-contained
+# manylinux wheel with no torch/transformers conflict, so it installs directly
+# into whatever environment imports it. The package's job is to turn a robot's
+# joint vector into an end-effector pose, independent of any world model or
+# policy. Robot models are not vendored — robot_descriptions resolves the
+# official URDF/MJCF (franka_description, ur_description, ...) so adding a robot
+# is data (a description name), never hand-transcribed kinematics.
+dependencies = [
+    "pin>=2.7",
+    "robot_descriptions>=1.12",
+    "numpy>=1.26",
+    "scipy>=1.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

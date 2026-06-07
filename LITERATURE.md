@@ -1165,3 +1165,101 @@ is normalized against two model-specific anchors:
 ### Structured representations
 - Zhou, Y. et al. 2019. **On the Continuity of Rotation
   Representations in Neural Networks**, CVPR (arXiv:1812.07035).
+
+---
+
+## 8. Critical-moment keyframe detection (world-model stress test)
+
+### Question being answered
+*Where in a recorded episode are the instants that decide the task?* The
+world-model stress test seeds short rollouts at these moments (a grasp, a
+release, a settle); a quarter-second of approach + grasp is inside the world
+model's faithful horizon, a whole task is not.
+
+### Method
+A frame is a **keyframe** when either (a) the gripper changes open/closed state,
+or (b) the end-effector comes to rest — a per-second translation/rotation
+velocity below a small threshold, held for a minimum streak. This is the
+standard keyframe heuristic shared by keyframe-based manipulation policies.
+Thresholds (translation 5 mm/s, rotation 1.5°/s, gripper 1% command change,
+min-streak 3) follow NVIDIA's cosmos-framework idle-frame detector
+(`compute_idle_frames`, `data/vfm/action/pose_utils.py`). Implemented
+world-model-agnostically in `emboviz/world_models/keyframes.py` (numpy only,
+reads the wire `Trajectory`); the Cosmos-specific action encoding stays in the
+adapter.
+
+### Citations
+- Shridhar, M., Manuelli, L. & Fox, D. 2022. **Perceiver-Actor (PerAct): A
+  Multi-Task Transformer for Robotic Manipulation**, CoRL (arXiv:2209.05451) —
+  keyframe extraction from gripper-state change + near-zero joint velocity.
+- James, S. & Davison, A. 2022. **Q-attention / Coarse-to-Fine ARM**
+  (arXiv:2105.06411) — the keyframe (next-best-pose) formulation.
+- Goyal, A. et al. 2023. **RVT: Robotic View Transformer** (arXiv:2306.14896) —
+  reuses the PerAct keyframe scheme.
+- NVIDIA 2026. **Cosmos 3 / cosmos-framework** (OpenMDW-1.1) — `compute_idle_frames`
+  thresholds (velocity-based, fps-scaled, min-streak), the reference our defaults
+  mirror.
+
+
+## 9. Joint-space policy bridge — forward kinematics
+
+### Question being answered
+*How does a joint-space policy drive a Cartesian-conditioned world model?* The
+closed-loop simulator (§8) runs the user's policy inside Cosmos. π0-DROID is
+joint-space — it reads `observation/joint_position` (7 Franka joints) and emits
+joint-position deltas — while Cosmos `droid_lerobot` conditions on the
+end-effector pose. The bridge closes that gap with forward kinematics.
+
+### Method
+The policy's state is tracked as the joint vector itself (what it reads). Each
+action row is a joint-position delta added to the running configuration
+(π0-DROID's `use_delta_joint_actions`: `DeltaActions(make_bool_mask(7, -1))` in
+openpi, so the 7 joint dims are deltas and the gripper is absolute). Each
+configuration is mapped to the `panda_link8` flange pose by forward kinematics,
+then encoded by the shared DROID encoder (§ `domains.encode_droid_states`).
+
+Forward kinematics uses **Pinocchio** (`pin.forwardKinematics` /
+`updateFramePlacements`, reading `data.oMf[panda_link8]`). The robot model is
+loaded from the official URDF, resolved through `robot_descriptions`; gripper /
+`<mimic>` joints are locked at the neutral configuration (a joint cannot affect a
+frame that is its kinematic ancestor, so the reduction is exact). The kinematics
+engine lives in its own package (`emboviz-robot`) and is **injected** into the
+Cosmos adapter, which therefore carries no kinematics dependency — forward
+kinematics is a property of the robot, not the world model.
+
+The target frame and conventions are not chosen; they are dictated by what DROID
+records and what the Cosmos encoder consumes, and were verified against source:
+- DROID `cartesian_position` is the `panda_link8` pose in the `panda_link0` base,
+  computed by Polymetis forward kinematics (`ee_link_name: panda_link8` in every
+  Franka config; no tool-center-point offset, even with the Robotiq gripper).
+- Orientation is **extrinsic-XYZ** Euler (DROID `quat_to_euler` uses scipy
+  `as_euler("xyz")`), matching the cosmos-framework encoder's `"euler_xyz"`.
+- NVIDIA's `droid_lerobot_dataset.py` treats `cartesian_position` as the
+  `panda_link8` pose (the `_DROID_TO_OPENCV` comment), confirming the frame.
+
+### Validation
+The bridge is checked against ground truth, not internal consistency:
+`fk(joint_position)` reproduces the dataset's recorded `cartesian_position` to
+**0.000 mm / 0.000°** across 500 random DROID frames (DROID logs the same
+Pinocchio flange pose, so the match is exact). On real episode-312 frames, the
+joint bridge — integrating the recorded joint *deltas* and forward-kinematizing —
+produces the same Cosmos conditioning as encoding the recorded `cartesian_position`
+directly (`tests/test_joint_bridge.py`).
+
+### Citations
+- Carpentier, J. et al. 2019. **The Pinocchio C++ library — A fast and flexible
+  implementation of rigid body dynamics algorithms and their analytical
+  derivatives**, SII (HAL-01866228). The forward-kinematics engine.
+- Caron, S. et al. **robot_descriptions.py** — canonical robot URDF/MJCF
+  catalog; the source of the Franka Panda model (`panda_description`, from
+  Gepetto `example-robot-data`).
+- Khazatsky, A. et al. 2024. **DROID: A Large-Scale In-The-Wild Robot
+  Manipulation Dataset** (arXiv:2403.12945). `cartesian_position` /
+  `joint_position` / `gripper_position` definitions.
+- **Polymetis** (Meta fairo) — `RobotInterface.get_ee_pose` /
+  `robot_model.forward_kinematics`, `ee_link_name: panda_link8`; the frame DROID
+  logs.
+- **openpi** (`droid_policy.py`, `droid_rlds_dataset.py`, `config.py`) — the
+  8-D `[joint_delta(7), gripper(1)]` DROID action space and the delta mask.
+- Virtanen, P. et al. 2020. **SciPy** (`Rotation`) — extrinsic-XYZ Euler
+  conversion, matching DROID's and Cosmos's convention.
