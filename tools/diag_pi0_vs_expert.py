@@ -14,9 +14,9 @@ compare what it commands against what the expert demo actually did:
 
 Run for both candidate checkpoints to compare language-following:
 
-    uv run python tools/diag_pi0_vs_expert.py --config configs/droid_pi0.yaml \
+    uv run python tools/diag_pi0_vs_expert.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --start 30 --end 100 --stride 5 --config-name pi0_droid
-    uv run python tools/diag_pi0_vs_expert.py --config configs/droid_pi0.yaml \
+    uv run python tools/diag_pi0_vs_expert.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --start 30 --end 100 --stride 5 --config-name pi0_fast_droid
 """
 

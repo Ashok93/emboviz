@@ -85,28 +85,28 @@ A green Stage 1b means the full emboviz path works: conditioning frame + actions
 → HTTP → MP4 decode → `Trajectory`. (Synthetic frame + zero actions → a
 near-static rainbow rollout; that proves the *pipe*, not anything meaningful.)
 
-## Stage 2 — first real trust curve (a recorded DROID episode)
+## Stage 2 — first real dream (a recorded DROID episode)
 
-Only after both smokes are green. This feeds a real episode's actions, gets
-Cosmos's predicted rollout, and scores how far it can be trusted vs reality.
+Only after both smokes are green. This flies the π0-DROID policy inside Cosmos
+from a recorded episode's decisive moment and renders reality next to the
+counterfactual dream.
 
 The embodiment encoding is **implemented** for DROID (`droid_lerobot`, 10-D
 `[pos_delta(3), rot6d_delta(6), gripper(1)]`, quantile-normalized — bit-faithful
-to NVIDIA's `DROIDLeRobotDataset`). The adapter's `prepare_actions` derives the
-actions from the episode's cartesian state + gripper, so the dataset config must
-map state to the cartesian pose and the gripper. Run the driver from the Mac:
+to NVIDIA's `DROIDLeRobotDataset`). π0-DROID is joint-space; the FK bridge
+converts its joint vector to the panda_link8 cartesian pose the encoder needs
+(see `configs/cosmos_droid_pi0_demo.yaml`). Run the driver from the Mac:
 
 ```bash
-uv run python -m emboviz.world_models.stage2_cli \
-  --config configs/droid.yaml --episode 0 \
-  --world-model cosmos3 --server-url $U \
-  --domain droid_lerobot --action-dim 10 --n-actions 16 \
-  --out report/cosmos_trust
+uv run python -m emboviz.world_models.dream_cli \
+  --config configs/cosmos_droid_pi0_demo.yaml --episode 312 \
+  --keyframe-kinds gripper_change --near-frame 60 \
+  --out outputs/cosmos_dream
 ```
 
-Out comes `report/cosmos_trust/trust_report.json` + `trust_curve.png` and a
-plain-text verdict (trust horizon + the action-dependence control). Other
-embodiments need their own `prepare_actions` builder before they can run.
+Out comes the side-by-side Rerun `.rrd` (recorded | baseline dream | swap dream)
+plus per-clip `summary.json`. Other embodiments need their own conditioning
+bridge before they can run.
 
 ## Teardown (stop paying)
 

@@ -66,15 +66,20 @@ flies the policy from there. You watch the recorded episode, the unperturbed
 dream, and the counterfactual dream **side by side on one timeline** in Rerun, so
 you can see whether the policy adapts or falls back on a memorized motion.
 
-Because a world model is only faithful for a bounded horizon, emboviz reports the
-window over which the dream tracked reality and surfaces per-camera, per-step
-detail — a verdict only stands where the simulation held.
+A world model is only faithful for a bounded horizon, so the dream is seeded at
+the decisive moment and kept short, and the run surfaces per-camera, per-step
+detail (including which cameras the edit was applied to) so a partial swap is
+never presented as a full one.
 
 ```bash
 uv run python -m emboviz.world_models.dream_cli \
-    --config configs/droid_pi0.yaml --episode 312 \
+    --config configs/cosmos_droid_pi0_demo.yaml --episode 312 \
     --keyframe-kinds gripper_change --near-frame 60
 ```
+
+The stress test currently drives the **π0-DROID** policy
+(`configs/cosmos_droid_pi0_demo.yaml`); it is the only adapter wired to the
+Cosmos DROID conditioning. The Inspect diagnostics support every adapter below.
 
 ---
 

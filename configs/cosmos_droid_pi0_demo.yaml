@@ -7,7 +7,7 @@
 # encodes that as Cosmos droid_lerobot conditioning.
 #
 #   uv sync --extra cosmos3 --extra robot
-#   uv run python -m emboviz.world_models.dream_cli --config configs/droid_pi0.yaml --episode 312
+#   uv run python -m emboviz.world_models.dream_cli --config configs/cosmos_droid_pi0_demo.yaml --episode 312
 
 model:
   adapter: mock                              # the dream driver doesn't run this; a valid value is required

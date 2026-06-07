@@ -11,13 +11,11 @@ server, the policy, the perturbations, the camera maps). Output per clip is the
 **dream video** + the **reasoner verdict** — no pixel divergence, because a
 perturbed scene never happened in reality and has nothing to compare against.
 
-For the unperturbed recorded-action *faithfulness* check (does Cosmos reproduce
-reality on real actions), use ``stress_cli`` instead.
-
 Run::
 
-    uv run python -m emboviz.world_models.dream_cli --config configs/droid.yaml \
-        --episode 0 --out outputs/cosmos_dream
+    uv run python -m emboviz.world_models.dream_cli \
+        --config configs/cosmos_droid_pi0_demo.yaml --episode 312 \
+        --keyframe-kinds gripper_change --near-frame 60
 """
 
 from __future__ import annotations
@@ -92,8 +90,7 @@ def main() -> None:
     if cs.policy_adapter is None:
         raise SystemExit(
             "dream_cli runs the closed-loop *policy* simulator, so cosmos_stress."
-            "policy_adapter is required. For the recorded-action faithfulness "
-            "baseline (no policy), use stress_cli --source recorded."
+            "policy_adapter is required (currently 'pi0' for the DROID demo)."
         )
 
     episode = args.episode

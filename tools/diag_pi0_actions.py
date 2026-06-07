@@ -13,7 +13,7 @@ fine and the closed-loop collapse comes from the dream degrading pi0's input.
 If pi0's deltas are far larger, the problem is the policy/bridge itself (scale,
 convention, or an off-distribution seed) — independent of the world model.
 
-    uv run python tools/diag_pi0_actions.py --config configs/droid_pi0.yaml \
+    uv run python tools/diag_pi0_actions.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --frames 0,30,60,90
 """
 

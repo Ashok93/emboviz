@@ -10,7 +10,7 @@ GPU box before paying for the full dream run.
 
 Run::
 
-    uv run python tools/smoke_scene_swap.py --config configs/droid_pi0.yaml \
+    uv run python tools/smoke_scene_swap.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --near-frame 60 --out outputs/scene_swap_smoke
 
 Outputs (per region wrist / exterior_left / exterior_right): ``<region>_before.png``,

@@ -18,10 +18,7 @@ from emboviz_wire.observations.gripper import GripperState
 from emboviz_wire.observations.state import Proprioception
 from emboviz_wire.types import Observations, Scene, Trajectory
 
-from emboviz.world_models.keyframes import (
-    critical_windows,
-    detect_keyframes,
-)
+from emboviz.world_models.keyframes import detect_keyframes
 
 
 def _img() -> RGBImage:
@@ -88,19 +85,6 @@ def test_no_keyframes_when_static_and_gripper_constant() -> None:
     # opening settle; with no motion at all there is no moving→rest *edge*.
     kfs = detect_keyframes(_episode([0.0] * 10, [0.0] * 10))
     assert all(kf.kind != "gripper_change" for kf in kfs)
-
-
-def test_windows_are_fps_scaled_and_clamped() -> None:
-    traj = _episode(_XS, _GRIPPERS)  # fps=10, 20 frames
-    kfs = detect_keyframes(traj)
-    wins = critical_windows(traj, kfs, before_s=0.3, after_s=0.3)  # ±3 frames
-    by_kf = {w.keyframe.index: (w.start, w.stop) for w in wins}
-    assert by_kf[6] == (3, 10)
-    assert by_kf[8] == (5, 12)
-    assert by_kf[16] == (13, 20)   # clamped to episode end (20)
-    # A keyframe near frame 0 clamps the start to 0.
-    near_start = critical_windows(traj, kfs, before_s=10.0, after_s=0.1)
-    assert all(w.start == 0 for w in near_start)
 
 
 def test_missing_state_raises() -> None:

@@ -7,7 +7,7 @@ If Cosmos returns garbage from a good seed in a single call, the problem is the
 world-model request itself (image / size / num_frames / prompt) — not the policy,
 not the loop.
 
-    uv run python tools/diag_cosmos_call.py --config configs/droid_pi0.yaml \
+    uv run python tools/diag_cosmos_call.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --seed-index 0 --out outputs/cosmos_call_probe
 """
 

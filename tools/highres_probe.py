@@ -7,7 +7,7 @@ for the first keyframe but upscales the seed concat (and therefore the generated
 frames, which feed the next turn) to a target height, so we can compare fidelity
 at 256 vs 480 on the same scene without touching the main pipeline.
 
-    uv run python tools/highres_probe.py --config configs/droid_pi0.yaml \
+    uv run python tools/highres_probe.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --height 480 --out outputs/highres_probe_480
 """
 

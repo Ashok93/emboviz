@@ -62,23 +62,6 @@ class Keyframe:
     gripper_delta: float
 
 
-@dataclass(frozen=True)
-class CriticalWindow:
-    """A frame span ``[start, stop)`` around a keyframe, for seeding a rollout.
-
-    ``start`` is the seed frame (the pre-event approach); ``stop`` is exclusive.
-    Both are clamped to the episode bounds.
-    """
-
-    keyframe: Keyframe
-    start: int
-    stop: int
-
-    @property
-    def length(self) -> int:
-        return self.stop - self.start
-
-
 def _wrap_to_pi(delta: np.ndarray) -> np.ndarray:
     """Wrap an angle difference (rad) to ``[-pi, pi]`` so Euler wraparound near
     ±pi does not register as a huge rotation."""
@@ -236,41 +219,8 @@ def detect_keyframes(
     return keyframes
 
 
-def critical_windows(
-    traj: Trajectory,
-    keyframes: list[Keyframe],
-    *,
-    before_s: float = 5.0,
-    after_s: float = 5.0,
-) -> list[CriticalWindow]:
-    """Build a ``[keyframe - before_s, keyframe + after_s]`` frame window per
-    keyframe, fps-scaled and clamped to the episode.
-
-    The buffer captures the full approach before the event and the consequence
-    after it. Windows are returned in keyframe order; overlapping windows are NOT
-    merged (each keyframe is stress-tested from its own seed).
-    """
-    if traj.fps <= 0:
-        raise ValueError(f"critical_windows needs a positive fps, got {traj.fps}.")
-    if before_s < 0 or after_s < 0:
-        raise ValueError(f"before_s/after_s must be >= 0, got {before_s}/{after_s}.")
-
-    n = len(traj.frames)
-    before = int(round(before_s * traj.fps))
-    after = int(round(after_s * traj.fps))
-
-    windows: list[CriticalWindow] = []
-    for kf in keyframes:
-        start = max(0, kf.index - before)
-        stop = min(n, kf.index + after + 1)
-        windows.append(CriticalWindow(keyframe=kf, start=start, stop=stop))
-    return windows
-
-
 __all__ = [
-    "CriticalWindow",
     "Keyframe",
     "KeyframeKind",
-    "critical_windows",
     "detect_keyframes",
 ]

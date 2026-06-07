@@ -11,7 +11,7 @@ If this stays coherent across chunks, the loop + re-feed + Cosmos are sound and 
 dream's collapse is the policy (π0 dead-reckoning desync). If this *also* collapses,
 the bug is in our re-feed mechanics, independent of the policy.
 
-    uv run python tools/diag_recorded_loop.py --config configs/droid_pi0.yaml \
+    uv run python tools/diag_recorded_loop.py --config configs/cosmos_droid_pi0_demo.yaml \
         --episode 312 --steps 6 --out outputs/recorded_loop_probe
 """
 

@@ -8,7 +8,7 @@ ONE stepper turn. It confirms the policy's action chunk matches the bridge
 depends on except the world model itself. If this passes, the only remaining
 unknown is the Cosmos GPU server.
 
-    uv run python tools/dream_smoke.py --config configs/droid_pi0.yaml --episode 312
+    uv run python tools/dream_smoke.py --config configs/cosmos_droid_pi0_demo.yaml --episode 312
 """
 
 from __future__ import annotations
