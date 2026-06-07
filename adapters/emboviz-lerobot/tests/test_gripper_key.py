@@ -16,6 +16,7 @@ Run::
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emboviz.config import GripperCfg
 from emboviz_wire.dataset_build import build_profile, make_gripper_extractor
@@ -101,6 +102,7 @@ def _source(*, gripper_cfg: dict, state_names, state_key, gripper_key):
 
 
 def test_reader_separate_key_gripper() -> None:
+    pytest.importorskip("torch")  # _build_scene path needs torch tensors
     # DROID layout: cartesian state in its own key, gripper in a separate key.
     src = _source(
         gripper_cfg={"key": "action.gripper_position", "kind": "parallel_jaw", "units": "unit"},
@@ -125,6 +127,7 @@ def test_reader_separate_key_gripper() -> None:
 
 
 def test_reader_state_index_gripper_still_works() -> None:
+    pytest.importorskip("torch")  # _build_scene path needs torch tensors
     # Regression: the packed-state path (gripper.source) is unchanged.
     src = _source(
         gripper_cfg={"source": 7, "kind": "parallel_jaw", "units": "unit"},
