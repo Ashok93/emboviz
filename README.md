@@ -1,16 +1,24 @@
 # Emboviz
 
-**An interpretability toolkit for deployed Vision-Language-Action (VLA) policies.**
+## Robot policies the real world can't surprise.
+
+**Closed-loop policy evaluation in world models for Physical AI.**
 
 ![status](https://img.shields.io/badge/status-alpha-orange) ![license](https://img.shields.io/badge/license-Apache%202.0-blue) ![python](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue)
 
-Emboviz takes a trained VLA policy and your recorded episodes and tells you what
-the policy was actually consuming, what it was ignoring, and how stable its
-behaviour was — as per-frame metrics and scrubbable overlays you open in
-[Rerun](https://rerun.io). It surfaces evidence from the model's own forward
-pass; it does not score the policy or guess at root causes.
+A robot policy fails in the real world when it meets something it never trained
+on. Emboviz puts your trained VLA policy through the situations it *will* face but
+*hasn't* seen — and shows you exactly where it breaks, before deployment does.
+Two ways in:
 
-Every diagnostic is derived from published methodology and cited in
+- **Inspect** — read the policy's own forward pass to see what it actually uses
+  and what it ignores.
+- **Stress-test** — fly the policy inside a world model and replay the decisive
+  moments with the scene changed underneath it (swap or remove the manipulated
+  object), reality next to counterfactual.
+
+Everything comes back as per-frame metrics and scrubbable overlays in
+[Rerun](https://rerun.io). Methods are grounded in published work and cited in
 [`LITERATURE.md`](./LITERATURE.md).
 
 <p align="center">
@@ -19,7 +27,10 @@ Every diagnostic is derived from published methodology and cited in
 
 ---
 
-## The diagnostics
+## Inspect — what the policy is actually doing
+
+White-box diagnostics derived from the model's own forward pass. Evidence, not
+guesses: each one names what the policy consumed, ignored, or attended to.
 
 | Diagnostic | The question it answers |
 |---|---|
@@ -31,6 +42,39 @@ Every diagnostic is derived from published methodology and cited in
 
 Short and full names are both accepted: `memorization`, `modality`,
 `sensitivity`, `attention`, `chunk`.
+
+---
+
+## Stress-test — how the policy holds up in worlds it never saw
+
+> **Preview.** The world-model stress test is experimental and needs a running
+> Cosmos world-model server; the **Inspect** diagnostics above are the stable
+> path and need none.
+
+Real-world evaluation is the bottleneck in robot learning — every trial costs a
+reset, a human, and time, and a clean demo proves nothing about the edge cases.
+So instead of grading the policy on the one trajectory you recorded, emboviz runs
+it **in closed loop inside a world model** ([NVIDIA Cosmos](https://www.nvidia.com/en-us/ai/cosmos/)):
+the policy acts, the world model renders the consequence, the policy reacts —
+exactly the feedback loop it will run on a real robot.
+
+The point is the **counterfactuals you can't stage on hardware.** At the decisive
+moments of an episode (the grasp, the hand-off), emboviz edits the seed the world
+model conditions on — **swap** the manipulated object for another (SAM 3 locates
+it, a diffusion inpainter paints the replacement) or **remove** it (LaMa) — and
+flies the policy from there. You watch the recorded episode, the unperturbed
+dream, and the counterfactual dream **side by side on one timeline** in Rerun, so
+you can see whether the policy adapts or falls back on a memorized motion.
+
+Because a world model is only faithful for a bounded horizon, emboviz reports the
+window over which the dream tracked reality and surfaces per-camera, per-step
+detail — a verdict only stands where the simulation held.
+
+```bash
+uv run python -m emboviz.world_models.dream_cli \
+    --config configs/droid_pi0.yaml --episode 312 \
+    --keyframe-kinds gripper_change --near-frame 60
+```
 
 ---
 
@@ -203,6 +247,24 @@ Across all analyzed episodes, at the top of `report/`:
 
 ---
 
+## Where this is going
+
+The stress test today finds where a policy breaks. The direction is to **close
+the loop** — turn those failures back into a stronger policy:
+
+1. **Dream** the situations the policy will face but never trained on. *(preview today)*
+2. **Test** the policy against them in closed loop, and **inspect** why it fails. *(today)*
+3. **Surface** the failure set — ranked, with the exact conditions that broke it,
+   so it becomes a targeted list of data to collect rather than a blind one. *(next)*
+4. **Harden** — feed corrective data back into training and re-run the loop to
+   confirm the failure is fixed without regressions. *(direction)*
+
+Each step is a feedback loop, not a benchmark: the worth of a dreamed failure is
+that it would actually happen, so failures the world model couldn't render
+faithfully are dropped rather than counted.
+
+---
+
 ## Research foundations
 
 Every diagnostic is grounded in published methodology, with per-model
@@ -251,6 +313,7 @@ The models accessible through the shipped adapters are:
 | `act`, `smolvla` | [LeRobot](https://github.com/huggingface/lerobot) | Code Apache 2.0; checkpoint weights carry the license of the specific model you load |
 | `sam3` | [Meta Segment Anything 3](https://huggingface.co/facebook/sam3) | SAM License — source-available, permits commercial use with restrictions; not OSI open-source. The `--detector gd-sam` alternative uses GroundingDINO and SAM 2, both Apache 2.0 |
 | `lama` | [LaMa / big-lama](https://github.com/advimman/lama) | Apache 2.0 (code and checkpoints). The default TorchScript export is fetched from [`okaris/big-lama`](https://huggingface.co/okaris/big-lama), pinned to a commit |
+| `sd-inpaint` | [Stable Diffusion 2 inpainting](https://huggingface.co/stabilityai/stable-diffusion-2-inpainting) (default; any diffusers inpainting checkpoint works) | CreativeML Open RAIL++-M — permits commercial use with use-based restrictions; not OSI open-source. Used by the stress-test scene swap for object insertion |
 
 Datasets read through the LeRobot and GR00T-format readers (e.g. Open
 X-Embodiment, LIBERO, DROID, BridgeData) each carry their own license and terms;
