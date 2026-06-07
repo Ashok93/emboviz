@@ -715,6 +715,7 @@ dependencies = [
     { name = "emboviz-lerobot" },
     { name = "emboviz-reader-gr00t" },
     { name = "emboviz-sam3" },
+    { name = "emboviz-sd-inpaint" },
     { name = "emboviz-wire" },
     { name = "h5py" },
     { name = "huggingface-hub" },
@@ -804,6 +805,7 @@ requires-dist = [
     { name = "emboviz-robot", marker = "extra == 'all'", editable = "adapters/emboviz-robot" },
     { name = "emboviz-robot", marker = "extra == 'robot'", editable = "adapters/emboviz-robot" },
     { name = "emboviz-sam3", editable = "adapters/emboviz-sam3" },
+    { name = "emboviz-sd-inpaint", editable = "adapters/emboviz-sd-inpaint" },
     { name = "emboviz-smolvla", marker = "extra == 'all'", editable = "adapters/emboviz-smolvla" },
     { name = "emboviz-smolvla", marker = "extra == 'smolvla'", editable = "adapters/emboviz-smolvla" },
     { name = "emboviz-wire", editable = "adapters/emboviz-wire" },
@@ -992,6 +994,21 @@ requires-dist = [
 name = "emboviz-sam3"
 version = "0.3.0"
 source = { editable = "adapters/emboviz-sam3" }
+dependencies = [
+    { name = "emboviz-wire" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "emboviz-wire", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "emboviz-sd-inpaint"
+version = "0.1.0"
+source = { editable = "adapters/emboviz-sd-inpaint" }
 dependencies = [
     { name = "emboviz-wire" },
     { name = "numpy" },

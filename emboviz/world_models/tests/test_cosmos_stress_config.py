@@ -7,7 +7,7 @@ Run::
 
 from __future__ import annotations
 
-from emboviz.config import AnalysisCfg, CosmosStressCfg
+from emboviz.config import AnalysisCfg, CosmosStressCfg, SceneSwapCfg
 
 
 def test_recorded_baseline_minimal() -> None:
@@ -81,6 +81,48 @@ def test_nested_under_analysis() -> None:
     assert AnalysisCfg().cosmos_stress is None    # optional, absent by default
 
 
+def test_scene_swap_insert_and_remove() -> None:
+    c = CosmosStressCfg(
+        server_url="http://x",
+        scene_swap={"mask_query": "the marker", "replace_query": "a spoon"},
+    )
+    assert c.scene_swap.mask_query == "the marker" and c.scene_swap.replace_query == "a spoon"
+    assert c.scene_swap.detector_score_threshold == 0.5
+    # Empty replace_query is valid -> removal mode.
+    assert SceneSwapCfg(mask_query="the marker").replace_query == ""
+
+
+def test_scene_swap_requires_mask_query() -> None:
+    try:
+        SceneSwapCfg(mask_query="   ")
+    except Exception as e:
+        assert "mask_query must be a non-empty" in str(e)
+    else:
+        raise AssertionError("expected validation error")
+
+
+def test_scene_swap_threshold_range() -> None:
+    try:
+        SceneSwapCfg(mask_query="x", detector_score_threshold=1.5)
+    except Exception as e:
+        assert "in [0, 1]" in str(e)
+    else:
+        raise AssertionError("expected validation error")
+
+
+def test_scene_swap_and_perturbations_mutually_exclusive() -> None:
+    try:
+        CosmosStressCfg(
+            server_url="http://x",
+            perturbations=["replace the cup with a duck"],
+            scene_swap={"mask_query": "the cup"},
+        )
+    except Exception as e:
+        assert "not both" in str(e)
+    else:
+        raise AssertionError("expected validation error")
+
+
 def _run_all() -> None:
     test_recorded_baseline_minimal()
     test_policy_path_valid()
@@ -90,6 +132,10 @@ def _run_all() -> None:
     test_bad_convention_raises()
     test_concat_cameras_must_cover_all_regions()
     test_nested_under_analysis()
+    test_scene_swap_insert_and_remove()
+    test_scene_swap_requires_mask_query()
+    test_scene_swap_threshold_range()
+    test_scene_swap_and_perturbations_mutually_exclusive()
     print("OK: all cosmos_stress config checks passed")
 
 

@@ -51,8 +51,6 @@ analysis:
     control_hz: 15                            # DROID control rate; joints advance by velocity*(1/15)/step
     robot: franka_panda                      # forward kinematics: joints -> panda_link8 pose
     camera_map: {primary: exterior_left, wrist_left: wrist}   # π0 roles -> concat regions
-    rerun_camera: wrist                      # concat region shown in the dream .rrd
-                                             # (wrist = the full-res grasp view)
     concat_cameras: {wrist: wrist, exterior_left: primary, exterior_right: exterior_2}
     concat_resolution: [352, 640]            # wrist panel H×W -> 528×640 concat, a clean
                                              # multiple of 16 so Cosmos does not round the
@@ -60,7 +58,21 @@ analysis:
     # Baseline (unperturbed): empty list -> the loop runs the recorded scene with
     # no edit. For the perturbed run, list an edit instruction, e.g.:
     #   perturbations: ["replace the marker in the cup with a spoon"]
+    # (whole-frame, unmasked — Cosmos may repaint the entire scene). Mutually
+    # exclusive with scene_swap below.
     perturbations: []
+    # Masked counterfactual object swap (baseline-vs-swap, side by side in ONE
+    # clip). SAM 3 locates ``mask_query`` per camera; a non-empty ``replace_query``
+    # paints that object into the masked region via the sd-inpaint adapter (Stable
+    # Diffusion text-guided inpainting), an empty one removes the object via LaMa.
+    # Cameras with no confident detection keep their original image (the policy
+    # needs all cameras to drive the dream); the per-camera status is recorded on
+    # the clip so a partial swap is never presented as a full one. If NO camera
+    # detects the target, the swap column is left blank and marked "not run".
+    # Mutually exclusive with perturbations above.
+    scene_swap:
+      mask_query: "the marker"               # the object SAM 3 locates
+      replace_query: "a spoon"               # paint a spoon in its place; "" -> remove via LaMa
     # Maximally reactive loop: the policy re-plans as often as possible, so the
     # policy (not the dream) drives the trajectory. Cosmos's video VAE compresses
     # time 4x, so a dream call emits frames only in quanta of 4 (num_frames =

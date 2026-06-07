@@ -184,4 +184,115 @@ class CachingInpainter:
         self._cache.clear()
 
 
-__all__ = ["Inpainter", "InpaintKey", "LamaInpainter", "CachingInpainter"]
+class ObjectInserter(Protocol):
+    """Regenerates a masked region of an image to contain a described object.
+
+    The text-guided counterpart to :class:`Inpainter` (which only removes/fills
+    with background). Contract: ``image`` is an ``H×W×3`` uint8 RGB array;
+    ``mask`` is ``H×W`` boolean/uint8 (nonzero = the region to regenerate);
+    ``prompt`` names the object to paint in. Returns an ``H×W×3`` uint8 array
+    identical to ``image`` everywhere EXCEPT the masked region.
+    """
+
+    def insert(self, image: np.ndarray, mask: np.ndarray, prompt: str) -> np.ndarray: ...
+
+
+class SDInpaintInserter:
+    """Text-guided object insertion via Stable Diffusion inpainting, over ZMQ.
+
+    Thin host-side facade over :class:`emboviz_sd_inpaint.client.SDInpaintClient`.
+    The diffusers pipeline runs in the SEPARATE ``emboviz-sd-inpaint`` worker
+    venv (torch + diffusers); this side never imports either. Mirrors
+    :class:`LamaInpainter`.
+    """
+
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        timeout: float = 300.0,
+        *,
+        num_inference_steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        seed: int = 0,
+        negative_prompt: str = "",
+    ):
+        """Args:
+            endpoint: ZMQ endpoint of the running ``emboviz-sd-inpaint`` worker.
+                Default: ``EMBOVIZ_SD_INPAINT_ENDPOINT`` env var, else
+                ``ipc://~/.emboviz/sockets/sd-inpaint.sock``.
+            timeout: per-request RPC timeout in seconds. A full diffusion pass
+                is several seconds on GPU; the first request to a freshly
+                started worker also pays the model load unless preloaded.
+            num_inference_steps, guidance_scale, seed, negative_prompt:
+                generation settings forwarded per call (None -> the worker's
+                defaults).
+        """
+        self.endpoint = endpoint
+        self.timeout = float(timeout)
+        self.num_inference_steps = num_inference_steps
+        self.guidance_scale = guidance_scale
+        self.seed = int(seed)
+        self.negative_prompt = negative_prompt
+        self._client = None
+        self._health_checked = False
+
+    def _zmq(self):
+        if self._client is not None:
+            return self._client
+        try:
+            from emboviz_sd_inpaint.client import SDInpaintClient
+        except ImportError as e:
+            raise ImportError(
+                "SDInpaintInserter requires the ``emboviz-sd-inpaint`` adapter "
+                "package (it ships the typed RPC client alongside the worker "
+                "code). It ships with emboviz core, so if it's missing your "
+                "install is incomplete — reinstall from the repo root with:\n"
+                "    uv sync"
+            ) from e
+        self._client = SDInpaintClient(
+            endpoint=self.endpoint, timeout_ms=int(self.timeout * 1000),
+        )
+        return self._client
+
+    def _check_health(self) -> None:
+        if self._health_checked:
+            return
+        client = self._zmq()
+        if not client.ping(timeout_ms=2000):
+            raise RuntimeError(
+                f"SDInpaintInserter cannot reach the SD inpaint worker at "
+                f"{client._endpoint}.\n\n"
+                "Start the worker (in its own venv):\n"
+                "    ~/.emboviz/venvs/sd-inpaint/bin/emboviz-sd-inpaint serve\n\n"
+                "Or override the endpoint via EMBOVIZ_SD_INPAINT_ENDPOINT=ipc://... "
+                "or tcp://...\n\n"
+                "The dream driver builds and spawns this worker automatically; to "
+                "pre-build its isolated venv yourself, run:\n"
+                "    emboviz install-sd-inpaint"
+            )
+        self._health_checked = True
+
+    def insert(self, image: np.ndarray, mask: np.ndarray, prompt: str) -> np.ndarray:
+        self._check_health()
+        arr = np.asarray(image, dtype=np.uint8)
+        if arr.ndim != 3 or arr.shape[-1] != 3:
+            raise ValueError(
+                f"SDInpaintInserter.insert expects an HxWx3 RGB uint8 image; "
+                f"got shape {arr.shape}."
+            )
+        import io as _io
+        from PIL import Image
+        buf = _io.BytesIO()
+        Image.fromarray(arr, mode="RGB").save(buf, format="PNG")
+        return self._zmq().fill(
+            buf.getvalue(), np.asarray(mask), prompt,
+            num_inference_steps=self.num_inference_steps,
+            guidance_scale=self.guidance_scale,
+            seed=self.seed, negative_prompt=self.negative_prompt,
+        )
+
+
+__all__ = [
+    "Inpainter", "InpaintKey", "LamaInpainter", "CachingInpainter",
+    "ObjectInserter", "SDInpaintInserter",
+]

@@ -129,7 +129,8 @@ INSTALLABLE_ADAPTERS = {
     "act":      "ACT — Action Chunking Transformer (lerobot)",
     "smolvla":  "SmolVLA (lerobot)",
     "sam3":     "Meta Segment Anything 3 (text-prompted detector)",
-    "lama":     "LaMa big-lama inpainting (on-manifold memorization fill)",
+    "lama":     "LaMa big-lama inpainting (on-manifold memorization fill; object removal)",
+    "sd-inpaint": "Stable Diffusion text-guided inpainting (object insertion; dream scene swap)",
     # Dataset readers register under the ``emboviz.readers`` group but
     # install into a runtime venv identically — same command, same flow.
     "lerobot":      "LeRobot dataset reader (isolated; reads LeRobot v3.0 datasets)",

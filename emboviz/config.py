@@ -160,6 +160,56 @@ _ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
 _CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
 
 
+class SceneSwapCfg(_Strict):
+    """Masked counterfactual object swap for the closed-loop dream.
+
+    SAM 3 localizes ``mask_query`` independently in every concat camera; the
+    masked region is then either replaced with ``replace_query`` (Stable
+    Diffusion text-guided inpainting, the ``sd-inpaint`` adapter) or — when
+    ``replace_query`` is empty — removed (LaMa fills it with plausible
+    background). The dream is run from both the original seed and the edited seed
+    and shown side by side, so the policy's behaviour under the counterfactual is
+    judged against reality.
+
+    A camera with no confident detection keeps its ORIGINAL image: the policy
+    needs all concat cameras to drive the dream, so dropping a view is not an
+    option. This is not a silent fallback — the per-camera status (which views
+    were edited, which kept their original, and why) is recorded on the clip, so
+    a partial swap (e.g. wrist only) is never mistaken for a full one. When no
+    camera detects the target at all, the swap column is left empty and the clip
+    marks it as "not run".
+    """
+
+    mask_query: str                               # SAM 3 phrase: the object to locate (e.g. "the marker")
+    replace_query: str = ""                        # object to paint in its place (SD inpaint); empty -> remove (LaMa)
+    # Detection thresholds (SAM 3). Defaults are SAM 3's recommended 0.5/0.5. A
+    # target seen only from the close wrist view but missed by the distant
+    # exteriors is expected; lower these (or phrase mask_query more neutrally)
+    # rather than masking a region the detector is not confident about.
+    detector_score_threshold: float = 0.5         # min detection confidence to keep a detection
+    detector_mask_threshold: float = 0.5          # per-pixel mask-logit cutoff
+
+    @field_validator("mask_query")
+    @classmethod
+    def _check_mask_query(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                "cosmos_stress.scene_swap.mask_query must be a non-empty phrase "
+                "naming the object to locate (e.g. \"the marker\"). The swap "
+                "refuses to guess the target."
+            )
+        return v.strip()
+
+    @field_validator("detector_score_threshold", "detector_mask_threshold")
+    @classmethod
+    def _check_thresholds(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(
+                f"cosmos_stress.scene_swap detector thresholds must be in [0, 1], got {v}."
+            )
+        return v
+
+
 class CosmosStressCfg(_Strict):
     """Critical-moment world-model stress test (the Cosmos closed-loop simulator).
 
@@ -168,6 +218,13 @@ class CosmosStressCfg(_Strict):
     the user's policy inside Cosmos step by step and judge the outcome with the
     reasoner. With no ``policy_adapter`` the loop is driven by the episode's own
     recorded actions (the faithfulness baseline).
+
+    Two editing modes are mutually exclusive:
+
+      * ``perturbations`` — whole-frame instruction edits (one separate clip per
+        instruction). Unmasked: Cosmos may repaint the entire scene.
+      * ``scene_swap`` — masked counterfactual object swap (SAM 3 + masked edit /
+        LaMa removal), rendered as a baseline-vs-swap side-by-side in ONE clip.
     """
 
     server_url: str                               # vLLM-Omni Cosmos server (forward dynamics + edit)
@@ -196,7 +253,10 @@ class CosmosStressCfg(_Strict):
     # per camera (a 360 px wrist -> 540x640 concat); feeding less puts the model
     # off-distribution and the dream blurs. None keeps the cameras' native size.
     concat_resolution: Optional[tuple[int, int]] = None
-    perturbations: list[str] = Field(default_factory=list)  # edit instructions; empty -> no perturbation
+    perturbations: list[str] = Field(default_factory=list)  # whole-frame edit instructions; empty -> none
+    # Masked counterfactual object swap (baseline-vs-swap side-by-side). Mutually
+    # exclusive with ``perturbations``.
+    scene_swap: Optional[SceneSwapCfg] = None
     n_loop_steps: int = 2                         # closed-loop turns (small — drifts after the first turn or two)
     n_actions: int = 16                           # prediction horizon: frames dreamed per turn (one Cosmos chunk)
     # Execution horizon: dreamed frames committed before the policy re-plans
@@ -210,10 +270,6 @@ class CosmosStressCfg(_Strict):
     # DROID_CONTROL_FREQUENCY). Unused by cartesian conventions.
     control_hz: float = 15.0
     conditioning_camera: str = "primary"
-    # Concat region rendered in the dream side-by-side (.rrd). The DROID concat
-    # puts the wrist on top at full resolution (the view that shows the gripper-
-    # object contact during a grasp), so it is the default; one of _CONCAT_REGIONS.
-    rerun_camera: str = "wrist"
     state_convention: str = "ee_pose"
     reasoner_url: Optional[str] = None            # reasoner server; None -> no verdict
     reasoner_question: str = (
@@ -258,16 +314,6 @@ class CosmosStressCfg(_Strict):
             raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
         return v
 
-    @field_validator("rerun_camera")
-    @classmethod
-    def _check_rerun_camera(cls, v: str) -> str:
-        if v not in _CONCAT_REGIONS:
-            raise ValueError(
-                f"cosmos_stress.rerun_camera={v!r} not a concat region "
-                f"({sorted(_CONCAT_REGIONS)})."
-            )
-        return v
-
     @field_validator("concat_resolution")
     @classmethod
     def _check_concat_resolution(cls, v: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
@@ -290,6 +336,17 @@ class CosmosStressCfg(_Strict):
             raise ValueError(
                 "cosmos_stress.execute_steps must satisfy 1 <= execute_steps <= "
                 f"n_actions ({self.n_actions}); got {self.execute_steps}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_edit_modes_exclusive(self) -> "CosmosStressCfg":
+        if self.scene_swap is not None and self.perturbations:
+            raise ValueError(
+                "cosmos_stress: set EITHER `perturbations` (whole-frame instruction "
+                "edits, one clip each) OR `scene_swap` (masked baseline-vs-swap "
+                "comparison), not both — they are different editing modes and "
+                "combining them is ambiguous."
             )
         return self
 

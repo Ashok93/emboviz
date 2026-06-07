@@ -37,7 +37,8 @@ dependencies = [
     # detector + on-manifold fill and BOTH dataset-format readers always
     # present, so a first install is a single command.
     "emboviz-sam3>=0.3",          # SAM 3 target detector (memorization mask)
-    "emboviz-lama>=0.3",          # LaMa on-manifold inpainting fill
+    "emboviz-lama>=0.3",          # LaMa on-manifold inpainting fill (object removal)
+    "emboviz-sd-inpaint>=0.1",    # SD text-guided inpainting (object insertion, dream scene swap)
     "emboviz-lerobot>=0.3",       # LeRobot v3.0 dataset reader
     "emboviz-reader-gr00t>=0.3",  # GR00T-format reader (LeRobot v2.1 + modality.json)
     # plumbing — pure-Python or fast-imported data wrangling
@@ -177,6 +178,7 @@ emboviz = "emboviz.cli:main"
 emboviz-wire         = { path = "adapters/emboviz-wire",         editable = true }
 emboviz-sam3         = { path = "adapters/emboviz-sam3",         editable = true }
 emboviz-lama         = { path = "adapters/emboviz-lama",         editable = true }
+emboviz-sd-inpaint   = { path = "adapters/emboviz-sd-inpaint",   editable = true }
 emboviz-lerobot      = { path = "adapters/emboviz-lerobot",      editable = true }
 emboviz-reader-gr00t = { path = "adapters/emboviz-reader-gr00t", editable = true }
 emboviz-openvla      = { path = "adapters/emboviz-openvla",      editable = true }

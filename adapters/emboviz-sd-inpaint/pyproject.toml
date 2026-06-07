@@ -1,0 +1,31 @@
+[project]
+name = "emboviz-sd-inpaint"
+version = "0.1.0"
+description = "Stable Diffusion text-guided inpainting for emboviz — inserts a described object into a masked region. Runs in its own isolated venv as a ZeroMQ worker; the object-insertion backend for the closed-loop dream scene swap."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# THIN SHIM that goes in the user's MAIN venv. Carries zero heavy deps —
+# its only job is to advertise an AdapterSpec via entry points (so
+# ``emboviz install-sd-inpaint`` knows what to install) and ship a small
+# SDInpaintClient that core's scene swapper can import without pulling
+# torch / diffusers into the main venv.
+#
+# The heavy stuff (torch + diffusers + transformers) lives in
+# ``AdapterSpec.runtime_pip`` and installs into
+# ``~/.emboviz/venvs/sd-inpaint/`` via ``emboviz install-sd-inpaint``.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+]
+
+[project.entry-points."emboviz.adapters"]
+sd-inpaint = "emboviz_sd_inpaint.spec:SPEC"
+
+[project.scripts]
+emboviz-sd-inpaint = "emboviz_sd_inpaint.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
