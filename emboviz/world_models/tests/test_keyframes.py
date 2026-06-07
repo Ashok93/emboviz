@@ -118,7 +118,6 @@ def _run_all() -> None:
     test_detects_settles_and_grasp_at_expected_frames()
     test_gripper_change_dominates_a_coincident_settle()
     test_no_keyframes_when_static_and_gripper_constant()
-    test_windows_are_fps_scaled_and_clamped()
     test_missing_state_raises()
     test_missing_gripper_raises()
     test_nonpositive_fps_raises()

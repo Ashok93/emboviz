@@ -24,7 +24,7 @@ import argparse
 import numpy as np
 
 from emboviz.adapters import connect
-from emboviz.config import _JOINT_ACTION_CONVENTIONS, load_run_config
+from emboviz.config import load_run_config
 from emboviz.datasets.manifest import build_source
 
 np.set_printoptions(precision=4, suppress=True)
@@ -63,7 +63,7 @@ def main() -> None:
     print(f"[diag] {n_frames} frames, fps {real.fps:g}")
 
     kin = load_kinematics(cs.robot)
-    print(f"[diag] connecting pi0 ...")
+    print("[diag] connecting pi0 ...")
     policy = connect(cs.policy_adapter, actor_kwargs=cs.policy_kwargs or None)
 
     def encode_from_joints(joint_seq: np.ndarray, grippers: np.ndarray) -> np.ndarray:
