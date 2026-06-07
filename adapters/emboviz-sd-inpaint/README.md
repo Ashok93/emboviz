@@ -23,11 +23,19 @@ first use, so the explicit steps are only needed for manual debugging.
 
 ## Model
 
-Default: `stabilityai/stable-diffusion-2-inpainting` (small, ~512 px) — chosen so
-the whole flow is cheap to exercise. Override with the `model_id` actor kwarg or
-`EMBOVIZ_SD_INPAINT_MODEL` (any diffusers inpainting checkpoint, e.g.
-`diffusers/stable-diffusion-xl-1.0-inpainting-0.1` for higher quality).
+Default model: `diffusers/stable-diffusion-xl-1.0-inpainting-0.1`. Override with
+the `model_id` actor kwarg or `EMBOVIZ_SD_INPAINT_MODEL` (any diffusers inpainting
+checkpoint; `stable-diffusion-v1-5/stable-diffusion-inpainting` is a lighter
+alternative).
 
-Mask convention: WHITE = repaint, BLACK = preserve. The worker composites the
-generated frame back onto the original **only inside the mask**, so every
-non-target pixel is byte-identical to the input.
+Reliable object insertion needs a high guidance scale and a negative prompt that
+excludes the background (configured per run via `scene_swap.edit_guidance_scale`
+and `scene_swap.edit_negative_prompt`); without them the model tends to fill the
+mask with surrounding context rather than the prompted object.
+
+VRAM: SDXL at 1024 px uses ~30 GB. Set `EMBOVIZ_SD_INPAINT_RESOLUTION=512` to run
+alongside a policy on a single GPU.
+
+Mask convention: white = repaint, black = preserve. The worker composites the
+generated region back onto the original inside the mask only, so non-target pixels
+are unchanged.

@@ -182,6 +182,16 @@ class SceneSwapCfg(_Strict):
 
     mask_query: str                               # SAM 3 phrase: the object to locate (e.g. "the marker")
     replace_query: str = ""                        # object to paint in its place (SD inpaint); empty -> remove (LaMa)
+    # Grow the detected mask by this many pixels before editing. A tight mask
+    # around a thin object leaves the inserter no room to paint a different shape
+    # (a spoon into a marker's silhouette); a margin gives it space. 0 = off.
+    mask_dilation: int = 0
+    # SD-inpaint insertion controls (used only when replace_query is set). SD
+    # inpainting defaults to harmonizing the masked region with its surroundings
+    # (erasing the object); a high guidance plus a negative prompt forbidding the
+    # empty background forces it to actually paint replace_query instead.
+    edit_guidance_scale: float = 7.5              # higher = obey replace_query harder
+    edit_negative_prompt: str = ""                # e.g. "empty cup, nothing" to prevent erasure
     # Detection thresholds (SAM 3). Defaults are SAM 3's recommended 0.5/0.5. A
     # target seen only from the close wrist view but missed by the distant
     # exteriors is expected; lower these (or phrase mask_query more neutrally)
@@ -207,6 +217,13 @@ class SceneSwapCfg(_Strict):
             raise ValueError(
                 f"cosmos_stress.scene_swap detector thresholds must be in [0, 1], got {v}."
             )
+        return v
+
+    @field_validator("mask_dilation")
+    @classmethod
+    def _check_dilation(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"cosmos_stress.scene_swap.mask_dilation must be >= 0, got {v}.")
         return v
 
 

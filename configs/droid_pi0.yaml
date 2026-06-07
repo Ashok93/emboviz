@@ -42,7 +42,7 @@ analysis:
   diagnostics: [attention]                   # unused by the dream driver; a valid value is required
 
   cosmos_stress:
-    server_url: https://cmvzw2tow4f9fc-8000.proxy.runpod.net
+    server_url: https://YOUR-COSMOS-POD-8000.proxy.runpod.net  # the running Cosmos3 world-model server
     domain: droid_lerobot
     action_dim: 10
     policy_adapter: pi0
@@ -71,8 +71,11 @@ analysis:
     # detects the target, the swap column is left blank and marked "not run".
     # Mutually exclusive with perturbations above.
     scene_swap:
-      mask_query: "the marker"               # the object SAM 3 locates
-      replace_query: "a spoon"               # paint a spoon in its place; "" -> remove via LaMa
+      mask_query: "yellow marker"            # the object SAM 3 locates (SAM scores this >> "the marker")
+      replace_query: "a bright red marker pen lying across the white cup"   # paint via sd-inpaint; "" -> remove via LaMa
+      mask_dilation: 10                       # grow the mask so the new object has room
+      edit_guidance_scale: 14                 # obey replace_query hard (else SD erases to background)
+      edit_negative_prompt: "empty cup, plain white cup, nothing"   # forbid the erasure SD defaults to
     # Maximally reactive loop: the policy re-plans as often as possible, so the
     # policy (not the dream) drives the trajectory. Cosmos's video VAE compresses
     # time 4x, so a dream call emits frames only in quanta of 4 (num_frames =

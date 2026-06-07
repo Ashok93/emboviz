@@ -1,9 +1,9 @@
 """Stable Diffusion text-guided inpainting (worker side).
 
 Loads a diffusers inpainting pipeline (default
-``stabilityai/stable-diffusion-2-inpainting``) and regenerates a masked region of
-an image to contain a described object. This is the object-INSERTION backend for
-the dream scene swap (the counterpart to LaMa's object REMOVAL).
+``diffusers/stable-diffusion-xl-1.0-inpainting-0.1``) and regenerates a masked
+region of an image to contain a described object. This is the object-INSERTION
+backend for the dream scene swap (the counterpart to LaMa's object REMOVAL).
 
 torch / diffusers are imported lazily so importing this module stays cheap in the
 user's main venv during entry-point discovery; the heavy load happens on first
@@ -33,7 +33,11 @@ from PIL import Image
 
 log = logging.getLogger("emboviz_sd_inpaint")
 
-DEFAULT_MODEL_ID = "stabilityai/stable-diffusion-2-inpainting"
+# SDXL inpainting: inserts the prompted object reliably under high guidance + a
+# negative prompt. Lighter alternative: stable-diffusion-v1-5/stable-diffusion-
+# inpainting. At 1024 px it uses ~30 GB VRAM (EMBOVIZ_SD_INPAINT_RESOLUTION=512 to
+# share a GPU with a policy).
+DEFAULT_MODEL_ID = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
 
 
 def _round_to_multiple(x: int, mod: int = 8) -> int:
@@ -59,7 +63,9 @@ class SDInpaintModel:
         self.model_id = model_id or os.environ.get("EMBOVIZ_SD_INPAINT_MODEL", DEFAULT_MODEL_ID)
         self.revision = revision or os.environ.get("EMBOVIZ_SD_INPAINT_REVISION")
         self._device_pref = device
-        self.inference_resolution = int(inference_resolution)
+        self.inference_resolution = int(
+            os.environ.get("EMBOVIZ_SD_INPAINT_RESOLUTION", inference_resolution)
+        )
         self.default_steps = int(num_inference_steps)
         self.default_guidance = float(guidance_scale)
         self._pipe = None

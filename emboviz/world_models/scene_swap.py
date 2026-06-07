@@ -118,12 +118,18 @@ class SceneSwapper:
         replace_query: str = "",
         inpainter: Optional[Inpainter] = None,
         inserter: Optional[ObjectInserter] = None,
+        mask_dilation: int = 0,
     ):
         if not mask_query or not mask_query.strip():
             raise ValueError("SceneSwapper: mask_query must be a non-empty phrase.")
         self.mask_query = mask_query.strip()
         self.replace_query = (replace_query or "").strip()
         self.detector = detector
+        # Grow the detected mask by this many pixels before editing. A tight
+        # silhouette around a thin object (e.g. a marker) leaves the inserter no
+        # room to paint a differently-shaped object (e.g. a spoon's bowl); a few
+        # px of dilation gives it space. Applies to both insert and remove.
+        self.mask_dilation = int(mask_dilation)
         if self.replace_query:
             if inserter is None:
                 raise ValueError(
@@ -193,16 +199,21 @@ class SceneSwapper:
                 ))
                 continue
 
+            edit_mask = mask
+            if self.mask_dilation > 0:
+                from scipy.ndimage import binary_dilation
+                edit_mask = binary_dilation(mask, iterations=self.mask_dilation)
+
             if self.replace_query:
                 assert self.inserter is not None
                 images[region] = np.asarray(
-                    self.inserter.insert(arr, mask, self.replace_query), dtype=np.uint8
+                    self.inserter.insert(arr, edit_mask, self.replace_query), dtype=np.uint8
                 )
                 operation = "insert"
             else:
                 assert self.inpainter is not None
                 images[region] = np.asarray(
-                    self.inpainter.inpaint(arr, mask), dtype=np.uint8
+                    self.inpainter.inpaint(arr, edit_mask), dtype=np.uint8
                 )
                 operation = "remove"
             records.append(CameraSwap(

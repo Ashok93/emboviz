@@ -180,7 +180,11 @@ def main() -> None:
             connect("sd-inpaint", auto_spawn=True, auto_install=True)
             swapper = SceneSwapper(
                 mask_query=sw.mask_query, replace_query=sw.replace_query,
-                detector=detector, inserter=SDInpaintInserter(),
+                detector=detector, inserter=SDInpaintInserter(
+                    guidance_scale=sw.edit_guidance_scale,
+                    negative_prompt=sw.edit_negative_prompt,
+                ),
+                mask_dilation=sw.mask_dilation,
             )
             swap_label = f"swap → {sw.replace_query}"
             print(f"[dream] scene swap: {sw.mask_query!r} → {sw.replace_query!r} "
@@ -190,6 +194,7 @@ def main() -> None:
             connect("lama", auto_spawn=True, auto_install=True)
             swapper = SceneSwapper(
                 mask_query=sw.mask_query, detector=detector, inpainter=LamaInpainter(),
+                mask_dilation=sw.mask_dilation,
             )
             swap_label = f"remove {sw.mask_query}"
             print(f"[dream] scene swap: remove {sw.mask_query!r} "

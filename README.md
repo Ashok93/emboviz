@@ -313,7 +313,7 @@ The models accessible through the shipped adapters are:
 | `act`, `smolvla` | [LeRobot](https://github.com/huggingface/lerobot) | Code Apache 2.0; checkpoint weights carry the license of the specific model you load |
 | `sam3` | [Meta Segment Anything 3](https://huggingface.co/facebook/sam3) | SAM License — source-available, permits commercial use with restrictions; not OSI open-source. The `--detector gd-sam` alternative uses GroundingDINO and SAM 2, both Apache 2.0 |
 | `lama` | [LaMa / big-lama](https://github.com/advimman/lama) | Apache 2.0 (code and checkpoints). The default TorchScript export is fetched from [`okaris/big-lama`](https://huggingface.co/okaris/big-lama), pinned to a commit |
-| `sd-inpaint` | [Stable Diffusion 2 inpainting](https://huggingface.co/stabilityai/stable-diffusion-2-inpainting) (default; any diffusers inpainting checkpoint works) | CreativeML Open RAIL++-M — permits commercial use with use-based restrictions; not OSI open-source. Used by the stress-test scene swap for object insertion |
+| `sd-inpaint` | [SDXL inpainting](https://huggingface.co/diffusers/stable-diffusion-xl-1.0-inpainting-0.1) (default; any diffusers inpainting checkpoint works) | CreativeML Open RAIL++-M — permits commercial use with use-based restrictions; not OSI open-source. Used by the stress-test scene swap for object insertion |
 
 Datasets read through the LeRobot and GR00T-format readers (e.g. Open
 X-Embodiment, LIBERO, DROID, BridgeData) each carry their own license and terms;

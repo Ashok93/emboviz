@@ -5,11 +5,13 @@ inpainting pipeline loaded by repo id from the HuggingFace Hub — there is no
 installable provider package to drive deps, so the list below is the inference
 RUNTIME the worker code needs, not a dependency mirror.
 
-The default checkpoint is ``stabilityai/stable-diffusion-2-inpainting`` (SD 2.0
-inpainting, ~512 px, a few GB in fp16) — deliberately small so the whole scene-
-swap flow can be exercised cheaply. Override the model with the ``model_id``
-actor kwarg (any diffusers-compatible inpainting checkpoint, e.g.
-``diffusers/stable-diffusion-xl-1.0-inpainting-0.1`` for higher quality).
+The default checkpoint is ``diffusers/stable-diffusion-xl-1.0-inpainting-0.1`` —
+SDXL inpainting reliably *inserts* the prompted object (with high guidance + a
+negative prompt), where SD 1.5/2 tend to harmonize the mask into the background.
+Override with the ``model_id`` actor kwarg / ``EMBOVIZ_SD_INPAINT_MODEL`` (e.g.
+``stable-diffusion-v1-5/stable-diffusion-inpainting`` for a lighter, lower-quality
+option). SDXL at 1024 needs ~30 GB VRAM; drop ``EMBOVIZ_SD_INPAINT_RESOLUTION`` to
+512 to share a GPU with a policy.
 """
 
 from __future__ import annotations

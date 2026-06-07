@@ -52,6 +52,14 @@ def main() -> None:
              "Ignored if --frame is given.",
     )
     p.add_argument("--steps", type=int, default=None, help="SD inpaint steps (default: worker default).")
+    p.add_argument("--prompt", default=None, help="Override replace_query (object to paint in).")
+    p.add_argument("--guidance", type=float, default=None, help="Guidance scale (higher = obey prompt harder).")
+    p.add_argument("--negative", default="", help="Negative prompt (discourage e.g. 'empty cup').")
+    p.add_argument(
+        "--dilation", type=int, default=None,
+        help="Grow the mask by N px before inpainting (overrides config mask_dilation). "
+             "Bigger gives the inserted object room to take its own shape.",
+    )
     p.add_argument("--out", default="outputs/scene_swap_smoke")
     args = p.parse_args()
 
@@ -86,6 +94,8 @@ def main() -> None:
     if not 0 <= idx < len(real.frames):
         raise SystemExit(f"frame {idx} out of range (episode has {len(real.frames)} frames).")
     frame = real.frames[idx]
+    dilation = args.dilation if args.dilation is not None else sw.mask_dilation
+    replace_query = args.prompt if args.prompt is not None else sw.replace_query
 
     # Bring up the workers + build the swapper, exactly as the dream driver does.
     from emboviz.adapters import connect
@@ -99,19 +109,25 @@ def main() -> None:
         score_threshold=sw.detector_score_threshold,
         mask_threshold=sw.detector_mask_threshold,
     )
-    if sw.replace_query:
+    if replace_query:
         from emboviz.perturb.image._inpaint import SDInpaintInserter
         connect("sd-inpaint", auto_spawn=True, auto_install=True)
         swapper = SceneSwapper(
-            mask_query=sw.mask_query, replace_query=sw.replace_query,
-            detector=detector, inserter=SDInpaintInserter(num_inference_steps=args.steps),
+            mask_query=sw.mask_query, replace_query=replace_query,
+            detector=detector, inserter=SDInpaintInserter(
+                num_inference_steps=args.steps, guidance_scale=args.guidance,
+                negative_prompt=args.negative,
+            ),
+            mask_dilation=dilation,
         )
-        print(f"[smoke] swap: {sw.mask_query!r} -> {sw.replace_query!r} (SAM 3 + SD inpaint)")
+        print(f"[smoke] swap: {sw.mask_query!r} -> {replace_query!r} "
+              f"(SAM 3 + SD inpaint, mask_dilation={dilation})")
     else:
         from emboviz.perturb.image._inpaint import LamaInpainter
         connect("lama", auto_spawn=True, auto_install=True)
         swapper = SceneSwapper(
             mask_query=sw.mask_query, detector=detector, inpainter=LamaInpainter(),
+            mask_dilation=dilation,
         )
         print(f"[smoke] swap: remove {sw.mask_query!r} (SAM 3 + LaMa)")
 
@@ -147,7 +163,7 @@ def main() -> None:
 
     (out / "swap.json").write_text(json.dumps({
         "episode": episode, "frame": idx,
-        "mask_query": sw.mask_query, "replace_query": sw.replace_query,
+        "mask_query": sw.mask_query, "replace_query": replace_query,
         "any_edited": result.any_edited,
         "per_camera": [asdict(c) for c in result.per_camera],
     }, indent=2))
