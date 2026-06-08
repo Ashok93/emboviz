@@ -58,6 +58,10 @@ it **in closed loop inside a world model** ([NVIDIA Cosmos](https://www.nvidia.c
 the policy acts, the world model renders the consequence, the policy reacts —
 exactly the feedback loop it will run on a real robot.
 
+<p align="center">
+  <img src="./assets/cosmos-pi0-demo.gif" alt="π0 driving NVIDIA Cosmos in closed loop — recorded episode, baseline dream, and the counterfactual with the target object removed, side by side in Rerun" width="100%">
+</p>
+
 The point is the **counterfactuals you can't stage on hardware.** At the decisive
 moments of an episode (the grasp, the hand-off), emboviz edits the seed the world
 model conditions on — **swap** the manipulated object for another (SAM 3 locates
