@@ -153,11 +153,30 @@ class DatasetCfg(_Strict):
 
 # Cartesian conventions track an end-effector pose; joint conventions track a
 # joint vector and forward-kinematics it (so they require a robot). Kept in sync
-# with emboviz_cosmos3.bridge — core does not import the adapter.
+# with emboviz_wire.policy_bridge — core does not import the adapter packages.
 _CARTESIAN_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
 _JOINT_ACTION_CONVENTIONS = {"droid_joint_velocity"}
 _ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
-_CONCAT_REGIONS = {"wrist", "exterior_left", "exterior_right"}
+
+# Per-world-model regions of the stitched conditioning frame, and the matching
+# default region -> episode-camera-role mapping. Cosmos conditions on the DROID
+# ``concat_view`` (wrist on top, exteriors below); Ctrl-World on a three-view
+# vertical stack in its training order. Mirrors emboviz_cosmos3.concat_view /
+# emboviz_ctrlworld.stack_view — re-declared here (like _STATE_CONVENTIONS) so
+# a config validates without the adapter packages installed.
+_WORLD_MODEL_REGIONS: dict[str, set[str]] = {
+    "cosmos3": {"wrist", "exterior_left", "exterior_right"},
+    "ctrlworld": {"exterior_1", "exterior_2", "wrist"},
+}
+_DEFAULT_REGION_CAMERAS: dict[str, dict[str, str]] = {
+    "cosmos3": {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"},
+    "ctrlworld": {"exterior_1": "primary", "exterior_2": "exterior_2", "wrist": "wrist"},
+}
+_WORLD_MODELS = set(_WORLD_MODEL_REGIONS)
+# Ctrl-World generates 4 future frames per forward pass (num_frames=5 with
+# frame 0 re-rendering the conditioning timestep) — mirrors
+# emboviz_ctrlworld.model.FRAMES_PER_CHUNK.
+_CTRLWORLD_FRAMES_PER_CHUNK = 4
 
 
 class SceneSwapCfg(_Strict):
@@ -204,7 +223,7 @@ class SceneSwapCfg(_Strict):
     def _check_mask_query(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError(
-                "cosmos_stress.scene_swap.mask_query must be a non-empty phrase "
+                "stress.scene_swap.mask_query must be a non-empty phrase "
                 "naming the object to locate (e.g. \"the marker\"). The swap "
                 "refuses to guess the target."
             )
@@ -215,7 +234,7 @@ class SceneSwapCfg(_Strict):
     def _check_thresholds(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError(
-                f"cosmos_stress.scene_swap detector thresholds must be in [0, 1], got {v}."
+                f"stress.scene_swap detector thresholds must be in [0, 1], got {v}."
             )
         return v
 
@@ -223,30 +242,37 @@ class SceneSwapCfg(_Strict):
     @classmethod
     def _check_dilation(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"cosmos_stress.scene_swap.mask_dilation must be >= 0, got {v}.")
+            raise ValueError(f"stress.scene_swap.mask_dilation must be >= 0, got {v}.")
         return v
 
 
-class CosmosStressCfg(_Strict):
-    """Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+class WorldStressCfg(_Strict):
+    """Critical-moment world-model stress test (the closed-loop simulator).
 
-    Find the episode's decisive instants, optionally perturb each seed frame
-    ("rotate the cup 90 degrees", "replace the cup with a rubber duck"), then run
-    the user's policy inside Cosmos step by step and judge the outcome with the
-    reasoner. With no ``policy_adapter`` the loop is driven by the episode's own
-    recorded actions (the faithfulness baseline).
+    Find the episode's decisive instants, optionally perturb each seed frame,
+    then run the user's policy inside the world model step by step and judge
+    the outcome. ``world_model`` selects the simulator backend:
+
+      * ``cosmos3`` — NVIDIA Cosmos3-Nano forward dynamics via a vLLM-Omni
+        server (``server_url`` required). Single-frame conditioning; faithful
+        for roughly one or two re-conditioning cycles.
+      * ``ctrlworld`` — Ctrl-World (ICLR 2026), run locally on the GPU.
+        Multi-view joint prediction + pose-anchored sparse history; coherent
+        over tens of seconds. DROID embodiment; 4-frame chunks at 5 Hz.
 
     Two editing modes are mutually exclusive:
 
       * ``perturbations`` — whole-frame instruction edits (one separate clip per
-        instruction). Unmasked: Cosmos may repaint the entire scene.
-      * ``scene_swap`` — masked counterfactual object swap (SAM 3 + masked edit /
-        LaMa removal), rendered as a baseline-vs-swap side-by-side in ONE clip.
+        instruction). Cosmos-only: the edit is rendered by the Cosmos server.
+      * ``scene_swap`` — masked counterfactual object edit (SAM 3 + LaMa
+        removal, or SD-inpaint replacement on cosmos3), rendered as a
+        baseline-vs-swap side-by-side in ONE clip.
     """
 
-    server_url: str                               # vLLM-Omni Cosmos server (forward dynamics + edit)
-    domain: str = "droid_lerobot"
-    action_dim: int = 10
+    world_model: str = "cosmos3"                  # cosmos3 | ctrlworld
+    server_url: Optional[str] = None              # vLLM-Omni Cosmos server; required for cosmos3
+    domain: str = "droid_lerobot"                 # cosmos3 only (ctrlworld is DROID-fixed)
+    action_dim: int = 10                          # cosmos3 only (ctrlworld is 7-fixed)
     # Policy under test. None -> recorded-action faithfulness baseline (no policy).
     policy_adapter: Optional[str] = None
     policy_kwargs: dict[str, Any] = Field(default_factory=dict)  # adapter constructor kwargs (e.g. {config_name: pi0_droid})
@@ -259,16 +285,18 @@ class CosmosStressCfg(_Strict):
     robot_urdf: Optional[str] = None
     robot_ee_frame: Optional[str] = None
     robot_joint_names: Optional[list[str]] = None
-    # policy camera role -> concat region (e.g. {"primary": "exterior_left", "wrist": "wrist"})
+    # policy camera role -> stitched-frame region (e.g. {"primary": "exterior_left",
+    # "wrist_left": "wrist"}). Valid regions depend on world_model — see
+    # _WORLD_MODEL_REGIONS.
     camera_map: dict[str, str] = Field(default_factory=dict)
-    # concat region -> the episode's camera role used to build the stitched seed
-    concat_cameras: dict[str, str] = Field(
-        default_factory=lambda: {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"}
-    )
+    # stitched-frame region -> the episode's camera role used to build the seed.
+    # None resolves to the world model's default mapping (_DEFAULT_REGION_CAMERAS).
+    concat_cameras: Optional[dict[str, str]] = None
     # Wrist-panel size (H, W) the seed concat is built at — sets the world model's
     # conditioning resolution. The Cosmos DROID domain trained on 640x360 (W x H)
     # per camera (a 360 px wrist -> 540x640 concat); feeding less puts the model
     # off-distribution and the dream blurs. None keeps the cameras' native size.
+    # cosmos3 only: ctrlworld's view size is fixed by its checkpoint (320x192).
     concat_resolution: Optional[tuple[int, int]] = None
     perturbations: list[str] = Field(default_factory=list)  # whole-frame edit instructions; empty -> none
     # Masked counterfactual object swap (baseline-vs-swap side-by-side). Mutually
@@ -294,33 +322,21 @@ class CosmosStressCfg(_Strict):
         "Answer in one sentence, and if it failed, say exactly how."
     )
 
+    @field_validator("world_model")
+    @classmethod
+    def _check_world_model(cls, v: str) -> str:
+        if v not in _WORLD_MODELS:
+            raise ValueError(
+                f"stress.world_model={v!r} not in {sorted(_WORLD_MODELS)}."
+            )
+        return v
+
     @field_validator("action_convention")
     @classmethod
     def _check_convention(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and v not in _ACTION_CONVENTIONS:
             raise ValueError(
-                f"cosmos_stress.action_convention={v!r} not in {sorted(_ACTION_CONVENTIONS)}."
-            )
-        return v
-
-    @field_validator("camera_map")
-    @classmethod
-    def _check_camera_map(cls, v: dict[str, str]) -> dict[str, str]:
-        bad = {r for r in v.values() if r not in _CONCAT_REGIONS}
-        if bad:
-            raise ValueError(
-                f"cosmos_stress.camera_map regions {sorted(bad)} invalid; "
-                f"valid regions: {sorted(_CONCAT_REGIONS)}."
-            )
-        return v
-
-    @field_validator("concat_cameras")
-    @classmethod
-    def _check_concat_cameras(cls, v: dict[str, str]) -> dict[str, str]:
-        if set(v) != _CONCAT_REGIONS:
-            raise ValueError(
-                f"cosmos_stress.concat_cameras must map exactly {sorted(_CONCAT_REGIONS)} "
-                f"to episode camera roles; got keys {sorted(v)}."
+                f"stress.action_convention={v!r} not in {sorted(_ACTION_CONVENTIONS)}."
             )
         return v
 
@@ -328,7 +344,7 @@ class CosmosStressCfg(_Strict):
     @classmethod
     def _check_positive(cls, v: int) -> int:
         if v < 1:
-            raise ValueError(f"cosmos_stress: n_loop_steps / n_actions must be >= 1, got {v}.")
+            raise ValueError(f"stress: n_loop_steps / n_actions must be >= 1, got {v}.")
         return v
 
     @field_validator("concat_resolution")
@@ -336,7 +352,7 @@ class CosmosStressCfg(_Strict):
     def _check_concat_resolution(cls, v: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
         if v is not None and (len(v) != 2 or v[0] < 2 or v[1] < 2):
             raise ValueError(
-                f"cosmos_stress.concat_resolution must be (H, W) with each >= 2, got {v}."
+                f"stress.concat_resolution must be (H, W) with each >= 2, got {v}."
             )
         return v
 
@@ -344,23 +360,84 @@ class CosmosStressCfg(_Strict):
     @classmethod
     def _check_control_hz(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError(f"cosmos_stress.control_hz must be > 0, got {v}.")
+            raise ValueError(f"stress.control_hz must be > 0, got {v}.")
         return v
 
     @model_validator(mode="after")
-    def _check_execute_steps(self) -> "CosmosStressCfg":
+    def _check_backend(self) -> "WorldStressCfg":
+        """Backend-conditional checks: required/forbidden fields and the region
+        vocabulary depend on which world model drives the loop."""
+        regions = _WORLD_MODEL_REGIONS[self.world_model]
+
+        if self.world_model == "cosmos3":
+            if not self.server_url:
+                raise ValueError(
+                    "stress.world_model='cosmos3' needs stress.server_url (the "
+                    "running vLLM-Omni Cosmos server). The ctrlworld backend runs "
+                    "locally and needs no server."
+                )
+        else:  # ctrlworld
+            forbidden = {"server_url", "domain", "action_dim", "concat_resolution"}
+            set_anyway = [
+                f for f in sorted(forbidden & self.model_fields_set)
+                if getattr(self, f) is not None
+            ]
+            if set_anyway:
+                raise ValueError(
+                    f"stress.{set_anyway[0]} applies only to the cosmos3 backend "
+                    "(ctrlworld runs locally, is DROID-fixed with action_dim 7, and "
+                    "generates at its checkpoint's 320x192 view size); remove it."
+                )
+            if self.perturbations:
+                raise ValueError(
+                    "stress.perturbations (whole-frame instruction edits) are "
+                    "rendered by the Cosmos server and are not available on the "
+                    "ctrlworld backend; use scene_swap with an empty replace_query "
+                    "(SAM 3 + LaMa removal) instead."
+                )
+            if self.scene_swap is not None and self.scene_swap.replace_query:
+                raise ValueError(
+                    "stress.scene_swap.replace_query (SD-inpaint object insertion) "
+                    "is not wired for the ctrlworld backend; leave it empty to "
+                    "remove the object (SAM 3 + LaMa)."
+                )
+            if self.n_actions % _CTRLWORLD_FRAMES_PER_CHUNK != 0:
+                raise ValueError(
+                    f"stress.n_actions={self.n_actions}: ctrlworld dreams in chunks "
+                    f"of {_CTRLWORLD_FRAMES_PER_CHUNK} future frames; n_actions must "
+                    "be a multiple of it."
+                )
+
+        if self.concat_cameras is None:
+            self.concat_cameras = dict(_DEFAULT_REGION_CAMERAS[self.world_model])
+        if set(self.concat_cameras) != regions:
+            raise ValueError(
+                f"stress.concat_cameras must map exactly {sorted(regions)} "
+                f"(the {self.world_model} regions) to episode camera roles; got "
+                f"keys {sorted(self.concat_cameras)}."
+            )
+        bad = {r for r in self.camera_map.values() if r not in regions}
+        if bad:
+            raise ValueError(
+                f"stress.camera_map regions {sorted(bad)} invalid for "
+                f"world_model={self.world_model!r}; valid regions: {sorted(regions)}."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_execute_steps(self) -> "WorldStressCfg":
         if self.execute_steps is not None and not 1 <= self.execute_steps <= self.n_actions:
             raise ValueError(
-                "cosmos_stress.execute_steps must satisfy 1 <= execute_steps <= "
+                "stress.execute_steps must satisfy 1 <= execute_steps <= "
                 f"n_actions ({self.n_actions}); got {self.execute_steps}."
             )
         return self
 
     @model_validator(mode="after")
-    def _check_edit_modes_exclusive(self) -> "CosmosStressCfg":
+    def _check_edit_modes_exclusive(self) -> "WorldStressCfg":
         if self.scene_swap is not None and self.perturbations:
             raise ValueError(
-                "cosmos_stress: set EITHER `perturbations` (whole-frame instruction "
+                "stress: set EITHER `perturbations` (whole-frame instruction "
                 "edits, one clip each) OR `scene_swap` (masked baseline-vs-swap "
                 "comparison), not both — they are different editing modes and "
                 "combining them is ambiguous."
@@ -368,17 +445,17 @@ class CosmosStressCfg(_Strict):
         return self
 
     @model_validator(mode="after")
-    def _check_policy_requirements(self) -> "CosmosStressCfg":
+    def _check_policy_requirements(self) -> "WorldStressCfg":
         if self.policy_adapter is not None:
             if self.action_convention is None:
                 raise ValueError(
-                    "cosmos_stress.policy_adapter is set, so action_convention is required "
+                    "stress.policy_adapter is set, so action_convention is required "
                     f"(one of {sorted(_ACTION_CONVENTIONS)})."
                 )
             if not self.camera_map:
                 raise ValueError(
-                    "cosmos_stress.policy_adapter is set, so camera_map is required "
-                    "(policy camera role -> concat region)."
+                    "stress.policy_adapter is set, so camera_map is required "
+                    "(policy camera role -> stitched-frame region)."
                 )
         self._check_robot()
         return self
@@ -392,27 +469,27 @@ class CosmosStressCfg(_Strict):
         if is_joint:
             if self.robot is None and not has_custom:
                 raise ValueError(
-                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    f"stress.action_convention={self.action_convention!r} is "
                     "joint-space, so a robot is required for forward kinematics. Set "
                     "`robot` (a preconfigured name, e.g. franka_panda) or the custom "
                     "triple robot_urdf + robot_ee_frame + robot_joint_names."
                 )
             if self.robot is not None and has_custom:
                 raise ValueError(
-                    "cosmos_stress: set EITHER `robot` (preconfigured) OR the custom "
+                    "stress: set EITHER `robot` (preconfigured) OR the custom "
                     "robot_urdf/robot_ee_frame/robot_joint_names triple, not both."
                 )
             if has_custom and not (
                 self.robot_urdf and self.robot_ee_frame and self.robot_joint_names
             ):
                 raise ValueError(
-                    "cosmos_stress: a custom robot needs all of robot_urdf, "
+                    "stress: a custom robot needs all of robot_urdf, "
                     "robot_ee_frame, and robot_joint_names."
                 )
         else:
             if self.robot is not None or has_custom:
                 raise ValueError(
-                    f"cosmos_stress.action_convention={self.action_convention!r} is "
+                    f"stress.action_convention={self.action_convention!r} is "
                     "cartesian and tracks the end-effector pose directly; remove the "
                     "robot / robot_urdf settings (they apply only to joint conventions)."
                 )
@@ -451,9 +528,9 @@ class AnalysisCfg(_Strict):
     modality_pool_seed: int = 0
     modality_pool_cache_dir: Optional[str] = None # optional on-disk cache for the SHAP-marginal pool
     show_imitation: bool = False
-    # Critical-moment world-model stress test (the Cosmos closed-loop simulator).
+    # Critical-moment world-model stress test (the closed-loop simulator).
     # Optional; only consumed by the stress driver, not the standard diagnostics.
-    cosmos_stress: Optional[CosmosStressCfg] = None
+    stress: Optional[WorldStressCfg] = None
 
     @field_validator("detector")
     @classmethod

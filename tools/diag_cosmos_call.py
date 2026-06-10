@@ -42,7 +42,7 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     episode = args.episode if args.episode is not None else int(str(cfg.analysis.episodes).split(",")[0])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -50,7 +50,7 @@ def main() -> None:
     from emboviz_wire.observations import RGBImage
     from emboviz_wire.types import Observations, Scene
     from emboviz_cosmos3 import domains
-    from emboviz_cosmos3.bridge import make_state_tracker
+    from emboviz_wire.policy_bridge import make_state_tracker
     from emboviz_cosmos3.concat_view import build_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
     from emboviz_robot import load_kinematics

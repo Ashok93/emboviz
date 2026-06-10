@@ -246,10 +246,10 @@ def test_closed_loop_joint_dream_end_to_end() -> None:
     Trajectory assembly.
     """
     from emboviz_robot import load_kinematics
-    from emboviz_wire.types import ActionResult, Scene
+    from emboviz_wire.policy_bridge import JointStateTracker
+    from emboviz_wire.types import ActionResult
 
     from emboviz.world_models.simulate import closed_loop_rollout
-    from emboviz_cosmos3.bridge import JointStateTracker
     from emboviz_cosmos3.concat_view import build_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
 

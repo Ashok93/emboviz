@@ -20,12 +20,11 @@ from emboviz_wire.observations.gripper import GripperState
 from emboviz_wire.observations.state import Proprioception
 from emboviz_wire.types import Observations, Scene, Trajectory
 
+from emboviz_wire.policy_bridge import integrate_policy_chunk
+
 from emboviz_cosmos3 import domains
 from emboviz_cosmos3._cosmos_action import convert_rotation
-from emboviz_cosmos3.bridge import (
-    integrate_policy_chunk,
-    policy_chunk_to_cosmos,
-)
+from emboviz_cosmos3.bridge import policy_chunk_to_cosmos
 
 
 def _episode(states: np.ndarray, grippers: np.ndarray) -> Trajectory:

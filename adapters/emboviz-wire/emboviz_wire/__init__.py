@@ -21,6 +21,10 @@ Contents:
   • ``types``                    — Scene / Observations / ActionResult / …
   • ``model_protocol``           — VLAModel / Capability / RequiredInputs
   • ``world_model_protocol``     — WorldModel / WorldModelCapability
+  • ``policy_bridge``            — policy-chunk → Cartesian-state integration
+                                   + the closed-loop state trackers (shared by
+                                   every world-model adapter; imported as the
+                                   submodule ``emboviz_wire.policy_bridge``)
   • ``observations`` / ``profile`` / ``distances`` — the typed data model
 """
 

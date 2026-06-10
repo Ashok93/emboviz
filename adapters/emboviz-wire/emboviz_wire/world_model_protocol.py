@@ -105,6 +105,20 @@ class WorldModel(ABC):
         ``'primary'``; multi-view world models override."""
         return "primary"
 
+    @property
+    def conditions_on_history(self) -> bool:
+        """Whether :meth:`rollout` conditions on past frames in addition to
+        ``init``.
+
+        A memory-conditioned world model (e.g. Ctrl-World's pose-anchored
+        sparse history) anchors each prediction to earlier frames of the same
+        rollout; the closed-loop driver reads this flag and passes the running
+        ``history`` only to models that declare it. Models that do not
+        condition on history reject a non-None ``history`` loudly rather than
+        silently dropping it. Default ``False``.
+        """
+        return False
+
     # ----- forward dynamics: the core method -------------------------------
 
     @abstractmethod
@@ -113,6 +127,7 @@ class WorldModel(ABC):
         init: Scene,
         actions: np.ndarray,
         *,
+        history: Optional[Trajectory] = None,
         num_frames: Optional[int] = None,
     ) -> Trajectory:
         """Predict the future frames produced by ``actions`` from ``init``.
@@ -126,6 +141,12 @@ class WorldModel(ABC):
             ``(T, action_dim)`` array in the embodiment's native action
             space — typically the real logged actions of a recorded episode.
             The adapter applies any model-specific normalization / chunking.
+        history
+            Past anchor frames of the same rollout, oldest first (the seed
+            frame followed by each turn's committed conditioning frame).
+            Passed only when :attr:`conditions_on_history` is True; a model
+            that does not condition on history raises on a non-None value
+            instead of silently ignoring it.
         num_frames
             How many future frames to generate. ``None`` lets the adapter
             choose its native default (e.g. one frame per supplied action).

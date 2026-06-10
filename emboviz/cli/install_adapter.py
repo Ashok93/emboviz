@@ -137,8 +137,10 @@ INSTALLABLE_ADAPTERS = {
     "reader-gr00t": "GR00T-format dataset reader (isolated; LeRobot v2.1 + modality.json)",
     # World models register under the ``emboviz.world_models`` group; same
     # venv / spawn flow. The cosmos3 worker is a GPU-free HTTP client to a
-    # separate vLLM-Omni server.
+    # separate vLLM-Omni server; the ctrlworld worker runs its checkpoint
+    # locally on the GPU.
     "cosmos3":      "NVIDIA Cosmos3-Nano world model (forward dynamics via vLLM-Omni)",
+    "ctrlworld":    "Ctrl-World world model (multi-view + pose-anchored history; local GPU)",
 }
 
 

@@ -81,3 +81,35 @@ analysis:
   `key` (a *separate* dataset feature that carries the gripper on its own, e.g.
   DROID's `action.gripper_position`). The `gr00t` reader needs neither — it
   reads the index from the dataset's `meta/modality.json`.
+
+## Closed-loop stress test (`analysis.stress`)
+
+The world-model stress test (`emboviz.world_models.dream_cli`) is configured
+under `analysis.stress`. The shipped DROID scenarios —
+`ctrlworld_droid_pi0_{demo,towel,kettle,cable}.yaml` and
+`cosmos_droid_pi0_demo.yaml` — are runnable as-is and meant to be copied.
+
+```yaml
+analysis:
+  stress:
+    world_model: ctrlworld          # ctrlworld (local GPU) | cosmos3 (vLLM-Omni server)
+    policy_adapter: pi0             # the policy under test
+    policy_kwargs: {config_name: pi0_droid}
+    action_convention: droid_joint_velocity   # the policy's chunk-row layout; never inferred
+    control_hz: 15                  # the policy's control rate
+    robot: franka_panda             # forward kinematics for joint-space conventions
+    camera_map: {primary: exterior_1, wrist_left: wrist}   # policy roles -> frame regions
+    concat_cameras: {exterior_1: primary, exterior_2: exterior_2, wrist: wrist}
+    scene_swap:                     # masked counterfactual edit (baseline-vs-edit clip)
+      mask_query: "yellow marker"   # SAM 3 locates it; empty replace_query -> LaMa removal
+    n_actions: 4                    # frames dreamed per turn (ctrlworld: multiples of 4)
+    execute_steps: 4                # frames committed before the policy re-plans
+    n_loop_steps: 15                # turns per dream clip
+    lead_s: 0.6                     # seed this many seconds before each keyframe
+```
+
+Backend-conditional fields are validated, not silently ignored: `server_url`,
+`domain`, `action_dim`, `concat_resolution`, and whole-frame `perturbations`
+apply only to `cosmos3`; `scene_swap.replace_query` (SDXL object insertion) is
+likewise cosmos3-only — the ctrlworld backend supports removal. Field-level
+documentation lives on `WorldStressCfg` in `emboviz/config.py`.

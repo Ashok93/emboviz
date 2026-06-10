@@ -506,6 +506,10 @@ class ZMQWorldModelClient(RpcClient, WorldModel):
     def conditioning_camera(self) -> str:
         return self._ensure_meta().get("conditioning_camera") or "primary"
 
+    @property
+    def conditions_on_history(self) -> bool:
+        return bool(self._ensure_meta().get("conditions_on_history", False))
+
     # ----- WorldModel ABC: prediction -----------------------------------
 
     def rollout(
@@ -513,11 +517,13 @@ class ZMQWorldModelClient(RpcClient, WorldModel):
         init: Scene,
         actions: np.ndarray,
         *,
+        history: Optional[Trajectory] = None,
         num_frames: Optional[int] = None,
     ) -> Trajectory:
         result = self.request("rollout", {
             "init": wire.encode_scene(init),
             "actions": np.asarray(actions),
+            "history": None if history is None else wire.encode_trajectory(history),
             "num_frames": None if num_frames is None else int(num_frames),
         })
         return wire.decode_trajectory(result)

@@ -12,10 +12,20 @@ and a ``step_fn(conditioning_image) -> actions`` callable. Everything specific t
 a world model or a policy (splitting cameras, tracking state, encoding actions)
 lives behind ``step_fn`` in the adapter — never here.
 
+History. A memory-conditioned world model (``conditions_on_history``) anchors
+each turn to the rollout's past: the loop keeps the seed scene plus each turn's
+committed conditioning scene and passes them as ``history`` on every
+``rollout`` call. Such models also condition on the robot pose of every anchor
+frame, so the caller must supply ``seed_state`` / ``seed_gripper`` for the seed
+(dreamed frames carry their own pose, stamped by the adapter). Models without
+the flag get no history and need no seed pose — behavior is unchanged.
+
 Horizon. Each turn conditions on the *previous turn's dream*, so error compounds
-across turns; the rollout is faithful for roughly the first turn or two and drifts
-after. ``n_steps`` is small by intent — this tests the decisive moment, not a whole
-task. Each turn is handed to ``on_step`` as it completes for incremental save.
+across turns. With single-frame conditioning the rollout is faithful for roughly
+the first turn or two; pose-anchored history extends this to tens of seconds
+(Ctrl-World, arXiv:2510.10125). ``n_steps`` bounds the clip either way — this
+tests the decisive moment, not a whole task. Each turn is handed to ``on_step``
+as it completes for incremental save.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from emboviz_wire.observations import RGBImage
+from emboviz_wire.observations import GripperState, Proprioception, RGBImage
 from emboviz_wire.types import Observations, Scene, Trajectory
 from emboviz_wire.world_model_protocol import WorldModel
 
@@ -80,11 +90,14 @@ def closed_loop_rollout(
     instruction: Optional[str] = None,
     execute_steps: Optional[int] = None,
     on_step: Optional[Callable[[int, Trajectory], None]] = None,
+    seed_state: Optional[np.ndarray] = None,
+    seed_gripper: Optional[float] = None,
 ) -> DreamRollout:
     """Run the policy ⇄ world-model loop for ``n_steps`` turns from ``seed_image``.
 
-    ``seed_image`` is the conditioning frame for the world model (e.g. a DROID
-    ``concat_view``), already perturbed. ``instruction`` is the task text the world
+    ``seed_image`` is the conditioning frame for the world model (the stitched
+    multi-view frame — a DROID ``concat_view`` for Cosmos, a three-view stack for
+    Ctrl-World), already perturbed. ``instruction`` is the task text the world
     model conditions on each turn — required by language-conditioned world models
     (Cosmos rejects an empty prompt), so pass the seed episode's instruction.
 
@@ -92,9 +105,14 @@ def closed_loop_rollout(
     the full chunk ``step_fn`` conditions on, but the loop commits only the leading
     ``execute_steps`` frames and re-plans from there (receding horizon). ``None``
     commits every dreamed frame. ``step_fn`` must advance its own tracked state by
-    the same number (the :class:`~emboviz_cosmos3.dream_step.PolicyDreamStepper`
-    does, via its ``execute_steps``), so proprioception stays aligned with the
-    committed conditioning frame.
+    the same number (the per-adapter dream steppers do, via their
+    ``execute_steps``), so proprioception stays aligned with the committed
+    conditioning frame.
+
+    ``seed_state`` / ``seed_gripper`` are the seed frame's end-effector pose
+    ``[xyz, euler_xyz]`` and gripper value — required when the world model
+    ``conditions_on_history`` (its anchor frames are pose-tagged), unused
+    otherwise.
 
     Returns a :class:`DreamRollout`. Raises if ``step_fn`` yields no usable actions
     or the world model returns no frames — never silently truncates the loop.
@@ -107,24 +125,54 @@ def closed_loop_rollout(
     if execute_steps is not None and int(execute_steps) < 1:
         raise ValueError(f"execute_steps must be >= 1, got {execute_steps}.")
 
-    image = seed
+    needs_history = bool(getattr(world_model, "conditions_on_history", False))
+    if needs_history and (seed_state is None or seed_gripper is None):
+        raise ValueError(
+            "this world model conditions on pose-anchored history; pass the seed "
+            "frame's end-effector pose via seed_state ([xyz, euler_xyz]) and "
+            "seed_gripper."
+        )
+
+    state = None
+    gripper = None
+    if seed_state is not None:
+        state = Proprioception(
+            values=np.asarray(seed_state, dtype=np.float32).reshape(-1)[:6].copy(),
+            convention="ee_pose",
+        )
+    if seed_gripper is not None:
+        gripper = GripperState(value=float(seed_gripper))
+    scene = Scene(
+        observations=Observations(
+            images={conditioning_camera: RGBImage(data=seed, camera_id=conditioning_camera)},
+            state=state,
+            gripper=gripper,
+        ),
+        instruction=instruction,
+    )
+
+    history_frames: list[Scene] = [scene]
     steps: list[Trajectory] = []
     all_frames: list[Scene] = []
 
     for step in range(n_steps):
+        image = _conditioning_image_of(scene, conditioning_camera)
         actions = np.asarray(step_fn(image), dtype=np.float32)
         if actions.ndim != 2 or actions.shape[0] == 0:
             raise ValueError(
                 f"step_fn returned no usable actions (shape {actions.shape}) at step {step}."
             )
 
-        scene = Scene(
-            observations=Observations(
-                images={conditioning_camera: RGBImage(data=image, camera_id=conditioning_camera)}
-            ),
-            instruction=instruction,
-        )
-        predicted = world_model.rollout(scene, actions)
+        history = None
+        if needs_history:
+            history = Trajectory(
+                frames=list(history_frames),
+                frame_indices=list(range(len(history_frames))),
+                fps=0.0,
+                episode_id="dream-history",
+                source="closed_loop:history",
+            )
+        predicted = world_model.rollout(scene, actions, history=history)
         if not predicted.frames:
             raise RuntimeError(f"world model returned no frames at step {step}.")
 
@@ -142,11 +190,21 @@ def closed_loop_rollout(
         if on_step is not None:
             on_step(step, committed)
 
-        # Re-feed the LAST committed frame at whatever resolution the world model
-        # returned it (Cosmos rounds height to a multiple of 16; NVIDIA's robotics
-        # FD cookbook lets the conditioning ride at that size rather than resizing
-        # back — re-resizing each turn only adds interpolation blur).
-        image = _conditioning_image_of(committed.frames[commit - 1], conditioning_camera)
+        # Re-feed the LAST committed frame — the Scene itself, so whatever the
+        # adapter stamped on it (its pose, its latent in metadata) conditions the
+        # next turn, and the image rides at whatever resolution the world model
+        # returned it (Cosmos rounds height to a multiple of 16; re-resizing each
+        # turn only adds interpolation blur). The instruction is re-applied — the
+        # task text is the loop's, not the frame's.
+        last = committed.frames[commit - 1]
+        scene = Scene(
+            observations=last.observations,
+            instruction=instruction,
+            profile=last.profile,
+            metadata=last.metadata,
+            scene_id=last.scene_id,
+        )
+        history_frames.append(scene)
 
     trajectory = Trajectory(
         frames=all_frames,

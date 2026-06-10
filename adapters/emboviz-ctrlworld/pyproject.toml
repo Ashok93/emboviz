@@ -1,0 +1,32 @@
+[project]
+name = "emboviz-ctrlworld"
+version = "0.1.0"
+description = "Ctrl-World world-model adapter for emboviz — multi-view, pose-anchored-memory forward dynamics on DROID (ICLR 2026), run as a ZeroMQ worker."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+
+# THIN SHIM for the user's MAIN venv. Carries zero heavy deps — its job is
+# to advertise an AdapterSpec via the ``emboviz.world_models`` entry point
+# (so the world-model lifecycle knows what to install) and expose the
+# stack-view geometry + dream stepper the driver uses. The inference stack
+# (torch, diffusers, transformers, einops) lives in
+# ``AdapterSpec.runtime_pip`` and installs into ``~/.emboviz/venvs/ctrlworld/``.
+#
+# The vendored reference implementation in ``emboviz_ctrlworld/_ctrl_world``
+# is MIT-licensed (Tsinghua University); see its README.md for provenance.
+dependencies = [
+    "emboviz-wire>=0.3",
+    "numpy>=1.26",
+    "Pillow>=10",
+]
+
+[project.entry-points."emboviz.world_models"]
+ctrlworld = "emboviz_ctrlworld.spec:SPEC"
+
+[project.scripts]
+emboviz-ctrlworld = "emboviz_ctrlworld.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -47,7 +47,16 @@ SPEC = AdapterSpec(
         "emboviz-wire",
         "emboviz-pi0",
     ),
-    runtime_env_vars={"GIT_LFS_SKIP_SMUDGE": "1"},
+    runtime_env_vars={
+        "GIT_LFS_SKIP_SMUDGE": "1",
+        # openpi's JAX runtime preallocates 75% of GPU memory by default,
+        # which starves every co-resident worker (the Ctrl-World world model,
+        # SAM 3, LaMa) on a shared single-GPU pod. 0.4 is the value the
+        # Ctrl-World reference uses for exactly this π0-beside-world-model
+        # setup (Robert-gyj/Ctrl-World README, rollout_interact_pi invocation)
+        # and leaves π0's ~10 GB working set ample headroom on a 24 GB card.
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.4",
+    },
     # MUST match Pi0Adapter.__init__ exactly — these are now forwarded to
     # the worker at spawn (lifecycle passes default_actor_kwargs as
     # --kwargs). The old {checkpoint, device} keys were NOT real params

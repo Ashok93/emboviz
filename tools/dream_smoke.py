@@ -39,9 +39,9 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     if cs is None or cs.policy_adapter is None:
-        raise SystemExit("config needs analysis.cosmos_stress with a policy_adapter.")
+        raise SystemExit("config needs analysis.stress with a policy_adapter.")
     episode = args.episode
     if episode is None:
         episode = int(str(cfg.analysis.episodes).split(",")[0].split("-")[0])
@@ -53,7 +53,7 @@ def main() -> None:
     if not keyframes:
         raise SystemExit("no keyframes detected — cannot pick a seed.")
 
-    from emboviz_cosmos3.bridge import make_state_tracker
+    from emboviz_wire.policy_bridge import make_state_tracker
     from emboviz_cosmos3.concat_view import build_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
 
@@ -120,7 +120,7 @@ def main() -> None:
             "The policy's chunk does not match the bridge — inspect the policy output."
         )
     print("\n[smoke] PASS — policy + bridge + forward kinematics + DROID encoder all agree. "
-          "Only the Cosmos GPU server remains to wire in (set cosmos_stress.server_url).")
+          "Only the Cosmos GPU server remains to wire in (set stress.server_url).")
 
 
 if __name__ == "__main__":

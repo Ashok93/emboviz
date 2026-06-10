@@ -15,7 +15,8 @@ import numpy as np
 
 from emboviz_wire.types import ActionResult, Scene
 
-from emboviz_cosmos3.bridge import CartesianStateTracker, JointStateTracker
+from emboviz_wire.policy_bridge import CartesianStateTracker, JointStateTracker
+
 from emboviz_cosmos3.concat_view import build_concat_view, split_concat_view
 from emboviz_cosmos3.dream_step import PolicyDreamStepper
 

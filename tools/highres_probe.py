@@ -49,7 +49,7 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     episode = args.episode if args.episode is not None else int(
         str(cfg.analysis.episodes).split(",")[0].split("-")[0])
 
@@ -62,7 +62,7 @@ def main() -> None:
         "action_dim": cs.action_dim, "conditioning_camera": cs.conditioning_camera,
     })
 
-    from emboviz_cosmos3.bridge import make_state_tracker
+    from emboviz_wire.policy_bridge import make_state_tracker
     from emboviz_cosmos3.concat_view import build_concat_view
     from emboviz_cosmos3.dream_step import PolicyDreamStepper
 

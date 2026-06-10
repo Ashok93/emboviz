@@ -1,0 +1,87 @@
+# π0-DROID flown inside Ctrl-World — closed-loop stress test on DROID episode
+# 56423 ("Open the lid of the kettle by pressing the button on the handle"),
+# a fine-manipulation task on a rigid articulated object.
+#
+# Ctrl-World (ICLR 2026, arXiv:2510.10125) predicts all three DROID cameras
+# jointly and anchors each step to a pose-conditioned sparse history, which keeps
+# the closed loop coherent over tens of seconds — against Cosmos3's single-frame
+# conditioning, which drifts within one or two re-conditioning cycles. The model
+# runs LOCALLY in its worker venv (1.5B SVD-based, bf16, ~5 GB VRAM): no separate
+# server pod. First start downloads ~17 GB of checkpoints from the HF Hub.
+#
+# π0-DROID is joint-space: it reads observation/joint_position (7) and emits
+# joint velocities + an absolute gripper (action_horizon = 10). The bridge tracks
+# the joint vector, forward-kinematics it to the panda_link8 pose (robot:
+# franka_panda) — the observation.state.cartesian_position convention Ctrl-World
+# was trained on — and conditions the dream on those absolute poses at 5 Hz.
+#
+#   uv sync --extra ctrlworld --extra pi0 --extra robot
+#   uv run python -m emboviz.world_models.dream_cli --config configs/ctrlworld_droid_pi0_kettle.yaml --keyframe-kinds gripper_change --max-clips 1
+
+model:
+  adapter: mock                              # the dream driver doesn't run this; a valid value is required
+
+dataset:
+  format: lerobot
+  path: DAVIAN-Robotics/droid_v3
+  cameras:
+    primary: observation.images.exterior_1_left
+    exterior_2: observation.images.exterior_2_left
+    wrist: observation.images.wrist_left
+  state:
+    key: observation.state.joint_position       # 7 Franka joint angles (radians) — π0's state
+    convention: joint_angles
+  action:
+    key: action.original
+  gripper:
+    key: observation.state.gripper_position     # proprioceptive gripper, [0,1] (0=open)
+    kind: parallel_jaw
+    units: unit
+    range: [0.0, 1.0]
+  instruction:
+    from: tasks
+  extra:
+    revision: main                           # droid_v3 has no version tag
+
+analysis:
+  episodes: "56423"
+  frame_start: 0
+  n_frames: -1
+  frame_stride: 1
+  diagnostics: [attention]                   # unused by the dream driver; a valid value is required
+
+  stress:
+    world_model: ctrlworld                   # local Ctrl-World worker; no server_url
+    policy_adapter: pi0
+    policy_kwargs: {config_name: pi0_droid}
+    action_convention: droid_joint_velocity  # π0-DROID emits joint velocities (rad/s)
+    control_hz: 15                            # DROID control rate; 3 control steps per dreamed frame (5 Hz)
+    robot: franka_panda                      # forward kinematics: joints -> panda_link8 pose
+    camera_map: {primary: exterior_1, wrist_left: wrist}   # π0 roles -> stack views
+    # Stack views -> the episode's camera roles (Ctrl-World's training order:
+    # exterior_1 on top, exterior_2 in the middle, wrist at the bottom).
+    concat_cameras: {exterior_1: primary, exterior_2: exterior_2, wrist: wrist}
+    # Masked counterfactual edit (baseline-vs-edit side by side in ONE clip).
+    # SAM 3 locates ``mask_query`` per camera and LaMa removes it (empty
+    # replace_query). SD-inpaint insertion is not wired for this backend.
+    scene_swap:
+      mask_query: "kettle"                   # the object SAM 3 locates and LaMa removes
+      mask_dilation: 10
+    # One turn = one Ctrl-World forward pass: 6 pose-tagged history frames +
+    # the current frame in, 4 future frames out (5 Hz, 0.8 s). n_actions must
+    # be a multiple of 4. execute_steps=4 commits the whole turn and re-plans
+    # from its last frame — the reference rollout's receding pattern. π0's
+    # 10-step horizon covers 10 of the 12 control steps a turn spans; the last
+    # 2 are zero-order-hold extended, exactly the reference's index padding for
+    # the pi0 policy (rollout_interact_pi.py line 254). Set execute_steps: 3 to
+    # commit only fully-policy-driven frames (no extrapolated state in the
+    # loop) at the cost of ~33% more turns per dreamed second.
+    n_actions: 4
+    execute_steps: 4
+    # 15 turns x 4 frames at 5 Hz = 12 s of dream — inside the pose-anchored
+    # coherence window the paper reports (>20 s), and long enough to watch the
+    # grasp, the lift, and the policy's reaction to the edited scene.
+    n_loop_steps: 15
+    lead_s: 0.6                              # seed ~9 frames before the grasp keyframe
+
+output: ./outputs/ctrlworld_dream_56423

@@ -35,7 +35,7 @@ from emboviz.world_models.keyframes import detect_keyframes
 def _img(frame, role: str) -> np.ndarray:
     if role not in frame.observations.images:
         raise SystemExit(
-            f"camera role {role!r} (from cosmos_stress.concat_cameras) is not in the "
+            f"camera role {role!r} (from stress.concat_cameras) is not in the "
             f"episode (available: {sorted(frame.observations.images)})."
         )
     return np.asarray(frame.observations.images[role].data, dtype=np.uint8)
@@ -64,10 +64,10 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     if cs is None or cs.scene_swap is None:
         raise SystemExit(
-            "config has no analysis.cosmos_stress.scene_swap section — nothing to swap."
+            "config has no analysis.stress.scene_swap section — nothing to swap."
         )
     sw = cs.scene_swap
 

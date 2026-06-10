@@ -60,12 +60,12 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     episode = args.episode if args.episode is not None else int(str(cfg.analysis.episodes).split(",")[0])
 
     from emboviz_wire.observations import RGBImage
     from emboviz_wire.types import Observations, Scene
-    from emboviz_cosmos3.bridge import integrate_joint_chunk, make_state_tracker
+    from emboviz_wire.policy_bridge import integrate_joint_chunk, make_state_tracker
     from emboviz_cosmos3.concat_view import build_concat_view, split_concat_view
     from emboviz_robot import load_kinematics
 
