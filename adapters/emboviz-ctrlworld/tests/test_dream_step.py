@@ -2,9 +2,9 @@
 
 A fake policy returns a fixed joint-velocity chunk and records the Scene it was
 handed; a fake kinematics gives an affine joints->xyz readout. The tests verify
-the 15 Hz -> 5 Hz rate bridging, the zero-order-hold extension for a policy
-horizon shorter than the turn, the tracked-state advance, and the camera
-mapping.
+the control-rate -> native-rate bridging, the zero-order-hold extension for a
+policy horizon shorter than the turn, the tracked-state advance, and the
+camera mapping — all against the droid profile.
 
 Run::
 
@@ -19,7 +19,10 @@ from emboviz_wire.policy_bridge import JointStateTracker
 from emboviz_wire.types import ActionResult, Scene
 
 from emboviz_ctrlworld.dream_step import CtrlWorldDreamStepper
+from emboviz_ctrlworld.profiles import get_profile
 from emboviz_ctrlworld.stack_view import build_stack_view
+
+_DROID = get_profile("droid")
 
 
 class _FakeKinematics:
@@ -56,15 +59,19 @@ class _FakePolicy:
 
 def _stack() -> np.ndarray:
     return build_stack_view(
-        np.full((192, 320, 3), 10, np.uint8),
-        np.full((192, 320, 3), 20, np.uint8),
-        np.full((192, 320, 3), 30, np.uint8),
+        {
+            "exterior_1": np.full((192, 320, 3), 10, np.uint8),
+            "exterior_2": np.full((192, 320, 3), 20, np.uint8),
+            "wrist": np.full((192, 320, 3), 30, np.uint8),
+        },
+        views=_DROID.views, view_hw=_DROID.view_hw,
     )
 
 
 def _stepper(policy, **kwargs) -> CtrlWorldDreamStepper:
     tracker = JointStateTracker(np.zeros(7, np.float32), 0.0, _FakeKinematics(), control_hz=15.0)
     defaults = dict(
+        profile=_DROID,
         tracker=tracker,
         camera_map={"primary": "exterior_1", "wrist_left": "wrist"},
         instruction="pick the marker",
@@ -94,6 +101,12 @@ def test_rate_bridging_and_pose_rows() -> None:
     assert int(np.asarray(scene.observations.images["wrist_left"].data)[0, 0, 0]) == 30
     assert scene.observations.state.convention == "joint_angles"
     assert scene.instruction == "pick the marker"
+
+
+def test_n_actions_defaults_to_profile_chunk() -> None:
+    policy = _FakePolicy(horizon=12)
+    stepper = _stepper(policy, n_actions=None)
+    assert stepper(_stack()).shape == (_DROID.frames_per_chunk, 7)
 
 
 def test_zero_order_hold_extension_for_short_horizon() -> None:
@@ -148,6 +161,7 @@ def test_rejects_policy_without_chunk() -> None:
 
 def _run_all() -> None:
     test_rate_bridging_and_pose_rows()
+    test_n_actions_defaults_to_profile_chunk()
     test_zero_order_hold_extension_for_short_horizon()
     test_tracker_advances_by_execute_steps_control_rows()
     test_rejects_bad_configuration()

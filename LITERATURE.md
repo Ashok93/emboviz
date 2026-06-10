@@ -1278,11 +1278,14 @@ against paired real-robot rollouts (instruction-following agreement 0.80 vs
 0.90 real for π0.5 pick-place).
 
 ### Method
-The `emboviz-ctrlworld` worker runs the released DROID checkpoint (an SVD
-fine-tune, 1.5B) locally and exposes it behind the `WorldModel` contract. The
-conditioning contract is taken from the reference implementation (vendored,
-with per-file provenance in `emboviz_ctrlworld/_ctrl_world/README.md`), not
-re-derived:
+The `emboviz-ctrlworld` worker runs a Ctrl-World checkpoint (an SVD fine-tune,
+1.5B) locally and exposes it behind the `WorldModel` contract. Everything
+checkpoint-specific travels as a `CtrlWorldProfile`
+(`emboviz_ctrlworld/profiles.py`): the released DROID checkpoint ships as the
+`droid` profile; a fine-tune on another rig is a profile JSON, not a code
+change. The droid profile's conditioning contract below is taken from the
+reference implementation (vendored, with per-file provenance in
+`emboviz_ctrlworld/_ctrl_world/README.md`), not re-derived:
 
 - **Latent stack** — each 320x192 view is VAE-encoded separately and stacked
   along the latent height in the order `[exterior_1, exterior_2, wrist]`

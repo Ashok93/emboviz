@@ -42,17 +42,30 @@ Face Hub (none gated):
 | SVD base | `stabilityai/stable-video-diffusion-img2vid` | ~8 GB |
 | CLIP text encoder | `openai/clip-vit-base-patch32` | ~600 MB |
 
-## Conditioning contract
+## Checkpoint profiles
+
+Everything checkpoint-specific — camera views and their stack order, per-view
+size, native rate, history schedule, action-normalization bounds, weight
+locations, embodiment — is a `CtrlWorldProfile`
+(`emboviz_ctrlworld/profiles.py`). `"droid"` ships (the released checkpoint
+above); a fine-tune on another rig is a profile JSON selected via
+`stress.profile` in the run config — no adapter code changes. Fixed across
+profiles, by design: the action semantics (absolute
+`[x, y, z, roll, pitch, yaw, gripper]` rows, extrinsic-XYZ euler, gripper in
+[0, 1]) — joint-space embodiments reach this format through forward
+kinematics (`emboviz-robot`), which is what lets a new-embodiment fine-tune
+start from the DROID weights with a familiar action space.
+
+## Conditioning contract (the `droid` profile)
 
 - **Frames**: one 320x576 vertical stack of `[exterior_1, exterior_2, wrist]`
   at 320x192 each (`emboviz_ctrlworld.stack_view`).
-- **Actions**: absolute `[x, y, z, roll, pitch, yaw, gripper]` rows — the DROID
-  `observation.state.cartesian_position` convention (`panda_link8` flange,
-  extrinsic-XYZ euler) + gripper in [0, 1] — at **5 Hz**, in multiples of 4
-  (one chunk = 4 future frames). Normalization to the training quantile bounds
-  happens inside the adapter.
+- **Actions**: absolute pose rows in the DROID
+  `observation.state.cartesian_position` convention (`panda_link8` flange) at
+  **5 Hz**, in multiples of 4 (one chunk = 4 future frames). Normalization to
+  the profile's training quantile bounds happens inside the adapter.
 - **History**: the closed-loop driver passes the rollout's anchor frames; the
-  adapter selects them per the reference `history_idx` schedule and keeps the
+  adapter selects them per the profile's `history_idx` schedule and keeps the
   loop in latent space via `Scene.metadata["ctrlworld_latent"]`.
 
 Driving a joint-space policy (π0-DROID) through this contract — joint

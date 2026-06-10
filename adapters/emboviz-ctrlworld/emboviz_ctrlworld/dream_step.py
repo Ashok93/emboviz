@@ -1,21 +1,20 @@
 """The per-step bridge that lets a user's policy fly inside the Ctrl-World dream.
 
 One turn of the closed loop: the world model hands us the current (dreamed)
-three-view stack; we split it into the policy's cameras, hand the policy that
-plus its *tracked* proprioceptive state and the task instruction, take its
-action chunk, integrate it to absolute end-effector poses at the world model's
-5 Hz native rate, and advance the tracked state by the committed steps. The
-next world-model step conditions on the dream this produced.
+view stack; we split it into the policy's cameras, hand the policy that plus
+its *tracked* proprioceptive state and the task instruction, take its action
+chunk, integrate it to absolute end-effector poses at the world model's native
+rate, and advance the tracked state by the committed steps. The next
+world-model step conditions on the dream this produced.
 
-Rate bridging. The policy runs at its control rate (π0-DROID: 15 Hz) while
-Ctrl-World conditions at 5 Hz, so each dreamed frame spans
-``control_hz / 5`` control steps (3 for DROID). A turn of ``n_actions`` future
-frames therefore consumes ``3 * n_actions`` chunk rows. π0-DROID's horizon is
-10 rows — one short of the 12 a 4-frame turn needs — so the chunk is extended
-by repeating its last row (zero-order hold), exactly the reference rollout's
-index padding for the pi0 policy (``rollout_interact_pi.py`` line 254,
-``idx = [0..9, 9, 9, 9, 9, 9]``). The extension count is exposed on
-``last_extended_rows`` and only conditions the dream's tail; set
+Rate bridging. The policy runs at its control rate (π0-DROID: 15 Hz) while the
+world model conditions at its profile's native rate (DROID profile: 5 Hz), so
+each dreamed frame spans ``control_hz / native_fps`` control steps. A turn of
+``n_actions`` future frames therefore consumes that many chunk rows per frame;
+a policy horizon shorter than the turn is extended by repeating its last row
+(zero-order hold), exactly the reference rollout's index padding for the pi0
+policy (``rollout_interact_pi.py`` line 254). The extension count is exposed
+on ``last_extended_rows`` and only conditions the dream's tail; set
 ``execute_steps`` below ``n_actions`` to keep extrapolated state out of the
 committed rollout entirely.
 
@@ -34,8 +33,8 @@ from emboviz_wire.observations import RGBImage
 from emboviz_wire.policy_bridge import StateTracker
 from emboviz_wire.types import Observations, Scene
 
-from emboviz_ctrlworld.model import FRAMES_PER_CHUNK, NATIVE_FPS
-from emboviz_ctrlworld.stack_view import STACK_VIEW_ORDER, StackView, split_stack_view
+from emboviz_ctrlworld.profiles import CtrlWorldProfile
+from emboviz_ctrlworld.stack_view import split_stack_view
 
 
 class CtrlWorldDreamStepper:
@@ -46,19 +45,21 @@ class CtrlWorldDreamStepper:
     predict_fn
         Maps a :class:`Scene` to an ``ActionResult`` (a connected policy's
         ``predict``).
+    profile
+        The checkpoint profile driving the loop — supplies the view layout,
+        the native rate, and the chunk quantum.
     tracker
         The :class:`StateTracker` holding the policy's proprioceptive state.
     camera_map
-        ``{policy_camera_role: stack_view}`` — which stack view feeds each
+        ``{policy_camera_role: view_name}`` — which stack view feeds each
         camera the policy expects (e.g. ``{"primary": "exterior_1",
-        "wrist_left": "wrist"}``). Views must be in ``STACK_VIEW_ORDER``.
+        "wrist_left": "wrist"}``). Views must be in ``profile.views``.
     instruction
         The task string handed to the policy each turn. Required by language-
         conditioned policies; pass the seed episode's instruction.
     n_actions
-        Prediction horizon in dreamed frames per turn (5 Hz). Must be a
-        positive multiple of ``FRAMES_PER_CHUNK`` (4) — the world model's
-        chunk quantum.
+        Prediction horizon in dreamed frames per turn. Must be a positive
+        multiple of ``profile.frames_per_chunk``.
     execute_steps
         Execution horizon: dreamed frames the policy commits to before
         re-planning (receding horizon). Defaults to ``n_actions``. Must
@@ -66,51 +67,56 @@ class CtrlWorldDreamStepper:
         same number of frames so the tracked state stays aligned with the
         conditioning frame.
     control_hz
-        The policy's control rate. ``control_hz / 5`` must be a positive
-        integer (control steps per dreamed frame); 15 for DROID.
+        The policy's control rate. ``control_hz / profile.native_fps`` must be
+        a positive integer (control steps per dreamed frame).
     """
 
     def __init__(
         self,
         predict_fn: Callable[[Scene], "object"],
         *,
+        profile: CtrlWorldProfile,
         tracker: StateTracker,
-        camera_map: dict[str, StackView],
+        camera_map: dict[str, str],
         instruction: Optional[str] = None,
-        n_actions: int = FRAMES_PER_CHUNK,
+        n_actions: Optional[int] = None,
         execute_steps: Optional[int] = None,
         control_hz: float = 15.0,
     ):
         if not camera_map:
             raise ValueError("CtrlWorldDreamStepper: camera_map must map at least one policy camera.")
-        bad = {v for v in camera_map.values() if v not in STACK_VIEW_ORDER}
+        bad = {v for v in camera_map.values() if v not in profile.views}
         if bad:
             raise ValueError(
                 f"CtrlWorldDreamStepper: invalid stack views {sorted(bad)}; "
-                f"valid views are {sorted(STACK_VIEW_ORDER)}."
+                f"profile '{profile.name}' has views {sorted(profile.views)}."
             )
-        if int(n_actions) < 1 or int(n_actions) % FRAMES_PER_CHUNK != 0:
+        n_actions = profile.frames_per_chunk if n_actions is None else int(n_actions)
+        if n_actions < 1 or n_actions % profile.frames_per_chunk != 0:
             raise ValueError(
                 f"CtrlWorldDreamStepper: n_actions must be a positive multiple of "
-                f"{FRAMES_PER_CHUNK} (the world model's chunk quantum); got {n_actions}."
+                f"{profile.frames_per_chunk} (profile '{profile.name}''s chunk "
+                f"quantum); got {n_actions}."
             )
-        if execute_steps is not None and not 1 <= int(execute_steps) <= int(n_actions):
+        if execute_steps is not None and not 1 <= int(execute_steps) <= n_actions:
             raise ValueError(
                 f"CtrlWorldDreamStepper: execute_steps must satisfy 1 <= execute_steps "
-                f"<= n_actions ({int(n_actions)}); got {execute_steps}."
+                f"<= n_actions ({n_actions}); got {execute_steps}."
             )
-        steps_per_frame = float(control_hz) / NATIVE_FPS
+        steps_per_frame = float(control_hz) / profile.native_fps
         if abs(steps_per_frame - round(steps_per_frame)) > 1e-9 or round(steps_per_frame) < 1:
             raise ValueError(
                 f"CtrlWorldDreamStepper: control_hz ({control_hz:g}) must be a "
-                f"positive integer multiple of the world model's {NATIVE_FPS:g} Hz."
+                f"positive integer multiple of profile '{profile.name}''s "
+                f"{profile.native_fps:g} Hz native rate."
             )
 
         self._predict_fn = predict_fn
+        self._profile = profile
         self._tracker = tracker
         self._camera_map = dict(camera_map)
         self._instruction = instruction
-        self._n_actions = int(n_actions)
+        self._n_actions = n_actions
         self._execute_steps = None if execute_steps is None else int(execute_steps)
         self._steps_per_frame = int(round(steps_per_frame))
         self.steps_taken = 0
@@ -130,7 +136,7 @@ class CtrlWorldDreamStepper:
 
     def __call__(self, stack_image: np.ndarray) -> np.ndarray:
         """One loop turn: dreamed stack in, ``(n_actions, 7)`` pose rows out."""
-        views = split_stack_view(stack_image)
+        views = split_stack_view(stack_image, views=self._profile.views)
         images = {
             role: RGBImage(data=views[view], camera_id=role)
             for role, view in self._camera_map.items()

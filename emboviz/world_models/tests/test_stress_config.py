@@ -37,7 +37,11 @@ def test_policy_path_valid() -> None:
 def test_ctrlworld_minimal() -> None:
     c = WorldStressCfg(world_model="ctrlworld", n_actions=4)
     assert c.server_url is None                  # local backend needs no server
-    assert set(c.concat_cameras) == {"exterior_1", "exterior_2", "wrist"}
+    assert c.profile == "droid"                  # default checkpoint profile
+    # Region vocabulary and the concat_cameras default come from the checkpoint
+    # profile and are resolved by the dream driver
+    # (emboviz_ctrlworld.profiles.check_stress_compat), not the host schema.
+    assert c.concat_cameras is None
 
 
 def test_ctrlworld_policy_path_valid() -> None:
@@ -97,24 +101,11 @@ def test_ctrlworld_forbids_perturbations_and_insert_swap() -> None:
     assert c.scene_swap.replace_query == ""
 
 
-def test_ctrlworld_chunk_quantum() -> None:
+def test_cosmos3_forbids_profile() -> None:
     try:
-        WorldStressCfg(world_model="ctrlworld", n_actions=6)
+        WorldStressCfg(server_url="http://x", profile="droid")
     except Exception as e:
-        assert "multiple" in str(e)
-    else:
-        raise AssertionError("expected validation error")
-
-
-def test_ctrlworld_region_vocabulary() -> None:
-    try:
-        WorldStressCfg(
-            world_model="ctrlworld", n_actions=4,
-            policy_adapter="pi0", action_convention="absolute_xyz_euler",
-            camera_map={"primary": "exterior_left"},   # a cosmos region
-        )
-    except Exception as e:
-        assert "invalid for" in str(e)
+        assert "ctrlworld checkpoint profile" in str(e)
     else:
         raise AssertionError("expected validation error")
 
@@ -218,10 +209,9 @@ def _run_all() -> None:
     test_ctrlworld_minimal()
     test_ctrlworld_policy_path_valid()
     test_cosmos3_requires_server_url()
+    test_cosmos3_forbids_profile()
     test_ctrlworld_forbids_cosmos_fields()
     test_ctrlworld_forbids_perturbations_and_insert_swap()
-    test_ctrlworld_chunk_quantum()
-    test_ctrlworld_region_vocabulary()
     test_policy_without_convention_raises()
     test_policy_without_camera_map_raises()
     test_bad_region_raises()

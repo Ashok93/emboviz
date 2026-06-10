@@ -148,7 +148,10 @@ as model adapters. Two backends ship: `emboviz-ctrlworld` loads its checkpoint
 locally on the GPU and additionally conditions on pose-anchored history (it
 declares `conditions_on_history`, and the closed-loop driver passes the
 rollout's anchor frames on every call); `emboviz-cosmos3` is a GPU-free HTTP
-client to a separate vLLM-Omni server. The model-agnostic policy bridge —
+client to a separate vLLM-Omni server. A Ctrl-World checkpoint's contract —
+views, sizes, rates, history schedule, action bounds, weight locations — is a
+`CtrlWorldProfile` (`emboviz_ctrlworld/profiles.py`): a catalog name or a
+profile JSON, so a new checkpoint is data, not code. The model-agnostic policy bridge —
 integrating a policy's action chunk into the Cartesian state sequence a world
 model conditions on, under a declared action convention — lives in
 `emboviz_wire/policy_bridge.py`; each adapter owns only its model-specific

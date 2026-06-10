@@ -158,25 +158,19 @@ _CARTESIAN_ACTION_CONVENTIONS = {"absolute_xyz_euler", "delta_xyz_euler_base"}
 _JOINT_ACTION_CONVENTIONS = {"droid_joint_velocity"}
 _ACTION_CONVENTIONS = _CARTESIAN_ACTION_CONVENTIONS | _JOINT_ACTION_CONVENTIONS
 
-# Per-world-model regions of the stitched conditioning frame, and the matching
-# default region -> episode-camera-role mapping. Cosmos conditions on the DROID
-# ``concat_view`` (wrist on top, exteriors below); Ctrl-World on a three-view
-# vertical stack in its training order. Mirrors emboviz_cosmos3.concat_view /
-# emboviz_ctrlworld.stack_view — re-declared here (like _STATE_CONVENTIONS) so
-# a config validates without the adapter packages installed.
-_WORLD_MODEL_REGIONS: dict[str, set[str]] = {
-    "cosmos3": {"wrist", "exterior_left", "exterior_right"},
-    "ctrlworld": {"exterior_1", "exterior_2", "wrist"},
+_WORLD_MODELS = {"cosmos3", "ctrlworld"}
+# Cosmos's regions of the stitched conditioning frame are fixed by its DROID
+# ``concat_view`` geometry (wrist on top, exteriors below) — mirrors
+# emboviz_cosmos3.concat_view, re-declared here (like _STATE_CONVENTIONS) so a
+# config validates without the adapter installed. Ctrl-World's regions depend
+# on the selected checkpoint *profile* (stress.profile), so its region /
+# chunk-quantum / rate checks live with the profile and run in the dream
+# driver (emboviz_ctrlworld.profiles.check_stress_compat) — still before any
+# worker spawns.
+_COSMOS_REGIONS = {"wrist", "exterior_left", "exterior_right"}
+_COSMOS_DEFAULT_REGION_CAMERAS = {
+    "wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2",
 }
-_DEFAULT_REGION_CAMERAS: dict[str, dict[str, str]] = {
-    "cosmos3": {"wrist": "wrist", "exterior_left": "primary", "exterior_right": "exterior_2"},
-    "ctrlworld": {"exterior_1": "primary", "exterior_2": "exterior_2", "wrist": "wrist"},
-}
-_WORLD_MODELS = set(_WORLD_MODEL_REGIONS)
-# Ctrl-World generates 4 future frames per forward pass (num_frames=5 with
-# frame 0 re-rendering the conditioning timestep) — mirrors
-# emboviz_ctrlworld.model.FRAMES_PER_CHUNK.
-_CTRLWORLD_FRAMES_PER_CHUNK = 4
 
 
 class SceneSwapCfg(_Strict):
@@ -258,7 +252,8 @@ class WorldStressCfg(_Strict):
         for roughly one or two re-conditioning cycles.
       * ``ctrlworld`` — Ctrl-World (ICLR 2026), run locally on the GPU.
         Multi-view joint prediction + pose-anchored sparse history; coherent
-        over tens of seconds. DROID embodiment; 4-frame chunks at 5 Hz.
+        over tens of seconds. The embodiment, camera views, rates, and chunk
+        quantum come from the checkpoint ``profile`` ("droid" ships).
 
     Two editing modes are mutually exclusive:
 
@@ -271,8 +266,11 @@ class WorldStressCfg(_Strict):
 
     world_model: str = "cosmos3"                  # cosmos3 | ctrlworld
     server_url: Optional[str] = None              # vLLM-Omni Cosmos server; required for cosmos3
-    domain: str = "droid_lerobot"                 # cosmos3 only (ctrlworld is DROID-fixed)
+    domain: str = "droid_lerobot"                 # cosmos3 only (ctrlworld embodiment comes from its profile)
     action_dim: int = 10                          # cosmos3 only (ctrlworld is 7-fixed)
+    # Ctrl-World checkpoint profile: a preconfigured name ("droid") or the path
+    # to a profile JSON (see emboviz_ctrlworld.profiles). ctrlworld only.
+    profile: str = "droid"
     # Policy under test. None -> recorded-action faithfulness baseline (no policy).
     policy_adapter: Optional[str] = None
     policy_kwargs: dict[str, Any] = Field(default_factory=dict)  # adapter constructor kwargs (e.g. {config_name: pi0_droid})
@@ -366,15 +364,39 @@ class WorldStressCfg(_Strict):
     @model_validator(mode="after")
     def _check_backend(self) -> "WorldStressCfg":
         """Backend-conditional checks: required/forbidden fields and the region
-        vocabulary depend on which world model drives the loop."""
-        regions = _WORLD_MODEL_REGIONS[self.world_model]
+        vocabulary depend on which world model drives the loop.
 
+        cosmos3's region vocabulary is fixed by its concat geometry and is
+        checked here. ctrlworld's depends on the selected checkpoint profile,
+        so its region / chunk-quantum / control-rate checks run in the dream
+        driver via ``emboviz_ctrlworld.profiles.check_stress_compat`` —
+        equally loud, still before any worker spawns."""
         if self.world_model == "cosmos3":
             if not self.server_url:
                 raise ValueError(
                     "stress.world_model='cosmos3' needs stress.server_url (the "
                     "running vLLM-Omni Cosmos server). The ctrlworld backend runs "
                     "locally and needs no server."
+                )
+            if "profile" in self.model_fields_set:
+                raise ValueError(
+                    "stress.profile selects a ctrlworld checkpoint profile and "
+                    "does not apply to the cosmos3 backend; remove it (cosmos's "
+                    "embodiment is stress.domain)."
+                )
+            if self.concat_cameras is None:
+                self.concat_cameras = dict(_COSMOS_DEFAULT_REGION_CAMERAS)
+            if set(self.concat_cameras) != _COSMOS_REGIONS:
+                raise ValueError(
+                    f"stress.concat_cameras must map exactly {sorted(_COSMOS_REGIONS)} "
+                    f"(the cosmos3 regions) to episode camera roles; got keys "
+                    f"{sorted(self.concat_cameras)}."
+                )
+            bad = {r for r in self.camera_map.values() if r not in _COSMOS_REGIONS}
+            if bad:
+                raise ValueError(
+                    f"stress.camera_map regions {sorted(bad)} invalid for "
+                    f"world_model='cosmos3'; valid regions: {sorted(_COSMOS_REGIONS)}."
                 )
         else:  # ctrlworld
             forbidden = {"server_url", "domain", "action_dim", "concat_resolution"}
@@ -385,8 +407,8 @@ class WorldStressCfg(_Strict):
             if set_anyway:
                 raise ValueError(
                     f"stress.{set_anyway[0]} applies only to the cosmos3 backend "
-                    "(ctrlworld runs locally, is DROID-fixed with action_dim 7, and "
-                    "generates at its checkpoint's 320x192 view size); remove it."
+                    "(ctrlworld runs locally; its embodiment, action encoding, and "
+                    "view sizes come from stress.profile); remove it."
                 )
             if self.perturbations:
                 raise ValueError(
@@ -401,27 +423,6 @@ class WorldStressCfg(_Strict):
                     "is not wired for the ctrlworld backend; leave it empty to "
                     "remove the object (SAM 3 + LaMa)."
                 )
-            if self.n_actions % _CTRLWORLD_FRAMES_PER_CHUNK != 0:
-                raise ValueError(
-                    f"stress.n_actions={self.n_actions}: ctrlworld dreams in chunks "
-                    f"of {_CTRLWORLD_FRAMES_PER_CHUNK} future frames; n_actions must "
-                    "be a multiple of it."
-                )
-
-        if self.concat_cameras is None:
-            self.concat_cameras = dict(_DEFAULT_REGION_CAMERAS[self.world_model])
-        if set(self.concat_cameras) != regions:
-            raise ValueError(
-                f"stress.concat_cameras must map exactly {sorted(regions)} "
-                f"(the {self.world_model} regions) to episode camera roles; got "
-                f"keys {sorted(self.concat_cameras)}."
-            )
-        bad = {r for r in self.camera_map.values() if r not in regions}
-        if bad:
-            raise ValueError(
-                f"stress.camera_map regions {sorted(bad)} invalid for "
-                f"world_model={self.world_model!r}; valid regions: {sorted(regions)}."
-            )
         return self
 
     @model_validator(mode="after")

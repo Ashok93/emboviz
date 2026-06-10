@@ -51,6 +51,9 @@ analysis:
 
   stress:
     world_model: ctrlworld                   # local Ctrl-World worker; no server_url
+    # profile: droid                         # checkpoint profile (default). A custom
+    #                                        # fine-tune is a profile JSON path; see
+    #                                        # emboviz_ctrlworld.profiles.
     policy_adapter: pi0
     policy_kwargs: {config_name: pi0_droid}
     action_convention: droid_joint_velocity  # π0-DROID emits joint velocities (rad/s)

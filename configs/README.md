@@ -93,6 +93,8 @@ under `analysis.stress`. The shipped DROID scenarios —
 analysis:
   stress:
     world_model: ctrlworld          # ctrlworld (local GPU) | cosmos3 (vLLM-Omni server)
+    # profile: droid                # ctrlworld checkpoint profile (default "droid");
+    #                               # a custom fine-tune is a profile JSON path
     policy_adapter: pi0             # the policy under test
     policy_kwargs: {config_name: pi0_droid}
     action_convention: droid_joint_velocity   # the policy's chunk-row layout; never inferred
@@ -110,6 +112,11 @@ analysis:
 
 Backend-conditional fields are validated, not silently ignored: `server_url`,
 `domain`, `action_dim`, `concat_resolution`, and whole-frame `perturbations`
-apply only to `cosmos3`; `scene_swap.replace_query` (SDXL object insertion) is
-likewise cosmos3-only — the ctrlworld backend supports removal. Field-level
-documentation lives on `WorldStressCfg` in `emboviz/config.py`.
+apply only to `cosmos3`; `profile` only to `ctrlworld`;
+`scene_swap.replace_query` (SDXL object insertion) is likewise cosmos3-only —
+the ctrlworld backend supports removal. A ctrlworld checkpoint's region
+vocabulary, chunk quantum, and native rate come from its profile, so those
+checks run in the dream driver (before any worker spawns) rather than in the
+host schema. Field-level documentation lives on `WorldStressCfg` in
+`emboviz/config.py` and on `CtrlWorldProfile` in
+`emboviz_ctrlworld/profiles.py`.

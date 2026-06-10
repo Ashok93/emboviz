@@ -193,6 +193,7 @@ def main() -> None:
         })
         editor = CosmosImageEditor(cs.server_url)
         regions = ("wrist", "exterior_left", "exterior_right")
+        region_cameras = dict(cs.concat_cameras)   # validated + defaulted by the config schema
         split_view = split_concat_view
         dream_stride = 1   # one Cosmos frame per control step
 
@@ -216,34 +217,52 @@ def main() -> None:
 
     else:  # ctrlworld
         from emboviz_ctrlworld.dream_step import CtrlWorldDreamStepper
-        from emboviz_ctrlworld.model import NATIVE_FPS
+        from emboviz_ctrlworld.profiles import check_stress_compat, resolve_profile
         from emboviz_ctrlworld.stack_view import build_stack_view, split_stack_view
 
+        # The checkpoint profile carries the region vocabulary, chunk quantum,
+        # and native rate, so its compatibility checks run here (before any
+        # worker spawns) rather than in the host config schema. A file-based
+        # profile is absolutized so the worker (whose cwd differs) resolves
+        # the same file.
+        profile_ref = cs.profile
+        profile_path = Path(cs.profile).expanduser()
+        if profile_path.suffix == ".json" or profile_path.is_file():
+            profile_ref = str(profile_path.resolve())
+        profile = resolve_profile(profile_ref)
+        try:
+            region_cameras = check_stress_compat(
+                profile,
+                camera_map=cs.camera_map,
+                concat_cameras=cs.concat_cameras,
+                n_actions=cs.n_actions,
+                control_hz=cs.control_hz,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(f"[dream] ctrl-world profile '{profile.name}': {profile.description}")
+
         wm = connect_world_model("ctrlworld", world_model_kwargs={
+            "profile": profile_ref,
             "conditioning_camera": cs.conditioning_camera,
         })
-        regions = ("exterior_1", "exterior_2", "wrist")
-        split_view = split_stack_view
-        # Ctrl-World dreams at its 5 Hz native rate; one dreamed frame spans
-        # control_hz / 5 recorded frames (3 for DROID's 15 Hz).
-        stride = cs.control_hz / NATIVE_FPS
-        if abs(stride - round(stride)) > 1e-9 or round(stride) < 1:
-            raise SystemExit(
-                f"stress.control_hz ({cs.control_hz:g}) must be a positive integer "
-                f"multiple of Ctrl-World's {NATIVE_FPS:g} Hz native rate."
-            )
-        dream_stride = int(round(stride))
+        regions = profile.views
+        # One dreamed frame spans control_hz / native_fps recorded frames
+        # (3 for the droid profile's 5 Hz against DROID's 15 Hz).
+        dream_stride = int(round(cs.control_hz / profile.native_fps))
+
+        def split_view(stack: np.ndarray) -> dict[str, np.ndarray]:
+            return split_stack_view(stack, views=profile.views)
 
         def build_seed(images_by_region: dict[str, np.ndarray]) -> np.ndarray:
             return build_stack_view(
-                images_by_region["exterior_1"],
-                images_by_region["exterior_2"],
-                images_by_region["wrist"],
+                images_by_region, views=profile.views, view_hw=profile.view_hw
             )
 
         def stepper_for(seed_index: int) -> CtrlWorldDreamStepper:
             return CtrlWorldDreamStepper(
                 policy.client.predict,
+                profile=profile,
                 tracker=tracker_for(seed_index),
                 camera_map=cs.camera_map,
                 instruction=real.frames[seed_index].instruction,
@@ -325,7 +344,7 @@ def main() -> None:
 
     def seed_view(seed_index: int) -> np.ndarray:
         frame = real.frames[seed_index]
-        return build_seed({r: _img(frame, cs.concat_cameras[r]) for r in regions})
+        return build_seed({r: _img(frame, region_cameras[r]) for r in regions})
 
     def on_step(i: int, traj) -> None:
         print(f"    step {i}: {len(traj.frames)} frame(s) committed", flush=True)
@@ -359,7 +378,7 @@ def main() -> None:
             for i in range(n_frames)
             if seed_index + (i + 1) * dream_stride < len(real.frames)
         ]
-        return {region: frames_to_arrays(window, cs.concat_cameras[region]) for region in regions}
+        return {region: frames_to_arrays(window, region_cameras[region]) for region in regions}
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -376,7 +395,7 @@ def main() -> None:
         frame = real.frames[seed_index]
 
         baseline_seed = seed_view(seed_index)
-        swap = swapper.swap(frame, cs.concat_cameras)
+        swap = swapper.swap(frame, region_cameras)
         print(f"  [swap] frame {kf.index}: {swap.summary()}")
         swapped_seed = build_seed(swap.images_by_region)
 
