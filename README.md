@@ -47,9 +47,8 @@ Short and full names are both accepted: `memorization`, `modality`,
 
 ## Stress-test — how the policy holds up in worlds it never saw
 
-> **Preview.** The world-model stress test is experimental and needs a running
-> Cosmos world-model server; the **Inspect** diagnostics above are the stable
-> path and need none.
+> **Preview.** The world-model stress test is experimental; the **Inspect**
+> diagnostics above are the stable path.
 
 Real-world evaluation is the bottleneck in robot learning — every trial costs a
 reset, a human, and time, and a clean demo proves nothing about the edge cases.
@@ -70,20 +69,30 @@ flies the policy from there. You watch the recorded episode, the unperturbed
 dream, and the counterfactual dream **side by side on one timeline** in Rerun, so
 you can see whether the policy adapts or falls back on a memorized motion.
 
+Two world-model backends are wired (`stress.world_model` in the config):
+
+| Backend | Conditioning | Horizon | Runs |
+|---|---|---|---|
+| **`ctrlworld`** ([Ctrl-World](https://arxiv.org/abs/2510.10125), ICLR 2026) | 3 DROID cameras jointly + pose-anchored sparse history | coherent past 20 s | locally on the GPU (1.5B, bf16) |
+| **`cosmos3`** ([Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano)) | single frame per chunk | ~1–2 re-conditioning cycles | separate vLLM-Omni server |
+
 A world model is only faithful for a bounded horizon, so the dream is seeded at
-the decisive moment and kept short, and the run surfaces per-camera, per-step
+the decisive moment and bounded, and the run surfaces per-camera, per-step
 detail (including which cameras the edit was applied to) so a partial swap is
 never presented as a full one.
 
 ```bash
+uv sync --extra ctrlworld --extra pi0 --extra robot
+
 uv run python -m emboviz.world_models.dream_cli \
-    --config configs/cosmos_droid_pi0_demo.yaml --episode 312 \
+    --config configs/ctrlworld_droid_pi0_demo.yaml --episode 312 \
     --keyframe-kinds gripper_change --near-frame 60
 ```
 
 The stress test currently drives the **π0-DROID** policy
-(`configs/cosmos_droid_pi0_demo.yaml`); it is the only adapter wired to the
-Cosmos DROID conditioning. The Inspect diagnostics support every adapter below.
+(`configs/ctrlworld_droid_pi0_demo.yaml`, or `configs/cosmos_droid_pi0_demo.yaml`
+for the Cosmos backend); it is the only adapter wired to the DROID conditioning.
+The Inspect diagnostics support every adapter below.
 
 ---
 

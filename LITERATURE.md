@@ -1263,3 +1263,84 @@ directly (`tests/test_joint_bridge.py`).
   8-D `[joint_delta(7), gripper(1)]` DROID action space and the delta mask.
 - Virtanen, P. et al. 2020. **SciPy** (`Rotation`) — extrinsic-XYZ Euler
   conversion, matching DROID's and Cosmos's convention.
+
+
+## 10. Ctrl-World backend — pose-anchored multi-view world model
+
+### Question being answered
+*Can the closed-loop stress test (§8) hold a usable horizon?* Cosmos3 forward
+dynamics conditions each chunk on a single frame, so the autoregressive loop
+accumulates error within one or two re-conditioning cycles regardless of the
+policy. Ctrl-World restructures the conditioning — all three DROID cameras
+predicted jointly, plus a sparse history of pose-tagged frames — and reports
+coherent policy-in-the-loop rollouts past 20 seconds on DROID, validated
+against paired real-robot rollouts (instruction-following agreement 0.80 vs
+0.90 real for π0.5 pick-place).
+
+### Method
+The `emboviz-ctrlworld` worker runs the released DROID checkpoint (an SVD
+fine-tune, 1.5B) locally and exposes it behind the `WorldModel` contract. The
+conditioning contract is taken from the reference implementation (vendored,
+with per-file provenance in `emboviz_ctrlworld/_ctrl_world/README.md`), not
+re-derived:
+
+- **Latent stack** — each 320x192 view is VAE-encoded separately and stacked
+  along the latent height in the order `[exterior_1, exterior_2, wrist]`
+  (`dataset_droid_exp33.py` lines 183-186); the wire carries the equivalent
+  320x576 pixel stack.
+- **Actions** — absolute `[cartesian_position(6), gripper(1)]` per frame at
+  5 Hz (DROID's 15 Hz / 3), min-max normalized to [-1, 1] with the dataset's
+  1st/99th-percentile bounds (`dataset_droid_exp33.py` lines 190-193; bounds
+  vendored verbatim).
+- **History** — 6 latents + poses selected at `history_idx = [0, 0, -12, -9,
+  -6, -3]` over a buffer holding the seed plus one anchor per turn, clamped to
+  the seed early on — equivalent to the reference buffer pre-filled with the
+  first frame (`rollout_interact_pi.py` lines 336-341).
+- **Latent re-feed** — generated frames carry their latents across the wire
+  (`Scene.metadata["ctrlworld_latent"]`), so conditioning never round-trips
+  through VAE decode→re-encode; the reference keeps `his_cond` in latent space
+  for the same reason.
+- **Rate bridging** — π0-DROID's 15 Hz joint-velocity chunk is integrated
+  (`emboviz_wire.policy_bridge`, §9 forward kinematics) and sampled every 3rd
+  control step. A 4-frame turn spans 12 control steps; π0's 10-row horizon is
+  zero-order-hold extended for the last 2, the reference rollout's index
+  padding for the pi0 policy (`rollout_interact_pi.py` line 254).
+
+One deliberate deviation from the reference *rollout script* (not the model):
+`models/utils.py::get_fk_solution` computes a TCP-frame pose (flange + the
+-45° hand rotation + 0.1034 m), which does not match the
+`observation.state.cartesian_position` convention the model was trained on.
+The adapter conditions on the training convention via the §9 Pinocchio FK,
+which reproduces DROID's recorded `cartesian_position` exactly.
+
+### Validation
+- The training pose convention was verified against the reference's own data:
+  FK truncated at `panda_link8` reproduces the `states` arrays in the shipped
+  DROID annotations to 4 decimals, while the reference rollout's TCP chain
+  does not (`dataset_example/droid_subset/annotation/val/199.json`).
+- The history selection is tested against an explicit emulation of the
+  reference's pre-filled buffer for every length
+  (`tests/test_model_helpers.py`); the rate bridging and ZOH extension against
+  hand-computed integrals (`tests/test_dream_step.py`).
+- The dream is judged the same way as the Cosmos backend: side-by-side against
+  the recorded episode in Rerun, with per-clip disclosure of the edit status
+  and conditioning settings. Ctrl-World's own limitation applies and is
+  surfaced rather than hidden: the paper reports it *underestimates low-level
+  success on contact-rich physics* while tracking instruction-following well —
+  verdicts about contact outcomes carry less weight than verdicts about what
+  the policy attempted.
+
+### Citations
+- Guo, Y., Shi, L. X., Chen, J., Finn, C. 2025. **Ctrl-World: A Controllable
+  Generative World Model for Robot Manipulation** (arXiv:2510.10125, ICLR
+  2026). Architecture, history schedule, rollout protocol, real-robot
+  correlation; reference implementation github.com/Robert-gyj/Ctrl-World
+  (MIT), vendored at commit `99fb206`.
+- Guo, Y. et al. 2026. **VLAW: Iterative co-improvement of vision-language-
+  action policy and world model** (arXiv:2602.12063) — the post-training
+  recipe the same repo ships for down-stream tasks.
+- Blattmann, A. et al. 2023. **Stable Video Diffusion: Scaling Latent Video
+  Diffusion Models to Large Datasets** (arXiv:2311.15127). The base model;
+  the micro-conditioning (`fps`, `motion_bucket_id`) the checkpoint fixes.
+- Khazatsky, A. et al. 2024. **DROID** (arXiv:2403.12945). The training data
+  and the `cartesian_position` / `gripper_position` conventions (§9).

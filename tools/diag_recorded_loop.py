@@ -48,7 +48,7 @@ def main() -> None:
     args = p.parse_args()
 
     cfg = load_run_config(args.config)
-    cs = cfg.analysis.cosmos_stress
+    cs = cfg.analysis.stress
     episode = args.episode if args.episode is not None else int(str(cfg.analysis.episodes).split(",")[0])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

@@ -128,10 +128,28 @@ emboviz/                 emboviz core — the lean engine (no torch, no lerobot)
   cli/             analyze · list-adapters · install-<name>
 
 adapters/                plug-in workers — one venv each
-  emboviz-wire     shared interfaces + types + wire plumbing
+  emboviz-wire     shared interfaces + types + wire plumbing + the policy bridge
   emboviz-openvla · emboviz-oft · emboviz-pi0 · emboviz-gr00t   model workers
   emboviz-act · emboviz-smolvla   lerobot-policy model workers
   emboviz-sam3     text→mask detector worker
   emboviz-lama     LaMa inpainting fill worker (on-manifold memorization fill)
   emboviz-lerobot · emboviz-reader-gr00t   dataset readers
+  emboviz-ctrlworld · emboviz-cosmos3   world-model workers (stress test)
+  emboviz-robot    forward kinematics (in-process, injected into the drivers)
 ```
+
+## World models
+
+A third worker contract, **`WorldModel`** (`emboviz_wire/world_model_protocol.py`),
+backs the closed-loop stress test: given a conditioning frame and a sequence of
+actions, predict the future frames. World-model packages register through the
+`emboviz.world_models` entry-point group and use the same venv/spawn machinery
+as model adapters. Two backends ship: `emboviz-ctrlworld` loads its checkpoint
+locally on the GPU and additionally conditions on pose-anchored history (it
+declares `conditions_on_history`, and the closed-loop driver passes the
+rollout's anchor frames on every call); `emboviz-cosmos3` is a GPU-free HTTP
+client to a separate vLLM-Omni server. The model-agnostic policy bridge —
+integrating a policy's action chunk into the Cartesian state sequence a world
+model conditions on, under a declared action convention — lives in
+`emboviz_wire/policy_bridge.py`; each adapter owns only its model-specific
+action encoding.

@@ -44,7 +44,7 @@ class _MockWM(WorldModel):
     def supported_domains(self) -> frozenset:
         return frozenset({"mock"})
 
-    def rollout(self, init, actions, *, num_frames=None) -> Trajectory:
+    def rollout(self, init, actions, *, history=None, num_frames=None) -> Trajectory:
         self._step += 1
         color = min(self._step * 40, 240)
         n = len(np.asarray(actions))
@@ -83,7 +83,7 @@ class _IndexedWM(_MockWM):
     green channel, so a test can tell which dreamed frame the loop committed and
     carried forward."""
 
-    def rollout(self, init, actions, *, num_frames=None) -> Trajectory:
+    def rollout(self, init, actions, *, history=None, num_frames=None) -> Trajectory:
         self._step += 1
         color = min(self._step * 40, 240)
         n = len(np.asarray(actions))
@@ -138,6 +138,52 @@ def test_execute_steps_cannot_exceed_dreamed_frames() -> None:
         raise AssertionError("expected RuntimeError when execute_steps exceeds dreamed frames")
 
 
+class _HistoryWM(_MockWM):
+    """Declares ``conditions_on_history`` and records the history each call sees,
+    so a test can verify the loop accumulates [seed, committed-frame-per-turn]."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_history_lengths: list[int] = []
+        self.seen_init_states: list = []
+
+    @property
+    def conditions_on_history(self) -> bool:
+        return True
+
+    def rollout(self, init, actions, *, history=None, num_frames=None) -> Trajectory:
+        assert history is not None, "loop must pass history to a history-conditioned model"
+        self.seen_history_lengths.append(len(history.frames))
+        self.seen_init_states.append(init.observations.state)
+        return super().rollout(init, actions, history=history, num_frames=num_frames)
+
+
+def test_history_conditioned_loop_accumulates_anchors() -> None:
+    wm = _HistoryWM()
+    seed = np.zeros((6, 6, 3), np.uint8)
+    closed_loop_rollout(
+        wm, seed, lambda im: np.zeros((4, 1), np.float32), n_steps=3,
+        seed_state=np.arange(6, dtype=np.float32), seed_gripper=0.5,
+    )
+    # Turn t sees the seed plus one committed anchor per earlier turn.
+    assert wm.seen_history_lengths == [1, 2, 3]
+    # The seed conditioning scene carries the pose the caller supplied.
+    assert wm.seen_init_states[0] is not None
+    assert wm.seen_init_states[0].convention == "ee_pose"
+
+
+def test_history_conditioned_loop_requires_seed_pose() -> None:
+    try:
+        closed_loop_rollout(
+            _HistoryWM(), np.zeros((6, 6, 3), np.uint8),
+            lambda im: np.zeros((4, 1), np.float32), n_steps=1,
+        )
+    except ValueError as e:
+        assert "seed_state" in str(e)
+    else:
+        raise AssertionError("expected ValueError when seed pose is missing")
+
+
 def test_rejects_empty_actions_and_bad_seed() -> None:
     try:
         closed_loop_rollout(_MockWM(), np.zeros((4, 4, 3), np.uint8),
@@ -160,6 +206,8 @@ def _run_all() -> None:
     test_loop_carries_frame_forward_and_accumulates()
     test_execute_steps_commits_prefix_and_carries_committed_frame()
     test_execute_steps_cannot_exceed_dreamed_frames()
+    test_history_conditioned_loop_accumulates_anchors()
+    test_history_conditioned_loop_requires_seed_pose()
     test_rejects_empty_actions_and_bad_seed()
     print("OK: all closed-loop simulator checks passed")
 

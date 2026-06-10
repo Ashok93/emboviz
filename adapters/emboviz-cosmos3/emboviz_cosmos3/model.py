@@ -199,8 +199,15 @@ class Cosmos3WorldModel(WorldModel):
         init: Scene,
         actions: np.ndarray,
         *,
+        history: Optional[Trajectory] = None,
         num_frames: Optional[int] = None,
     ) -> Trajectory:
+        if history is not None:
+            raise ValueError(
+                "cosmos3 forward dynamics conditions on a single frame; it cannot "
+                "condition on history. Drop the history argument (the closed-loop "
+                "driver passes it only to models whose conditions_on_history is True)."
+            )
         actions = np.asarray(actions, dtype=np.float32)
         reason = self.validate_rollout(init, actions)
         if reason is not None:

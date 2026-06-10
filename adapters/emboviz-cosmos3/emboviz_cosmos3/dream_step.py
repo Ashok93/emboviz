@@ -8,10 +8,10 @@ integrating those actions. The next world-model step conditions on the dream thi
 produced.
 
 State is tracked, not observed: Cosmos dreams pixels, not proprioception. The
-:class:`emboviz_cosmos3.bridge.StateTracker` maintains it — a Cartesian tracker
-follows the end-effector pose, a joint tracker follows the joint vector and
-forward-kinematics it. This object is stateful by design: one instance per clip,
-called once per loop step.
+:class:`emboviz_wire.policy_bridge.StateTracker` maintains it — a Cartesian
+tracker follows the end-effector pose, a joint tracker follows the joint vector
+and forward-kinematics it. This object is stateful by design: one instance per
+clip, called once per loop step.
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ from typing import Callable, Optional
 import numpy as np
 
 from emboviz_wire.observations import RGBImage
+from emboviz_wire.policy_bridge import StateTracker
 from emboviz_wire.types import Observations, Scene
 
-from emboviz_cosmos3.bridge import StateTracker
 from emboviz_cosmos3.concat_view import ConcatRegion, split_concat_view
+from emboviz_cosmos3.domains import encode_droid_states
 
 _VALID_REGIONS = {"wrist", "exterior_left", "exterior_right"}
 
@@ -136,7 +137,13 @@ class PolicyDreamStepper:
                 f"n_actions={self._n_actions}."
             )
 
-        cosmos_actions = self._tracker.to_cosmos(chunk, self._n_actions, self._execute_steps)
+        # Encode the FULL prediction horizon as conditioning (the dream renders
+        # the whole chunk), then advance the tracked state only by the committed
+        # steps (receding horizon) so next turn's proprioception matches the
+        # committed frame.
+        states, grippers = self._tracker.integrate(chunk, self._n_actions)
+        cosmos_actions = encode_droid_states(states, grippers)
+        self._tracker.advance(chunk, self.execute_steps)
         self.steps_taken += 1
         return cosmos_actions
 

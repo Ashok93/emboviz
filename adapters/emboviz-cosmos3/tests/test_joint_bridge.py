@@ -22,11 +22,12 @@ from scipy.spatial.transform import Rotation as R
 
 from emboviz_robot import load_kinematics
 
-from emboviz_cosmos3.bridge import (
+from emboviz_wire.policy_bridge import (
     JointStateTracker,
     integrate_joint_chunk,
     make_state_tracker,
 )
+
 from emboviz_cosmos3.domains import encode_droid_states
 
 # Six consecutive frames of DAVIAN-Robotics/droid_v3 episode 312.
@@ -76,7 +77,7 @@ def test_integrate_joint_chunk_reproduces_recorded_states() -> None:
     assert grippers.shape == (5,)
 
 
-def test_joint_tracker_to_cosmos_and_factory() -> None:
+def test_joint_tracker_integrate_encode_and_factory() -> None:
     kin = load_kinematics("franka_panda")
     # control_hz=1 -> dt=1 so the recorded per-step position deltas recover the
     # logged configs (the velocity scaling is locked in its own test below).
@@ -89,7 +90,9 @@ def test_joint_tracker_to_cosmos_and_factory() -> None:
 
     deltas = np.diff(np.array(_JOINTS), axis=0)
     chunk = np.concatenate([deltas, np.full((5, 1), 0.5, np.float32)], axis=1)
-    cosmos = tracker.to_cosmos(chunk, n_actions=5)
+    states, grippers = tracker.integrate(chunk, n_steps=5)
+    cosmos = encode_droid_states(states, grippers)
+    tracker.advance(chunk, n_steps=5)
     assert cosmos.shape == (5, 10)                       # Cosmos droid_lerobot conditioning
     assert np.allclose(tracker.joints, _JOINTS[-1], atol=1e-6)   # advanced to the last config
 
@@ -152,7 +155,7 @@ def test_factory_rejects_mismatched_robot_and_convention() -> None:
 
 def _run_all() -> None:
     test_integrate_joint_chunk_reproduces_recorded_states()
-    test_joint_tracker_to_cosmos_and_factory()
+    test_joint_tracker_integrate_encode_and_factory()
     test_joint_path_matches_recorded_cartesian_encoder()
     test_joint_velocity_scaled_by_control_dt()
     test_factory_rejects_mismatched_robot_and_convention()

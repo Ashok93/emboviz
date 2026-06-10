@@ -313,19 +313,22 @@ class WorldModelHandler:
     def _static_metadata(self, _: dict) -> dict:
         m = self._m
         return {
-            "model_id":            str(m.model_id),
-            "capabilities":        int(m.capabilities.value),
-            "action_dim":          int(m.action_dim),
-            "supported_domains":   sorted(m.supported_domains),
-            "conditioning_camera": str(m.conditioning_camera),
+            "model_id":              str(m.model_id),
+            "capabilities":          int(m.capabilities.value),
+            "action_dim":            int(m.action_dim),
+            "supported_domains":     sorted(m.supported_domains),
+            "conditioning_camera":   str(m.conditioning_camera),
+            "conditions_on_history": bool(m.conditions_on_history),
         }
 
     def _rollout(self, args: dict) -> dict:
         init = wire.decode_scene(args["init"])
         actions = np.asarray(args["actions"])
+        history = args.get("history")
+        history = None if history is None else wire.decode_trajectory(history)
         num_frames = args.get("num_frames")
         num_frames = None if num_frames is None else int(num_frames)
-        traj = self._m.rollout(init, actions, num_frames=num_frames)
+        traj = self._m.rollout(init, actions, history=history, num_frames=num_frames)
         return wire.encode_trajectory(traj)
 
     def _prepare_actions(self, args: dict) -> np.ndarray:

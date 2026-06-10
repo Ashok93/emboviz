@@ -41,7 +41,8 @@ analysis:
   frame_stride: 1
   diagnostics: [attention]                   # unused by the dream driver; a valid value is required
 
-  cosmos_stress:
+  stress:
+    world_model: cosmos3
     server_url: https://YOUR-COSMOS-POD-8000.proxy.runpod.net  # the running Cosmos3 world-model server
     domain: droid_lerobot
     action_dim: 10
