@@ -1322,6 +1322,13 @@ which reproduces DROID's recorded `cartesian_position` exactly.
   reference's pre-filled buffer for every length
   (`tests/test_model_helpers.py`); the rate bridging and ZOH extension against
   hand-computed integrals (`tests/test_dream_step.py`).
+- Closed-loop validation (A40, 2026-06): π0-DROID flown on four DROID episodes
+  spanning rigid pick-place, cloth folding, articulated fine manipulation, and
+  a thin deformable object (the shipped `ctrlworld_droid_pi0_*` configs) —
+  eight 12-second dreams, no pipeline failures, ~10 s per 4-frame turn at 50
+  denoise steps. Observed failure modes match the paper's: object permanence
+  after release degrades first, cloth contact is the weakest case, rigid fine
+  manipulation renders best.
 - The dream is judged the same way as the Cosmos backend: side-by-side against
   the recorded episode in Rerun, with per-clip disclosure of the edit status
   and conditioning settings. Ctrl-World's own limitation applies and is
